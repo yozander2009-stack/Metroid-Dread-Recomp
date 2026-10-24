@@ -715,6 +715,9 @@ static void trace_main_call(KThread*t,CPU*c,u32 svc,u64 caller,u64 start,u64 obj
   u64 fp=c->x[29];for(int k=0;k<8&&fp;k++){MemBlock b;mem_query(fp,&b);if(!(b.perm&PERM_R)||fp<b.addr||fp+16>b.addr+b.size)break;u64 next=gr64(fp),ret=gr64(fp+8);LOG("main stall: stack[%d]=%llx\n",k,(unsigned long long)ret);if(next<=fp)break;fp=next;}
 }
 void swr_svc(CPU* c, u32 imm){
+#ifdef __ANDROID__
+  { extern void android_wait_active(void); android_wait_active(); }
+#endif
   u64 a0=c->x[0],a1=c->x[1],a2=c->x[2];
   u64 a3=c->x[3];
   KThread* ct=c->thread;

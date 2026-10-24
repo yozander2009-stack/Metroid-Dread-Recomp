@@ -19,6 +19,13 @@ release/
 shader_cache/
 vulkan_native/
 
+android/build/
+android/local/
+android/*.apk
+android/*.apk.idsig
+android/*.keystore
+android/headers/
+
 # never commit binaries, archives or game files
 *.exe
 *.dll

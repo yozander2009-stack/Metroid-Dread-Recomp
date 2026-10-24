@@ -131,6 +131,16 @@ static void rt_undef(CPU* c, u64 pc, u32 w){
 
 static void rt_brk(CPU* c, u64 pc, u32 imm){ WARN("\nBRK #%u at %llx\n",imm,(unsigned long long)pc); c->pc=pc; kernel_dump_regs(c); save_hints(); fatal("The game executed BRK at %llx",(unsigned long long)pc); }
 static u64 g_t0;
+#ifdef __ANDROID__
+extern void android_wait_active(void);
+extern u64 android_clock_ns(void), android_clock_ticks(void);
+#define GAME_CLOCK_NS() android_clock_ns()
+#define GAME_CLOCK_TICKS() android_clock_ticks()
+#else
+#define GAME_CLOCK_NS() plat_ns()
+#define GAME_CLOCK_TICKS() plat_ticks_raw()
+#endif
+
 
 u64 g_t0_ns(void){ return g_t0; }
 /* guest clock. Normally == real time. In smooth recording mode (F7) it runs slower than real time so that
@@ -148,7 +158,7 @@ static u64 guest_ns_raw(u64 r){ return g_vt_av+(u64)((double)(r-g_vt_ar)*g_vt_s)
    offset so the clock never steps back when it is switched on or off. Unused until switched on. */
 static volatile int g_ff_used; static double g_ff_s=1.0; static u64 g_ff_r0, g_ff_off; static PMutex g_ff_m;
 static u64 ff_off(u64 r){ return g_ff_s>1.0? g_ff_off+(u64)((double)(r-g_ff_r0)*(g_ff_s-1.0)) : g_ff_off; }
-static void ff_set(double s){ static int mi; if(!mi){ pm_init(&g_ff_m); mi=1; } u64 r=plat_ns()-g_t0;
+static void ff_set(double s){ static int mi; if(!mi){ pm_init(&g_ff_m); mi=1; } u64 r=GAME_CLOCK_NS()-g_t0;
   pm_lock(&g_ff_m); g_ff_off=ff_off(r); g_ff_r0=r; g_ff_s=s; g_ff_used=1; pm_unlock(&g_ff_m); }
 volatile int g_ff_presses;   /* Tab presses (backend) */
 static void ff_poll(void){ static double cur=1.0; static int on, seen, pad_prev; double want=1.0;
@@ -163,7 +173,7 @@ static void ff_poll(void){ static double cur=1.0; static int on, seen, pad_prev;
     { extern void backend_ff_status(int,int); backend_ff_status(want>1.0,(int)want); } } }
 
 u64 guest_ns(void){
-  u64 r=plat_ns()-g_t0, v;
+  u64 r=GAME_CLOCK_NS()-g_t0, v;
   if(!g_vt_mi){ v=r; if(g_ff_used){ pm_lock(&g_ff_m); v=r+ff_off(r); pm_unlock(&g_ff_m); } } else { pm_lock(&g_vt_m); v=guest_ns_raw(r); pm_unlock(&g_vt_m); }
   u64 m=__atomic_load_n(&g_vt_max,__ATOMIC_RELAXED);
   while(v>m){ if(__atomic_compare_exchange_n(&g_vt_max,&m,v,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) return v; }
@@ -173,7 +183,7 @@ static void vt_rebase(u64 r, double s){ g_vt_av=guest_ns_raw(r); g_vt_ar=r; g_vt
 
 static void vt_frame(void){
   if(!g_vt_mi) return;
-  u64 r=plat_ns()-g_t0; pm_lock(&g_vt_m);
+  u64 r=GAME_CLOCK_NS()-g_t0; pm_lock(&g_vt_m);
   /* cost per frame = GPU thread busy time. don't use full frame time, the game's own waits
      would feed back and slow the clock further */
   { extern u64 gpu_busy_ns(void); u64 b=gpu_busy_ns(); static u64 lb;
@@ -186,8 +196,8 @@ static void vt_frame(void){
   vt_rebase(r,s); pm_unlock(&g_vt_m); }
 
 void vt_set(int on){
-  if(!g_vt_mi){ pm_init(&g_vt_m); u64 r=plat_ns()-g_t0; g_vt_ar=r; g_vt_av=r; g_vt_s=1.0; g_vt_mi=1; }
-  pm_lock(&g_vt_m); vt_rebase(plat_ns()-g_t0,1.0); g_vt_fr=0; g_vt_lastfr=0; pm_unlock(&g_vt_m);
+  if(!g_vt_mi){ pm_init(&g_vt_m); u64 r=GAME_CLOCK_NS()-g_t0; g_vt_ar=r; g_vt_av=r; g_vt_s=1.0; g_vt_mi=1; }
+  pm_lock(&g_vt_m); vt_rebase(GAME_CLOCK_NS()-g_t0,1.0); g_vt_fr=0; g_vt_lastfr=0; pm_unlock(&g_vt_m);
   g_vt_on= on && g_opt_rec_smooth; }
 
 /* vsync ticks on guest time */
@@ -202,7 +212,10 @@ u64 g_t0_ticks;   /* tick-domain counterpart of g_t0, taken right after it */
    which the game's busy-wait frame limiter hammers) and a second double multiply. Same epoch, same
    19.2 MHz rate, same truncation. The F7 smooth-recording clock (g_vt_mi) keeps the old path. */
 static u64 rt_ticks(void){
-  u64 value= LIKELY(!g_vt_mi && !g_ff_used)? plat_ticks_raw()-g_t0_ticks : (u64)((double)guest_ns()*0.0192);
+#ifdef __ANDROID__
+  android_wait_active();
+#endif
+  u64 value= LIKELY(!g_vt_mi && !g_ff_used)? GAME_CLOCK_TICKS()-g_t0_ticks : (u64)((double)guest_ns()*0.0192);
   /* Observation only: layout resolved from F_8085CB8 in this game's C.
      No clock changes or sleeps; validate mapped storage before reading. */
   {static int checked;static FILE*f;static int frame=-1;static u64 polls;
@@ -341,8 +354,8 @@ static void ini_apply(const char* k, const char* v){
 #endif
     else if(!strcmp(k,"anisotropy")){ g_opt_aniso=atoi(v); if(g_opt_aniso<0) g_opt_aniso=0; if(g_opt_aniso>16) g_opt_aniso=16; }
     else if(!strcmp(k,"ultrawide")){ extern int g_opt_ultrawide; if(!aspect_given) g_opt_ultrawide=atoi(v); }   /* loader.c: theboy181's 21:9 patch */
-    else if(!strcmp(k,"aspect") && *v){ extern int g_opt_ultrawide;   /* aspect=16:9|21:9|16:10; overrides ultrawide= in any order */
-      aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : 0; }
+    else if(!strcmp(k,"aspect") && *v){ extern int g_opt_ultrawide;   /* overrides ultrawide= in any order */
+      aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : !strcmp(v,"4:3")? 3 : 0; }
     else if(!strcmp(k,"dlss")){ extern int snxvk_dlss_mode; snxvk_dlss_mode=atoi(v); }   /* native Vulkan: snxvk dlss.c; OpenGL: dlss_gl.c + gpu_gl.c dlg_* */
     else if(!strcmp(k,"texture_threads")){ g_opt_tex_threads=atoi(v); if(g_opt_tex_threads<0) g_opt_tex_threads=0; if(g_opt_tex_threads>16) g_opt_tex_threads=16; }
     else if(!strcmp(k,"fast_forward")) g_opt_ff=atoi(v);
@@ -366,7 +379,7 @@ typedef struct { const char* title; const IniOpt* o; } IniSec;
 static const IniOpt INI_DISPLAY[]={
   {"docked","0","1 = TV mode (1920x1080 / 1600x900 games), 0 = handheld mode (1280x720)"},
   {"fullscreen","1","1 = start in fullscreen (F11 or Alt+Enter toggles it in game)"},
-  {"aspect","","Picture shape (docked mode): 16:9, 21:9 (= ultrawide=1) or 16:10 (1440x900 base, fills a Steam Deck\n;   1280x800 or a 1920x1200 screen). Empty = use ultrawide=; when set it overrides ultrawide="},
+  {"aspect","","Picture shape (docked mode, restart required): 16:9, 21:9, 16:10 (1440x900), or 4:3 (1200x900).\n;   Empty = use ultrawide=; when set it overrides ultrawide="},
   {"ultrawide","0","1 = 21:9 picture for ultrawide monitors (theboy181's 21:9 patch for Dread v2.1.0,\n;   github.com/theboy181/switch-ptchtxt-mods; minor cut-offs in videos and some menus). 0 = 16:9"},
   {"language","1","Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 9 Portuguese, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"},
   {NULL,NULL,NULL}};
@@ -811,7 +824,7 @@ int swr_main(int argc, char** argv){
   snprintf(g_hints_path,sizeof g_hints_path,"%s%s.hints",g_exedir,g_exename);
   pm_init(&g_hint_lock); pm_init(&g_flock);
   plat_install_crash_handler();
-  g_t0=plat_ns(); g_t0_ticks=plat_ticks_raw();
+  g_t0=GAME_CLOCK_NS(); g_t0_ticks=GAME_CLOCK_TICKS();
   g_present_pacing_candidate=!getenv("SWR_NO_PRESENT_PACING")&&(getenv("SWR_PRESENT_PACING")!=NULL||!strcmp(g_exename,"Metroid Dread"));
   LOG("%s (recompiled; SwitchRecomp runtime by MZ Labs)\n",g_exename); LOG("settings: startup fps_limit=%d, forced_vsync=%d\n",g_opt_fps,g_opt_vsync);
   if(load_code()) fatal("Could not load the game's recompiled code.");
@@ -833,7 +846,11 @@ int swr_main(int argc, char** argv){
   /* 60Hz frontend loop */
   u64 next=plat_ns(); int tick=0;
   while(!g_quit){
-    video_poll(); hid_update(); vsync_tick_vt(); frametimer_poll(); ff_poll(); settings_test_hook(); settings_drain();
+    video_poll();
+#ifdef __ANDROID__
+    { extern int android_is_paused(void); if(android_is_paused()){ plat_sleep_ns(16666667); next=plat_ns(); continue; } }
+#endif
+    hid_update(); vsync_tick_vt(); frametimer_poll(); ff_poll(); settings_test_hook(); settings_drain();
     if(tick%60==0) ini_poll();
     { extern void kernel_heal_mutexes(void); kernel_heal_mutexes(); }
     /* bail out of the slow clock if nothing was presented for 3s */

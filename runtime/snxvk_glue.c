@@ -15,8 +15,23 @@ int g_snxvk_want;   /* renderer=vulkan_native in the .ini (backend_ini) */
 int g_snxvk_on;     /* the Vulkan renderer started: submissions and presents go to it */
 int snxvk_dlss_mode;   /* ini dlss: 0 off, 1 DLAA, 2 quality, 3 balanced, 4 performance (native Vulkan only) */
 
-#if defined(SWR_HAVE_SNXVK) && defined(_WIN32)
+#if defined(SWR_HAVE_SNXVK) && (defined(_WIN32) || defined(__ANDROID__))
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
+#define _strdup strdup
+typedef i64 LONG64;
+typedef i32 LONG;
+#define InterlockedIncrement(p) __atomic_add_fetch(p,1,__ATOMIC_SEQ_CST)
+#define InterlockedIncrement64(p) __atomic_add_fetch(p,1,__ATOMIC_SEQ_CST)
+#define InterlockedDecrement(p) __atomic_sub_fetch(p,1,__ATOMIC_SEQ_CST)
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +42,13 @@ char g_cachedir[1024];
 int g_opt_headless;
 int snxvk_opt_vsync=1;      /* their g_opt_vsync: FIFO presentation (ours means "force vsync" for GL) */
 
-int pm_trylock(PMutex* m){ return TryAcquireSRWLockExclusive(&m->l)? 1 : 0; }
+int pm_trylock(PMutex* m){
+#ifdef _WIN32
+  return TryAcquireSRWLockExclusive(&m->l)? 1 : 0;
+#else
+  return pthread_mutex_trylock(&m->l)==0;
+#endif
+}
 
 typedef struct { const u8* data; u64 size; int borrowed; } PFileMap;
 int plat_file_map(PFileMap* m, const char* path){
@@ -37,17 +58,28 @@ int plat_file_map(PFileMap* m, const char* path){
   if(n){ u8* p=malloc((size_t)n); if(!p || fread(p,1,(size_t)n,f)!=(size_t)n){ free(p); fclose(f); return -1; } m->data=p; m->size=(u64)n; }
   fclose(f); return 0; }
 void plat_file_unmap(PFileMap* m){ if(!m->borrowed) free((void*)m->data); memset(m,0,sizeof *m); }
-int plat_replace_file(const char* tmp, const char* dst){ return MoveFileExA(tmp,dst,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)? 0 : -1; }
+int plat_replace_file(const char* tmp, const char* dst){
+#ifdef _WIN32
+  return MoveFileExA(tmp,dst,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)? 0 : -1;
+#else
+  return rename(tmp,dst);
+#endif
+}
 
 extern int g_ww_ok;
 int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)){
+#ifdef _WIN32
   PVOID a[1024]; if(!g_ww_ok) return -1;
   for(u64 it=0, max=size/(4096ull*1024)+2; it<max; it++){
     ULONG_PTR n=1024; ULONG gran=0;
     if(GetWriteWatch(WRITE_WATCH_FLAG_RESET,p,(SIZE_T)size,a,&n,&gran)) return -1;
     for(ULONG_PTR i=0;i<n;i++) cb((u8*)a[i],gran);
     if(n<1024) return 0; }
-  return 1; }
+  return 1;
+#else
+  (void)p; (void)size; (void)cb; return -1; /* renderer compares contents */
+#endif
+}
 
 
 /* no on-screen controls or menu overlay here: an empty list, and a 1x1 clear atlas so the renderer's upload is valid */
@@ -57,6 +89,9 @@ void ui_atlas_done(void){}
 static PMutex g_ui_lk; static int g_ui_lk_init;
 void ui_lock(void){ if(!g_ui_lk_init){ pm_init(&g_ui_lk); g_ui_lk_init=1; } pm_lock(&g_ui_lk); }
 void ui_unlock(void){ pm_unlock(&g_ui_lk); }
+#ifdef __ANDROID__
+#define overlay_draw snxvk_overlay_draw
+#endif
 void overlay_draw(void* l, int sw, int sh){ (void)l; (void)sw; (void)sh; }
 void vpad_draw(void* l, const int safe[4]){ (void)l; (void)safe; }
 
@@ -91,17 +126,28 @@ int vic_gpu_aligned(const void* j){ (void)j; return 0; }   /* their VIC path: ou
 void vic_gpu_params(const void* j, void* p, const u32 in_base[16], u32 oc_base){ (void)j; (void)p; (void)in_base; (void)oc_base; }
 void* vk_nvdec_hw_device(void){ return NULL; }
 int vk_nvdec_write(const void* p){ (void)p; return 0; }
+#ifdef _WIN32
 int plat_cpus(int* ids, int max){ int n=(int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); if(n>max) n=max; for(int i=0;i<n;i++) ids[i]=i; return n; }
 const char* plat_dl_error(void){ static char b[64]; snprintf(b,sizeof b,"error %lu",(unsigned long)GetLastError()); return b; }
 int plat_setenv(const char* name, const char* value){ char b[600]; snprintf(b,sizeof b,"%s=%s",name,value? value : ""); SetEnvironmentVariableA(name,value); return _putenv(b); }
 u32 plat_tid(void){ return (u32)GetCurrentThreadId(); }
+#else
+int plat_cpus(int* ids,int max){ int n=(int)sysconf(_SC_NPROCESSORS_ONLN); if(n>max)n=max; for(int i=0;i<n;i++)ids[i]=i; return n; }
+const char* plat_dl_error(void){ return dlerror(); }
+int plat_setenv(const char* name,const char* value){ return value?setenv(name,value,1):unsetenv(name); }
+u32 plat_tid(void){ return (u32)syscall(SYS_gettid); }
+#endif
 const char* snx_build_commit(void){ return "b5f4f14f2bfc"; }
 const char* snx_build_info(void){ return "ScarletNX renderer b5f4f14f2bfc in the SwitchRecomp runtime"; }
 char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s.exe",g_exedir,g_exename); return _strdup(b); }
 char* snx_format(const char* fmt, ...){ va_list a; va_start(a,fmt); int n=vsnprintf(NULL,0,fmt,a); va_end(a); if(n<0) return NULL;
   char* p=malloc((size_t)n+1); if(!p) return NULL; va_start(a,fmt); vsnprintf(p,(size_t)n+1,fmt,a); va_end(a); return p; }
+#ifdef _WIN32
 char* snx_os_error(char* out, size_t size){ DWORD e=GetLastError(); if(!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,e,0,out,(DWORD)size,NULL)) snprintf(out,size,"error %lu",(unsigned long)e);
   size_t n=strlen(out); while(n && (out[n-1]=='\r'||out[n-1]=='\n'||out[n-1]=='.')) out[--n]=0; return out; }
+#else
+char* snx_os_error(char* out,size_t size){ snprintf(out,size,"%s",strerror(errno)); return out; }
+#endif
 /* ---- the ScarletNX side, renamed */
 typedef struct {   /* mirror of their Renderer (gpu/renderer.h, ScarletNX main b5f4f14f2bfc), same order */
   const char* name; int (*start)(void); void (*mem_may_have_changed)(void);
@@ -132,8 +178,13 @@ void snxvk_ini(const char* v){
   static int set_ww;   /* SWR_WW set here: a later renderer= line that isn't vulkan_native takes it back (the OpenGL
                           path with write tracking on spent ~85% of its thread in GetWriteWatch: 19 FPS) */
   g_snxvk_want= !strcmp(v,"vulkan_native");
+#ifdef _WIN32
   if(g_snxvk_want){ if(!getenv("SWR_WW")){ _putenv("SWR_WW=1"); set_ww=1; } }
-  else if(set_ww){ _putenv("SWR_WW="); set_ww=0; } }
+  else if(set_ww){ _putenv("SWR_WW="); set_ww=0; }
+#else
+  (void)set_ww;
+#endif
+}
 
 void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 
@@ -141,8 +192,14 @@ void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 int snxvk_start(void){
   if(!g_snxvk_want) return 0;
   extern int g_ww_ok;
+#ifdef _WIN32
   if(!g_ww_ok){ WARN("vulkan_native: guest memory has no write tracking: using OpenGL\n"); return 0; }
+#endif
   snprintf(g_cachedir,sizeof g_cachedir,"%svulkan_native/",g_exedir); plat_mkdir(g_cachedir);
+#ifdef __ANDROID__
+  { extern const char* android_driver_cache_id(void);
+    snprintf(g_cachedir,sizeof g_cachedir,"%svulkan_native/%s/",g_exedir,android_driver_cache_id()); plat_mkdir(g_cachedir); }
+#endif
   { extern int g_opt_vsync; snxvk_opt_vsync=g_opt_vsync; }
   { /* our .ini into their g_settings (swr_settings.c). Their recording thread records the frame's commands; DLSS and
        HDR output record directly into the frame's command buffer, so with either on it stays off (both need a restart) */
@@ -177,16 +234,22 @@ void snxvk_cpu_map_end(u64 addr, u64 size, int changed){ if(!g_snxvk_on) return;
 static void wait_deadline(u64 deadline){
   u64 now=plat_ns(); if(now>=deadline) return;
   if(deadline-now>500000ull) plat_sleep_ns((i64)(deadline-now-500000ull));
-  while(plat_ns()<deadline) __builtin_ia32_pause(); }
+  while(plat_ns()<deadline){
+#if defined(__aarch64__)
+    __asm__ volatile("yield");
+#else
+    __builtin_ia32_pause();
+#endif
+  } }
 /* HDR output (snxvk hdr.c): the peak brightness the window's display reports through DXGI (Windows 10 1803+), in
    nits; 0 if unknown. dxgi.dll is loaded here, so the EXE doesn't import it */
-#if !defined(__TINYC__)
+#if defined(_WIN32) && !defined(__TINYC__)
 #define COBJMACROS
 #include <dxgi1_6.h>
 #endif
 int backend_hdr_peak_nits(void){
   static int cached=-1; if(cached>=0) return cached; cached=0;
-#if !defined(__TINYC__)
+#if defined(_WIN32) && !defined(__TINYC__)
   static const GUID iid_f1={0x770aae78,0xf26f,0x4dba,{0xa8,0x29,0x25,0x3c,0x83,0xd1,0xb3,0x87}};
   static const GUID iid_o6={0x068346e8,0xaaec,0x4b84,{0xad,0xd7,0x13,0x7f,0x51,0x3f,0x77,0xa1}};
   HMODULE m=LoadLibraryA("dxgi.dll"); if(!m) return 0;
@@ -208,6 +271,9 @@ int backend_hdr_peak_nits(void){
 int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=60 && g_opt_fps<=240)); }
 void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
   static const i32 crop[4]={0,0,0,0};
+#ifdef __ANDROID__
+  { extern void android_wait_active(void); android_wait_active(); }
+#endif
   static u64 st_n, st_wait, st_pres, st_gap, last_out;   /* SWR_SNXVK_TRACE: averages every 600 presents */
   u64 t_in=plat_ns(), t_w=t_in;
   if(snxvk_pacing()){ extern volatile int g_pace_fps; static u64 deadline; int pf=g_pace_fps;   /* g_opt_fps, or 60 during slow motion */
@@ -221,6 +287,7 @@ void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt)
     if(tr && last_out){ st_n++; st_wait+=t_w-t_in; st_pres+=t1-t0; st_gap+=t_in-last_out;
       if(st_n==600){ LOG("vulkan_native: per frame: game work %.2f ms, deadline wait %.2f ms, present call %.2f ms\n",st_gap/6e8,st_wait/6e8,st_pres/6e8); st_n=st_wait=st_pres=st_gap=0; } }
     last_out=t1; last_in=t1; } }
+int snxvk_release_window(void){ return !g_snxvk_on || !snxv_vk_renderer.release_window || snxv_vk_renderer.release_window(); }
 u64 snxvk_screenshot(const char* path){ return g_snxvk_on && snxv_vk_renderer.screenshot? snxv_vk_renderer.screenshot(path) : 0; }
 void snxvk_tick(int tick){   /* frontend loop, 60 Hz */
   if(!g_snxvk_on) return;

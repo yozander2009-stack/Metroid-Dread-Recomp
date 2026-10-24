@@ -6,6 +6,9 @@
    bounded set of copied PCM buffers, never pointers into guest memory. */
 #include "rt.h"
 #include <math.h>
+#ifdef __ANDROID__
+#include <aaudio/AAudio.h>
+#endif
 #ifdef _WIN32
 #include <mmsystem.h>
 #elif !defined(__ANDROID__)
@@ -131,7 +134,35 @@ static void aoutput(const i16*pcm){
     if(writes&&writes%2000==0)LOG("audio: %llu chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped);
   }
   ReleaseSRWLockExclusive(&lock);
-#elif !defined(__ANDROID__)
+#elif defined(__ANDROID__)
+  static AAudioStream* stream; static int attempted;
+  if(!attempted){ attempted=1;
+    if(!getenv("SWR_MUTE_AUDIO")){
+      AAudioStreamBuilder* builder=NULL;
+      aaudio_result_t result=AAudio_createStreamBuilder(&builder);
+      if(result==AAUDIO_OK){
+        AAudioStreamBuilder_setDirection(builder,AAUDIO_DIRECTION_OUTPUT);
+        AAudioStreamBuilder_setFormat(builder,AAUDIO_FORMAT_PCM_I16);
+        AAudioStreamBuilder_setChannelCount(builder,2);
+        AAudioStreamBuilder_setSampleRate(builder,48000);
+        AAudioStreamBuilder_setPerformanceMode(builder,AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+        AAudioStreamBuilder_setBufferCapacityInFrames(builder,AF*32);
+        result=AAudioStreamBuilder_openStream(builder,&stream);
+        AAudioStreamBuilder_delete(builder);
+      }
+      if(result==AAUDIO_OK){
+        result=AAudioStream_requestStart(stream);
+        if(result==AAUDIO_OK) LOG("audio: AAudio stereo PCM16 at 48000 Hz\n");
+      }
+      if(result!=AAUDIO_OK){
+        WARN("audio: AAudio output failed: %s\n",AAudio_convertResultToText(result));
+        if(stream) AAudioStream_close(stream);
+        stream=NULL;
+      }
+    }
+  }
+  if(stream) AAudioStream_write(stream,pcm,AF,0);
+#else
   /* Linux / Steam Deck: SDL2's queued audio (PipeWire, PulseAudio or ALSA, whichever the system has), loaded at run
      time like the controllers (backend_x11.c). Same format and the same cap as the Windows path: 32 chunks of
      5 ms queued at most, a chunk past that is dropped rather than letting latency grow */
@@ -154,8 +185,6 @@ static void aoutput(const i16*pcm){
   if(dev){
     if(queued(dev) < 32u*AF*4u){ if(queue(dev,pcm,AF*4)==0) writes++; } else dropped++;
     if(writes && writes%2000==0) LOG("audio: %llu chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped); }
-#else
-  (void)pcm;
 #endif
 }
 #else

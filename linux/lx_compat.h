@@ -21,7 +21,13 @@ static unsigned long swr_lx_getenv(const char* n, char* b, unsigned long sz) {
     return l;
 }
 static void* swr_lx_loadlib(const char* n) {
-    if (n && !strcmp(n, "zlib1.dll")) return dlopen("libz.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (n && !strcmp(n, "zlib1.dll")) {
+#ifdef __ANDROID__
+        return dlopen("libz.so", RTLD_NOW | RTLD_LOCAL);
+#else
+        return dlopen("libz.so.1", RTLD_NOW | RTLD_LOCAL);
+#endif
+    }
     return dlopen(n, RTLD_NOW | RTLD_LOCAL);
 }
 static void* swr_lx_getproc(void* h, const char* n) { return h ? dlsym(h, n) : NULL; }

@@ -1,0 +1,15 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.switchrecomp.metroiddread" android:versionCode="1" android:versionName="0.1-android">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="33" />
+    <uses-feature android:glEsVersion="0x00030002" android:required="true" />
+    <application android:label="Metroid Dread Recomp" android:debuggable="true" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".LauncherActivity" android:exported="true" android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".GameActivity" android:exported="false" android:process=":game" android:screenOrientation="landscape" android:configChanges="orientation|keyboardHidden|screenSize">
+            <meta-data android:name="android.app.lib_name" android:value="dread" />
+        </activity>
+    </application>
+</manifest>
