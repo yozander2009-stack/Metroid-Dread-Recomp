@@ -3195,6 +3195,12 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       if(!strcmp(e,"GL_ARB_shader_viewport_layer_array")) vl|=1; if(!strcmp(e,"GL_AMD_vertex_shader_layer")) vl|=2; if(!strcmp(e,"GL_NV_viewport_array2")) vl|=4; }
     { extern int g_vs_layer_ext; g_vs_layer_ext= g_gles? 0 : (vl&1)? 1 : (vl&2)? 2 : (vl&4)? 3 : 0;
       LOG("gpu: render target layer from the vertex shader: %s\n",g_vs_layer_ext==1? "ARB_shader_viewport_layer_array" : g_vs_layer_ext==2? "AMD_vertex_shader_layer" : g_vs_layer_ext==3? "NV_viewport_array2" : "not available (drawn to layer 0)"); }
+    /* Desktop ASTC from the driver only on Intel, whose GPUs decode it in hardware. AMD's driver lists the extension
+       on GPUs without ASTC hardware, and two AMD cards (RX 9060 XT, RX 7800 XT) crashed inside the driver on the same
+       instruction as the first gameplay area's textures loaded (GitHub issues #12, #7), on the path no NVIDIA card
+       takes: everyone else gets our CPU decoder (Dread has few ASTC textures: 0.2 ms in all). SWR_ASTC_GPU=1 = trust
+       any driver that lists it (tests) */
+    if(!g_gles && g_has_astc && !getenv("SWR_ASTC_GPU")){ const char* v=(const char*)glGetString(GL_VENDOR); if(!v || !strstr(v,"Intel")) g_has_astc=0; }
     if(!g_gles) LOG("ASTC textures: %s\n",g_has_astc && !getenv("SWR_ASTC_CPU")? "decoded by the GPU (fast, with mipmaps)" : "decoded on the CPU");
     if(getenv("SWR_SYNC_SHADERS")) g_par=0;
     if(g_par){ typedef void (APIENTRY*MSCT)(GLuint); MSCT f=(MSCT)backend_gl_proc("glMaxShaderCompilerThreadsKHR"); if(!f) f=(MSCT)backend_gl_proc("glMaxShaderCompilerThreadsARB"); if(f) f(0xFFFFFFFFu); }
