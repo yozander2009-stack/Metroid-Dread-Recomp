@@ -8,6 +8,10 @@
 #include <math.h>
 #ifdef _WIN32
 #include <mmsystem.h>
+#if !defined(__TINYC__)
+#include <mmdeviceapi.h>   /* WASAPI: the output when waveOut has no device (GitHub issue #16) */
+#include <audioclient.h>
+#endif
 #elif !defined(__ANDROID__)
 #include <dlfcn.h>   /* SDL2 audio, loaded at run time */
 #endif
@@ -110,19 +114,78 @@ static float abiquad(AVoice*v,const u8*vi,u32 channel,float value){
     if(!isfinite(y))y=0;h[1]=h[0];h[0]=value;h[3]=h[2];h[2]=y;value=y;}return value;
 }
 #ifndef SWR_AUDIO_TEST
+#if defined(_WIN32) && !defined(__TINYC__)
+/* WASAPI shared mode, the output when waveOut can't open one: waveOutOpen(WAVE_MAPPER) answered 2 (no device) on a
+   laptop whose other programs played sound (GitHub issue #16). Pushed from aoutput, AF frames a call, at most
+   100 ms queued: a chunk past that is dropped, as with waveOut's 32 buffers. Windows converts our 48 kHz stereo PCM16
+   to the device's own format (AUTOCONVERTPCM). SWR_AUDIO_WASAPI=1 uses it first (tests) */
+static const GUID swr_CLSID_MMDeviceEnumerator={0xBCDE0395,0xE52F,0x467C,{0x8E,0x3D,0xC4,0x57,0x92,0x91,0x69,0x2E}};
+static const GUID swr_IID_IMMDeviceEnumerator={0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D,0xB6,0x36,0x17,0xE6}};
+static const GUID swr_IID_IAudioClient={0x1CB9AD4C,0xDBFA,0x4C32,{0xB1,0x78,0xC2,0xF5,0x68,0xA7,0x03,0xB2}};
+static const GUID swr_IID_IAudioRenderClient={0xF294ACFC,0x3146,0x4483,{0xA7,0xBF,0xAD,0xDC,0xA7,0xC2,0x60,0xE2}};
+static IAudioClient* g_wclient; static IAudioRenderClient* g_wrender; static UINT32 g_wframes;
+static void wasapi_close(void){
+  if(g_wclient) g_wclient->lpVtbl->Stop(g_wclient);
+  if(g_wrender){ g_wrender->lpVtbl->Release(g_wrender); g_wrender=NULL; }
+  if(g_wclient){ g_wclient->lpVtbl->Release(g_wclient); g_wclient=NULL; } }
+static int wasapi_open(void){
+  IMMDeviceEnumerator* en=NULL; IMMDevice* dev=NULL; HRESULT hr;
+  CoInitializeEx(NULL,COINIT_MULTITHREADED);   /* this thread's; S_FALSE / RPC_E_CHANGED_MODE when it already was */
+  hr=CoCreateInstance(&swr_CLSID_MMDeviceEnumerator,NULL,CLSCTX_ALL,&swr_IID_IMMDeviceEnumerator,(void**)&en);
+  if(FAILED(hr)){ WARN("audio: WASAPI not available (%08lx)\n",(unsigned long)hr); return 0; }
+  hr=en->lpVtbl->GetDefaultAudioEndpoint(en,eRender,eConsole,&dev); en->lpVtbl->Release(en);
+  if(FAILED(hr)){ WARN("audio: WASAPI found no default output device (%08lx)\n",(unsigned long)hr); return 0; }
+  hr=dev->lpVtbl->Activate(dev,&swr_IID_IAudioClient,CLSCTX_ALL,NULL,(void**)&g_wclient); dev->lpVtbl->Release(dev);
+  if(FAILED(hr)){ WARN("audio: WASAPI could not use the output device (%08lx)\n",(unsigned long)hr); g_wclient=NULL; return 0; }
+  WAVEFORMATEX f={0}; f.wFormatTag=WAVE_FORMAT_PCM; f.nChannels=2; f.nSamplesPerSec=48000; f.wBitsPerSample=16; f.nBlockAlign=4; f.nAvgBytesPerSec=192000;
+  hr=g_wclient->lpVtbl->Initialize(g_wclient,AUDCLNT_SHAREMODE_SHARED,0x80000000u|0x08000000u /* AUTOCONVERTPCM, SRC_DEFAULT_QUALITY */,1000000 /* 100 ms */,0,&f,NULL);
+  if(SUCCEEDED(hr)) hr=g_wclient->lpVtbl->GetBufferSize(g_wclient,&g_wframes);
+  if(SUCCEEDED(hr)) hr=g_wclient->lpVtbl->GetService(g_wclient,&swr_IID_IAudioRenderClient,(void**)&g_wrender);
+  if(SUCCEEDED(hr)) hr=g_wclient->lpVtbl->Start(g_wclient);
+  if(FAILED(hr)){ WARN("audio: WASAPI output could not start (%08lx)\n",(unsigned long)hr); wasapi_close(); return 0; }
+  LOG("audio: Windows output opened through WASAPI, stereo PCM16 at 48000 Hz (%u frames buffered at most)\n",(unsigned)g_wframes);
+  return 1; }
+/* one chunk: 1 written, 0 no room (dropped), -1 the device went away (unplugged, disabled): closed, to be opened again */
+static int wasapi_write(const i16* pcm){
+  UINT32 pad=0; BYTE* d=NULL; HRESULT hr=g_wclient->lpVtbl->GetCurrentPadding(g_wclient,&pad);
+  if(SUCCEEDED(hr) && g_wframes-pad<AF) return 0;
+  if(SUCCEEDED(hr)) hr=g_wrender->lpVtbl->GetBuffer(g_wrender,AF,&d);
+  if(SUCCEEDED(hr)){ memcpy(d,pcm,AF*4); hr=g_wrender->lpVtbl->ReleaseBuffer(g_wrender,AF,0); }
+  if(FAILED(hr)){ WARN("audio: WASAPI output lost (%08lx), trying again in a few seconds\n",(unsigned long)hr); wasapi_close(); return -1; }
+  return 1; }
+#endif
+/* the output devices the old waveOut interface sees, in the log when it couldn't open one */
+#ifdef _WIN32
+static void waveout_devices(void){
+  UINT n=waveOutGetNumDevs(); LOG("audio: waveOut sees %u output device(s)\n",n);
+  for(UINT i=0;i<n && i<8;i++){ WAVEOUTCAPSA caps; if(waveOutGetDevCapsA(i,&caps,sizeof caps)==MMSYSERR_NOERROR) LOG("audio:   %u: %s, %u channel(s)\n",i,caps.szPname,caps.wChannels); } }
+#endif
 static void aoutput(const i16*pcm){
 #ifdef _WIN32
   enum {NB=32};static HWAVEOUT device;static WAVEHDR headers[NB];static i16 samples[NB][AF*2];static u8 busy[NB];
-  static int attempted;static u64 writes,dropped;static SRWLOCK lock=SRWLOCK_INIT;
+  static int attempted;static u64 writes,dropped,retry_ns;static SRWLOCK lock=SRWLOCK_INIT;static int use_wasapi;
   static int trace_checked;static FILE*trace;static u64 previous_ns;
   if(!trace_checked){trace_checked=1;const char*path=getenv("SWR_TEST_AUDIO_STATS");if(path&&*path){trace=fopen(path,"w");if(trace)fprintf(trace,"ns,guest_frame,dt_ms,writes,drops,queued,clipped,silent,potential_empty\n");}}
   AcquireSRWLockExclusive(&lock);
-  if(!attempted){attempted=1;if(!getenv("SWR_MUTE_AUDIO")){
-    WAVEFORMATEX format={0};format.wFormatTag=WAVE_FORMAT_PCM;format.nChannels=2;format.nSamplesPerSec=48000;format.wBitsPerSample=16;format.nBlockAlign=4;format.nAvgBytesPerSec=192000;
-    MMRESULT result=waveOutOpen(&device,WAVE_MAPPER,&format,0,0,CALLBACK_NULL);
-    if(result!=MMSYSERR_NOERROR){device=NULL;WARN("audio: waveOutOpen failed (%u)\n",result);}
-    else{for(int k=0;k<NB;k++){headers[k].lpData=(LPSTR)samples[k];headers[k].dwBufferLength=sizeof samples[k];waveOutPrepareHeader(device,&headers[k],sizeof(WAVEHDR));}
-      LOG("audio: Windows output opened, stereo PCM16 at 48000 Hz\n");}}}
+  /* waveOut first, then WASAPI; with neither, tried again every 3 s (a headset that connects late, a device that comes
+     back), and the log says so once */
+  if(!device && !use_wasapi && (!attempted || plat_ns()-retry_ns>3000000000ull) && !getenv("SWR_MUTE_AUDIO")){
+    int first=!attempted; attempted=1; retry_ns=plat_ns();
+    MMRESULT result=MMSYSERR_ERROR;
+    if(!getenv("SWR_AUDIO_WASAPI")){
+      WAVEFORMATEX format={0};format.wFormatTag=WAVE_FORMAT_PCM;format.nChannels=2;format.nSamplesPerSec=48000;format.wBitsPerSample=16;format.nBlockAlign=4;format.nAvgBytesPerSec=192000;
+      result=waveOutOpen(&device,WAVE_MAPPER,&format,0,0,CALLBACK_NULL);
+      if(result!=MMSYSERR_NOERROR){device=NULL;if(first){WARN("audio: waveOutOpen failed (%u)\n",result);waveout_devices();}}
+      else{for(int k=0;k<NB;k++){headers[k].lpData=(LPSTR)samples[k];headers[k].dwBufferLength=sizeof samples[k];headers[k].dwFlags=0;busy[k]=0;waveOutPrepareHeader(device,&headers[k],sizeof(WAVEHDR));}
+        LOG("audio: Windows output opened, stereo PCM16 at 48000 Hz\n");}}
+#if !defined(__TINYC__)
+    if(!device && wasapi_open()) use_wasapi=1;
+#endif
+    if(!device && !use_wasapi && first) WARN("audio: no sound output could be opened; trying again every 3 seconds\n");}
+#if !defined(__TINYC__)
+  if(use_wasapi){ int w=wasapi_write(pcm); if(w>0) writes++; else if(w==0) dropped++; else use_wasapi=0;
+    if(writes&&writes%2000==0&&w>0)LOG("audio: %llu chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped); }
+#endif
   if(device){int slot=-1,queued=0;for(int k=0;k<NB;k++){if(busy[k]&&(headers[k].dwFlags&WHDR_DONE))busy[k]=0;if(!busy[k]&&slot<0)slot=k;if(busy[k])queued++;}
     int potential_empty=queued==0&&writes>0;
     if(slot>=0){memcpy(samples[slot],pcm,sizeof samples[slot]);MMRESULT result=waveOutWrite(device,&headers[slot],sizeof(WAVEHDR));if(result==MMSYSERR_NOERROR){busy[slot]=1;writes++;}else WARN("audio: waveOutWrite failed (%u)\n",result);}else dropped++;
