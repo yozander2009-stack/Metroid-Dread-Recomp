@@ -501,7 +501,7 @@ static Surf* rt_crop(Surf* rt, u32 w, u32 h, const VkFmt* as) {
     VkFmt f = as ? *as : rt->f;
     for (Surf** pp = &rt->crop; *pp;) {
         Surf* x = *pp;
-        if (x->w == w && x->h == h && x->f.vk == f.vk)
+        if (x->w == w && x->h == h && x->f.vk == f.vk && !x->pre_lv)
             c = x;
         else if ((i32)(g_vk_present - (u32)x->last_used) > 60) {
             *pp = x->next;
@@ -582,6 +582,92 @@ static Surf* rt_crop(Surf* rt, u32 w, u32 h, const VkFmt* as) {
 Surf* vk_rt_snapshot(Surf* rt) {
     if (!rt || rt->layout == VK_IMAGE_LAYOUT_UNDEFINED) return rt;
     return rt_crop(rt, rt->w, rt->h, NULL);
+}
+
+/* SWR: resolution scale and the game's glow. Dread shrinks the scene into its bloom chain with a few taps per output
+   pixel, placed for the guest resolution: at 2x those taps meet 1 rendered pixel in 4, at 4x 1 in 16, so bright small
+   things came out as dotted, blocky glow (GitHub issue #17; the OpenGL renderer had the same until gpu_gl.c
+   rt_prefiltered). A filtered-only read (ShTex.use 1) of a scaled target by a draw at least 2x smaller, or of a small
+   glow buffer (480x270 and under, guest size), gets the target averaged down by 2^lv (lv: 1 at 2x, 2 at 4x), so its
+   taps see the averages they see at 1x. Each level is a crop of the target (freed with it, dropped unused like the
+   others), made from the level before by a 2:1 linear blit: a 2x2 box. SWR_NO_RT_PREFILTER=1 = off */
+static int can_blit(VkFormat f);
+static Surf* pre_level(Surf* t, u32 k) {
+    if (!k) return t;
+    Surf* c = NULL;
+    for (Surf* x = t->crop; x && !c; x = x->next)
+        if (x->pre_lv == k) c = x;
+    if (!c) {
+        c = calloc(1, sizeof *c);
+        if (!c) return NULL;
+        c->gva = t->gva;
+        c->sw = t->sw >> k ? t->sw >> k : 1;
+        c->sh = t->sh >> k ? t->sh >> k : 1;
+        c->w = c->sw;
+        c->h = c->sh;
+        c->layers = c->levels = c->depth3d = 1;
+        c->f = t->f;
+        c->fkey = t->fkey;
+        c->type = t->type;
+        c->is_rt = 1; /* sampled like one; not in the table, so never found as one */
+        c->pre_lv = k;
+        c->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                .imageType = VK_IMAGE_TYPE_2D,
+                                .format = t->f.vk,
+                                .extent = {c->sw, c->sh, 1},
+                                .mipLevels = 1,
+                                .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VkViewFormats vf;
+        vk_view_formats(&ii, &vf);
+        if (!vk_cache_image_create(&ii, &c->img, &c->mem, &c->bytes)) {
+            free(c);
+            return NULL;
+        }
+        c->crop_gen = ~0u;
+        c->next = t->crop;
+        t->crop = c;
+        LOG_LIMIT(8, "vulkan: the %ux%u target at %llx gets a copy averaged to %ux%u for the glow passes\n", t->sw, t->sh,
+                  (unsigned long long)t->gva, c->sw, c->sh);
+    }
+    c->last_used = g_vk_present;
+    if (c->crop_gen != t->wgen) {
+        Surf* from = pre_level(t, k - 1);
+        if (!from) return NULL;
+        VkCommandBuffer cb = vk_cmd();
+        vk_surf_use(cb, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT);
+        vk_surf_use(cb, c, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkImageBlit b = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .srcOffsets = {{0, 0, 0}, {(i32)from->sw, (i32)from->sh, 1}},
+                         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .dstOffsets = {{0, 0, 0}, {(i32)c->sw, (i32)c->sh, 1}}};
+        rec_CmdBlitImage(cb, from->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         1, &b, VK_FILTER_LINEAR);
+        c->crop_gen = t->wgen;
+    }
+    return c;
+}
+Surf* vk_rt_prefiltered(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
+    static int off = -1;
+    if (off < 0) off = getenv("SWR_NO_RT_PREFILTER") != NULL;
+    if (off || g_vk_scale < 1.99f || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+        want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int || t->layers != 1 || st->use != 1 ||
+        st->type != 1 || st->array || st->shadow || !n || !rt[0] || rt[0] == t)
+        return t;
+    const Surf* o = rt[0];
+    if (!(t->w >= 2 * o->w && t->h >= 2 * o->h) && !(t->w <= 480 && t->h <= 270)) return t;
+    u32 lv = 0;
+    for (float k = 2.0f; k <= g_vk_scale + 0.01f; k *= 2.0f) lv++;
+    if (!lv || !can_blit(t->f.vk)) return t;
+    Surf* c = pre_level(t, lv);
+    return c ? c : t;
 }
 
 /* texture header type -> what the image is created as */

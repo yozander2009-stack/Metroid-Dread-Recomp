@@ -24,6 +24,9 @@ typedef struct {
     u8 flags;    /* bit 0 raw integer surface load, bit 1 multisample fetch, bit 2 SNX_TEX_INDEXED; bits 4-7 the
                     indexed table's stride shift */
     u32 bl2_off; /* the second read's offset, in words */
+    u8 use;      /* SWR: how the program reads it: bit 0 filtered samples (TEX, TEXS, TXD), bit 1 anything else
+                    (TLD, TLDS fetches, TLD4 gathers, TMML queries). Only a slot of filtered samples alone may be
+                    given a smaller averaged copy (vk/texture.c vk_rt_prefiltered) */
 } ShTex;
 /* whether two indexed slots read the same handle table the same way */
 static inline int shader_same_indexed_table(const ShTex* a, const ShTex* b) {

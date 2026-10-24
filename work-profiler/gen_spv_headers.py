@@ -1,6 +1,7 @@
 """Compile our own Vulkan shaders (runtime/snxvk/src_new/nx/gpu/vk/shaders) with glslang 16.6.0 into the headers the
 renderer includes: hdr_out.{vert,frag} -> hdr_spv.h (HDR / FXAA present pass), dlss_mv.{vert,frag} -> dlss_mv_spv.h
-(DLSS motion vectors). glslang: GLSLANG=path, or on PATH, or third_party/glslang/bin.
+(DLSS motion vectors), shrink.frag -> shrink_spv.h (the frame shrunk to the window; its vertex shader is hdr_out's).
+glslang: GLSLANG=path, or on PATH, or third_party/glslang/bin.
 Usage: gen_spv_headers.py [--check]   (--check: compile and compare with the headers, write nothing)"""
 import os, shutil, struct, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,7 +12,10 @@ GLSLANG = (os.environ.get('GLSLANG') or shutil.which('glslang')
 HEADERS = [('hdr_spv.h', 'hdr_out', 'g_hdr_out',
             '/* generated from hdr_out.vert / hdr_out.frag by glslang 16.6.0 (glslang -V); see work-profiler/gen_spv_headers.py */'),
            ('dlss_mv_spv.h', 'dlss_mv', 'g_dlss_mv',
-            '/* generated from dlss_mv.vert / dlss_mv.frag by glslang 16.6.0 (glslang -V); see work-profiler/gen_spv_headers.py */')]
+            '/* generated from dlss_mv.vert / dlss_mv.frag by glslang 16.6.0 (glslang -V); see work-profiler/gen_spv_headers.py */'),
+           ('shrink_spv.h', 'shrink', 'g_shrink',
+            '/* generated from shaders/shrink.frag by glslang (glslang -V); see work-profiler/gen_spv_headers.py */')]
+STAGES = {'shrink': ('frag',)}   # the others have a vertex and a fragment shader
 
 
 def words(src):
@@ -35,7 +39,7 @@ def parse(path):   # the word arrays of an existing header, by name
 check = '--check' in sys.argv
 ok = True
 for header, base, sym, comment in HEADERS:
-    made = {sym + '_' + st: words(os.path.join(SH, '%s.%s' % (base, st))) for st in ('vert', 'frag')}
+    made = {sym + '_' + st: words(os.path.join(SH, '%s.%s' % (base, st))) for st in STAGES.get(base, ('vert', 'frag'))}
     hp = os.path.join(VK, header)
     if check:
         have = parse(hp)

@@ -339,3 +339,181 @@ void vk_hdr_resolve(VkCommandBuffer cb, VkImage sc) {
                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 }
+
+/* ------------------------------------------------------------ SWR: the frame shrunk to its on-screen size
+   A frame larger than its place in the window (resolution 2 and up) went there through one linear blit, which reads
+   2x2 texels per window pixel: at 2x and more most of the frame was skipped rather than averaged, and edges aliased
+   where the OpenGL renderer's were smooth (GitHub issue #17). vk_shrink draws the frame's rectangle into an image of
+   exactly the on-screen size with shaders/shrink.frag (4x4 filtered taps per pixel, as gpu_gl.c's window pass does);
+   renderer.c show then copies that 1:1, flip included. SWR_NO_SHRINK=1 = the single blit (tests) */
+#include "nx/gpu/vk/shrink_spv.h"
+static VkDescriptorSetLayout g_shr_dsl;
+static VkPipelineLayout g_shr_layout;
+static VkPipeline g_shr_pipe;
+static VkFormat g_shr_pipe_fmt;
+static VkImage g_shr_img;
+static VmaAllocation g_shr_mem;
+static VkImageView g_shr_view;
+static u32 g_shr_w, g_shr_h;
+static VkFormat g_shr_fmt;
+
+/* whether a frame of sw x sh going to a dw x dh place in the window is shrunk (more than 5% either way) */
+int vk_shrink_wanted(u32 sw, u32 sh, u32 dw, u32 dh) {
+    static int off = -1;
+    if (off < 0) off = getenv("SWR_NO_SHRINK") != NULL;
+    return !off && dw && dh && (sw * 20 > dw * 21 || sh * 20 > dh * 21);
+}
+static int shrink_pipeline(VkFormat format) {
+    if (g_shr_pipe && g_shr_pipe_fmt == format) return 1;
+    if (!g_shr_layout) {
+        VkDescriptorSetLayoutBinding b = {.binding = 0,
+                                          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                          .descriptorCount = 1,
+                                          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+        VkDescriptorSetLayoutCreateInfo dci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                          .setLayoutCount = 1,
+                                          .pSetLayouts = &g_shr_dsl,
+                                          .pushConstantRangeCount = 1,
+                                          .pPushConstantRanges = &pc};
+        if (!VK_OK(vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_shr_dsl))) return 0;
+        if (!VK_OK(vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &g_shr_layout))) return 0;
+    }
+    if (g_shr_pipe) { /* another format: frames in flight may still use the old pipeline */
+        if (vk_rec_threaded()) vk_rec_sync();
+        vk_finish();
+        vkDestroyPipeline(g_vk.dev, g_shr_pipe, NULL);
+        g_shr_pipe = VK_NULL_HANDLE;
+    }
+    VkShaderModule vs = vk_module_spv(g_hdr_out_vert, sizeof g_hdr_out_vert / 4),
+                   fs = vk_module_spv(g_shrink_frag, sizeof g_shrink_frag / 4);
+    VkPipelineShaderStageCreateInfo st[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vp = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL,
+                                                 .cullMode = VK_CULL_MODE_NONE,
+                                                 .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
+    VkPipelineColorBlendStateCreateInfo cb = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+                                        .colorAttachmentCount = 1,
+                                        .pColorAttachmentFormats = &format};
+    VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                                        .pNext = &ri,
+                                        .stageCount = 2,
+                                        .pStages = st,
+                                        .pVertexInputState = &vi,
+                                        .pInputAssemblyState = &ia,
+                                        .pViewportState = &vp,
+                                        .pRasterizationState = &rs,
+                                        .pMultisampleState = &ms,
+                                        .pColorBlendState = &cb,
+                                        .pDynamicState = &ds,
+                                        .layout = g_shr_layout};
+    int ok = vs && fs && VK_OK(vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &g_shr_pipe));
+    if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
+    if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);
+    g_shr_pipe_fmt = format;
+    if (!ok) g_shr_pipe = VK_NULL_HANDLE;
+    return ok;
+}
+/* the image of the on-screen size (format f), made or remade */
+static int shrink_image(u32 w, u32 h, VkFormat f) {
+    if (g_shr_img && g_shr_w == w && g_shr_h == h && g_shr_fmt == f) return 1;
+    if (g_shr_img) vk_defer_image(g_shr_img, g_shr_mem, g_shr_view, VK_NULL_HANDLE); /* frames in flight may read it */
+    g_shr_img = VK_NULL_HANDLE;
+    g_shr_view = VK_NULL_HANDLE;
+    VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                            .imageType = VK_IMAGE_TYPE_2D,
+                            .format = f,
+                            .extent = {w, h, 1},
+                            .mipLevels = 1,
+                            .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (!VK_OK(vmaCreateImage(g_vk.vma, &ii, &ai, &g_shr_img, &g_shr_mem, NULL))) {
+        g_shr_img = VK_NULL_HANDLE;
+        return 0;
+    }
+    VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .image = g_shr_img,
+                                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                 .format = f,
+                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    if (!VK_OK(vkCreateImageView(g_vk.dev, &vci, NULL, &g_shr_view))) {
+        vmaDestroyImage(g_vk.vma, g_shr_img, g_shr_mem);
+        g_shr_img = VK_NULL_HANDLE;
+        return 0;
+    }
+    g_shr_w = w;
+    g_shr_h = h;
+    g_shr_fmt = f;
+    LOG("vulkan: the frame is shrunk to %ux%u on screen (averaged, not one blit)\n", w, h);
+    return 1;
+}
+/* src's rectangle (sx, sy, sw, sh) drawn averaged into a dw x dh image, left in TRANSFER_SRC_OPTIMAL for the caller's
+   1:1 blit: that image, or VK_NULL_HANDLE (then the caller blits as before) */
+VkImage vk_shrink(VkCommandBuffer cb, Surf* src, u32 sx, u32 sy, u32 sw, u32 sh, u32 dw, u32 dh) {
+    if (!src || !src->att || src->f.depth || src->f.is_int || !layout_make() || !shrink_pipeline(src->f.vk) ||
+        !shrink_image(dw, dh, src->f.vk))
+        return VK_NULL_HANDLE;
+    vk_surf_use(cb, src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    VkDescriptorImageInfo di = {g_samp, src->att, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                               .dstBinding = 0,
+                               .descriptorCount = 1,
+                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               .pImageInfo = &di};
+    VkDescriptorSet set = vk_rec_new_set(g_shr_dsl, 1, &wr);
+    if (!set) return VK_NULL_HANDLE;
+    vk_barrier(cb, g_shr_img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    struct {
+        float ox, oy, kx, ky;
+    } pc = {(float)sx, (float)sy, (float)sw / (float)dw, (float)sh / (float)dh};
+    VkExtent2D ext = {dw, dh};
+    VkRenderingAttachmentInfo at = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                    .imageView = g_shr_view,
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                          .renderArea = {{0, 0}, ext},
+                          .layerCount = 1,
+                          .colorAttachmentCount = 1,
+                          .pColorAttachments = &at};
+    VkViewport vp = {0, 0, (float)dw, (float)dh, 0, 1};
+    VkRect2D sci = {{0, 0}, ext};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shr_pipe);
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sci);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shr_layout, 0, 1, &set, 0, NULL);
+    rec_CmdPushConstants(cb, g_shr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+    vk_render_forget_state(); /* its pipeline and state, not a draw's: the next draw sets all again */
+    vk_barrier(cb, g_shr_img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    return g_shr_img;
+}

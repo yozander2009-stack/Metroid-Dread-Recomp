@@ -422,9 +422,20 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
                                                    {(i32)(g_last_x + g_last_w), (i32)(g_last_y + g_last_h), 1}},
                                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                                     .dstOffsets = {{dx, dy, 0}, {dx + (i32)dw, dy + (i32)dh, 1}}};
+                /* SWR: a frame larger than its place goes through the averaged shrink (hdr.c vk_shrink), then 1:1 */
+                int vk_shrink_wanted(u32 sw, u32 sh, u32 dw, u32 dh);
+                VkImage vk_shrink(VkCommandBuffer cb, Surf* src, u32 sx, u32 sy, u32 sw, u32 sh, u32 dw, u32 dh);
+                VkImage shr = vk_shrink_wanted(g_last_w, g_last_h, dw, dh)
+                                  ? vk_shrink(cb, src, g_last_x, g_last_y, g_last_w, g_last_h, dw, dh)
+                                  : VK_NULL_HANDLE;
+                if (shr) {
+                    blit.srcOffsets[0] = (VkOffset3D){0, 0, 0};
+                    blit.srcOffsets[1] = (VkOffset3D){(i32)dw, (i32)dh, 1};
+                }
                 flip_src(&blit, transform); /* render targets stay in guest order */
-                rec_CmdBlitImage(cb, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                rec_CmdBlitImage(cb, shr ? shr : src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                                 shr ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
             }
             if (sc == sc_out) {
                 int safe[4] = {(int)cx, (int)cy, (int)cw, (int)ch};

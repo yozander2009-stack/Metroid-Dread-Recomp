@@ -405,6 +405,7 @@ typedef struct Surf {
     /* copies of regions of this render target for texture headers or feedback draws, one per size, linked through next
        (gpu/vk/texture.c rt_crop) */
     struct Surf* crop;
+    u32 pre_lv; /* SWR: a crop that is the target averaged down by 2^pre_lv (texture.c vk_rt_prefiltered), else 0 */
     u32 crop_gen;
     struct Surf* next;
     /* the recency list it is in (surface.c): textures, render targets (parked ones too), or none (copies, the CPU
@@ -428,6 +429,8 @@ Surf* vk_rt_array(u64 gva, u32 w, u32 h, u32 fmt, u32 tile, u32 pitch, u32 layer
 Surf* vk_zt_array(u64 gva, u32 w, u32 h, u32 fmt, u32 tile, u32 layers, u64 layer_size);
 Surf* vk_rt_find(u64 gva);
 Surf* vk_rt_snapshot(Surf* rt);                  /* copy a target so a draw can sample its contents while writing it */
+/* SWR: t, or its copy averaged down for a filtered read by a smaller draw at resolution 2 and up (texture.c) */
+Surf* vk_rt_prefiltered(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n);
 Surf* vk_rt_for_cpu(u64 cpu_addr, u32 w, u32 h); /* the render target the guest presents from that memory */
 /* a render target read where its guest memory is (a texture, a present): reload it if the GPU wrote its memory */
 void vk_rt_note_read(Surf* s);

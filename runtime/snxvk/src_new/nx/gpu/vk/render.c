@@ -1627,8 +1627,10 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
                 g_vk_rt_copies++;
             } else
                 LOG_LIMIT(1, "vulkan: a draw samples a target it renders to (read as empty)\n");
-        } else
+        } else {
+            t = vk_rt_prefiltered(t, st, want, num, rt, n); /* SWR: the glow passes' averaged copy (texture.c) */
             view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
+        }
         const Surf* sampled = view ? t : NULL; /* the texture whose own view is bound, for the sampler */
         if (view && depth_ro) {
             *zt_ro = 1; /* render_begin moves it to the read-only layout */

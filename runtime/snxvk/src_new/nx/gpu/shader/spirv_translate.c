@@ -2562,6 +2562,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 textures[slot].array = (u8)array;
                 texture_count++;
             }
+            textures[slot].use |= 1; /* SWR: a filtered sample */
             if (!B(insn[i], 59, 1)) needs_glsl = 1;
             if (a < 255) used[a] = 1;
             if (b < 255) used[b] = 1;
@@ -2581,9 +2582,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             if (handle_count == 1) indexed = direct_indexed_handle(insn, n, i, b, stage, &ldc);
             if (bindless && !handle_count) return direct_reject(si, "untracked texture handle");
             int type = ty >> 1, array = ty & 1, multisample = (int)B(insn[i], 50, 1);
-            if (direct_add_typed_slot(textures, &texture_count, off, type, array, 0, multisample ? 2 : 0, bindless,
-                                      bank, handle_count, bank2, off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, type, array, 0, multisample ? 2 : 0, bindless,
+                                          bank, handle_count, bank2, off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 2;
+            }
             u32 coordinate_count = (type == 0 ? 1u : type == 1 ? 2u : 3u) + (u32)array;
             for (u32 k = 0; k < coordinate_count; k++)
                 if (a + k < 255) used[a + k] = 1;
@@ -2760,6 +2765,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 textures[slot].flags = (u8)(multisample ? 2 : 0);
                 texture_count++;
             }
+            textures[slot].use |= 2; /* SWR: a fetch */
             if (!B(insn[i], 59, 1)) needs_glsl = 1;
             if (a < 255) used[a] = 1;
             if ((enc == 4 || enc == 5 || enc == 6 || enc == 7 || enc == 12) && a + 1 < 255) used[a + 1] = 1;
@@ -2798,9 +2804,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             if (bindless && !handle_count) return direct_reject(si, "untracked texture handle");
             int type = B(insn[i], 28, 3) >> 1;
             int array = B(insn[i], 28, 1), shadow = B(insn[i], 50, 1);
-            if (direct_add_typed_slot(textures, &texture_count, off, type, array, shadow, 0, bindless, bank,
-                                      handle_count, bank2, off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, type, array, shadow, 0, bindless, bank,
+                                          handle_count, bank2, off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 1;
+            }
             if (a < 255) used[a] = 1;
             if ((type != 0 || array) && a + 1 < 255) used[a + 1] = 1;
             if ((type >= 2 || array) && a + 2 < 255) used[a + 2] = 1;
@@ -2825,9 +2835,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 bindless ? direct_track_image_handle_pair(insn, n, i, b, &bank, &off, &bank2, &off2, 0) : 0;
             if (bindless && !handle_count) return direct_reject(si, "untracked texture handle");
             if (handle_count == 1) indexed = direct_indexed_handle(insn, n, i, b, stage, &ldc);
-            if (direct_add_typed_slot(textures, &texture_count, off, type, array, 0, 0, bindless, bank, handle_count,
-                                      bank2, off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, type, array, 0, 0, bindless, bank, handle_count,
+                                          bank2, off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 2;
+            }
             for (u32 k = 0; k < array + (type == 0 ? 1 : type == 1 ? 2 : 3); k++)
                 if (a + k < 255) used[a + k] = 1;
             if (bindless && b < 255) used[b] = 1;
@@ -2847,9 +2861,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 bindless ? direct_track_image_handle_pair(insn, n, i, a, &bank, &off, &bank2, &off2, 0) : 0;
             if (bindless && !handle_count) return direct_reject(si, "untracked texture handle");
             if (handle_count == 1) indexed = direct_indexed_handle(insn, n, i, a, stage, &ldc);
-            if (direct_add_typed_slot(textures, &texture_count, off, type, array, 0, 0, bindless, bank, handle_count,
-                                      bank2, off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, type, array, 0, 0, bindless, bank, handle_count,
+                                          bank2, off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 1;
+            }
             u32 coord = a + (u32)bindless, aoffi = B(insn[i], 35, 1);
             for (u32 k = 0; k < count + (array || aoffi); k++)
                 if (a + k + (u32)bindless < 255) used[coord + k] = 1;
@@ -2873,9 +2891,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                 bindless ? direct_track_image_handle_pair(insn, n, i, a, &bank, &off, &bank2, &off2, 0) : 0;
             if (bindless && !handle_count) return direct_reject(si, "untracked texture handle");
             if (handle_count == 1) indexed = direct_indexed_handle(insn, n, i, a, stage, &ldc);
-            if (direct_add_typed_slot(textures, &texture_count, off, 1, 0, 0, 0, bindless, bank, handle_count, bank2,
-                                      off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, 1, 0, 0, 0, bindless, bank, handle_count, bank2,
+                                          off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 2;
+            }
             needs_image_query = 1;
             if (a < 255) used[a] = 1;
             if (bindless && a + 1 < 255) used[a + 1] = 1;
@@ -2897,9 +2919,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             u32 ty = op->id == O_TLD4S ? 2 : B(insn[i], 28, 3);
             u32 type = ty >> 1, array = ty & 1;
             u32 shadow = B(insn[i], 50, 1);
-            if (direct_add_typed_slot(textures, &texture_count, off, type, array, shadow, 0, bindless, bank,
-                                      handle_count, bank2, off2, indexed, ldc) < 0)
-                return direct_reject(si, "texture descriptor count");
+            { /* SWR: the slot's reads (ShTex.use) */
+                int use_slot = direct_add_typed_slot(textures, &texture_count, off, type, array, shadow, 0, bindless, bank,
+                                          handle_count, bank2, off2, indexed, ldc);
+                if (use_slot < 0)
+                    return direct_reject(si, "texture descriptor count");
+                textures[use_slot].use |= 2;
+            }
             if (a < 255) used[a] = 1;
             if (op->id == O_TLD4S) {
                 if (b < 255) used[b] = 1;
