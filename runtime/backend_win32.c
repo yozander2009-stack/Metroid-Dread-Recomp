@@ -295,7 +295,18 @@ static void set_pixel_format(HDC dc){
 
 /* window + message pump on their own thread so nothing stalls them */
 extern int fe_run(void* hwnd);   /* dread_ui/fe.cpp: its own message loop; 0 = play, 1 = quit */
+/* Per-monitor DPI aware, before the first window. Without it, on a display with Windows scaling (150% on a 4K or
+   1440p screen) Windows told the game the window was smaller than it is and stretched the picture up: no internal
+   resolution showed more detail than that smaller size (GitHub issue #17), and a Vulkan swapchain made at the real
+   size got the picture placed by the smaller numbers, in part of the screen (issue #12, about a third at 150%) */
+static void dpi_aware(void){
+  static int done; if(done) return; done=1;
+  HMODULE u=GetModuleHandleA("user32.dll");
+  typedef BOOL (WINAPI *SPDAC)(HANDLE); SPDAC f= u? (SPDAC)(void*)GetProcAddress(u,"SetProcessDpiAwarenessContext") : NULL;
+  if(f && f((HANDLE)(intptr_t)-4)) return;   /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Windows 10 1703+) */
+  SetProcessDPIAware(); }
 static void win_thread(void* arg){
+  dpi_aware();
   HINSTANCE hi=GetModuleHandle(NULL);
   WNDCLASSA wc={0}; wc.style=CS_OWNDC; wc.lpfnWndProc=wndproc; wc.hInstance=hi; wc.hCursor=LoadCursor(NULL,IDC_ARROW);
   wc.hIcon=LoadIcon(hi,MAKEINTRESOURCE(1)); if(!wc.hIcon) wc.hIcon=LoadIcon(NULL,IDI_APPLICATION);
@@ -303,6 +314,8 @@ static void win_thread(void* arg){
   RegisterClassA(&wc);
   RECT r={0,0,1280,720}; AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
   g_hwnd=CreateWindowA("MetroidDreadWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
+  { typedef UINT (WINAPI *GDFW)(HWND); GDFW gd=(GDFW)(void*)GetProcAddress(GetModuleHandleA("user32.dll"),"GetDpiForWindow");
+    if(gd && g_hwnd) LOG("display: Windows scaling %u%% (the game works in real pixels)\n",gd(g_hwnd)*100/96); }
   if(arg){   /* front end first, in this window; the game continues in it after Play */
     g_fe_mode=1; g_fe_result=fe_run(g_hwnd); g_fe_mode=0;
     if(g_fe_result){ SetEvent(g_fe_done); return; }   /* the process ends */
