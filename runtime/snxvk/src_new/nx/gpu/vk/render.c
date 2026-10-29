@@ -2702,8 +2702,55 @@ retry:
     }
     for (u32 q = 0; q < nvq; q++) vk_buf_prefetch(vq[q].gva, vq[q].len, 0);
     for (u32 q = 0; q < nvq; q++) vk_buf_prefetch(vq[q].gva, vq[q].len, 1);
+    /* SWR: streams over the same memory staged once. Metroid Dread binds each particle buffer (144 KB) as three streams
+       at +0, +0xC and +0x14, which the cache kept as three ranges by their starts: each copied in full, ~40-100 MB a
+       frame in the acid enemy's fight. Streams whose ranges overlap take one range over all of them, each bound at its
+       offset in it (a multiple of 4, as vertex formats need). Every byte a stream had is still there.
+       Default off (SWR_VK_STREAM_MERGE=1 on): it crashed the game 2/2 at the acid enemy like the clamp did,
+       copying the same bytes, so the crash follows the renderer getting faster, not missing data */
+    static int merge = -1;
+    if (merge < 0) {
+        const char* e = getenv("SWR_VK_STREAM_MERGE");
+        merge = e && *e ? atoi(e) != 0 : 0;
+    }
+    u8 merged[33] = {0};
+    for (u32 q = 0; merge && q < nvq; q++) {
+        u32 b = vq[q].b, members[33], nm = 0;
+        if (merged[q] || pl->guest_stride[b]) continue;
+        u64 lo = vq[q].gva, hi = vq[q].gva + vq[q].len;
+        members[nm++] = q;
+        for (int grew = 1; grew;) { /* overlapping ranges, transitively */
+            grew = 0;
+            for (u32 o = q + 1; o < nvq; o++) {
+                u64 a = vq[o].gva, z = vq[o].gva + vq[o].len;
+                int in = 0;
+                for (u32 m = 0; m < nm; m++) in |= members[m] == o;
+                if (in || merged[o] || pl->guest_stride[vq[o].b] || a >= hi || z <= lo) continue;
+                if ((a > lo ? a - lo : lo - a) & 3) continue; /* its offset in the union must stay 4-aligned */
+                members[nm++] = o;
+                if (a < lo) lo = a;
+                if (z > hi) hi = z;
+                grew = 1;
+            }
+        }
+        if (nm < 2 || hi - lo > (64ull << 20)) continue;
+        VkBuffer ub;
+        u64 uo;
+        if (!vk_buf_get_input(lo, hi - lo, 4, &ub, &uo)) {
+            g_vk_skipped++;
+            return;
+        }
+        for (u32 m = 0; m < nm; m++) {
+            u32 qq = members[m], bb = vq[qq].b;
+            merged[qq] = 1;
+            vbuf[bb] = ub;
+            voff[bb] = uo + (vq[qq].gva - lo) + vq[qq].base;
+            vsize[bb] = vq[qq].len - vq[qq].base;
+        }
+    }
     for (u32 q = 0; q < nvq; q++) {
         u32 b = vq[q].b;
+        if (merged[q]) continue;
         if (pl->guest_stride[b]) {
             if (!copy_restrided(vq[q].gva + vq[q].base, vq[q].len - vq[q].base, pl->guest_stride[b], (u32)pl->stride[b],
                                 &vbuf[b], &voff[b], &vsize[b])) {

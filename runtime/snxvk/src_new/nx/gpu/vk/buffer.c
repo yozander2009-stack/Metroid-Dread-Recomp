@@ -21,6 +21,7 @@
 #include "nx/gpu/vk/pending_pages.h"
 #include "nx/runtime/platform/tracy.h"
 
+static u64 stage_tag(void); /* SWR, before buf_get */
 typedef struct {
     u64 start, len, hash, shash;
     u32 epoch, strict_epoch, chk_epoch, schk, stable, used;
@@ -2043,13 +2044,27 @@ static int buf_get_owned(u32 i, Vb* e, u64 gva, u64 len, int strict, VkBuffer* b
     if (copy_stats_on()) g_copy_stage += len;
     e->buf = sb;
     e->off = so;
-    e->frame = vk_submit_number();
+    e->frame = stage_tag();
     e->epoch = e->chk_epoch = g_vk_epoch;
     if (strict) e->strict_epoch = g_vk_epoch;
     e->gw = gpu_mem_generation();
     e->wseen = vk_ww_now();
     use(i, buf, off);
     return 1;
+}
+/* SWR: what a staged copy's e->frame is compared with. Upstream: the submit it was staged in, and the GPU thread
+   submits every millisecond of recording (cmd.c SUBMIT_EVERY_NS), so a range a heavy frame's draws bind again after
+   a submit was staged again, its bytes unchanged. The copy stays in the frame slot's ring until that slot is reused
+   (cmd.c stage_alloc, vk_frame_next), so with SWR_VK_STAGE_FRAME=1 it is valid for the whole frame (default off:
+   measured no saving in the acid fight, the re-copies there are between frames).
+   Changes in guest memory still show: the epoch and write checks below are the same */
+static u64 stage_tag(void) {
+    static int by_frame = -1;
+    if (by_frame < 0) {
+        const char* e = getenv("SWR_VK_STAGE_FRAME");
+        by_frame = e && *e ? atoi(e) != 0 : 0;
+    }
+    return by_frame ? (1ull << 63) | vk_frame_id() : vk_submit_number();
 }
 static int buf_get(u64 gva, u64 len, VkBuffer* buf, u64* off, int strict, u64 align) {
     int pending;
@@ -2076,7 +2091,7 @@ static int buf_get(u64 gva, u64 len, VkBuffer* buf, u64* off, int strict, u64 al
         }
     }
     /* valid: the data is where draws can read it this frame */
-    int valid = e && e->buf && (e->own || e->frame == vk_submit_number());
+    int valid = e && e->buf && (e->own || e->frame == stage_tag());
     if (valid && !gpu_mem_dirty_since(e->gw, gva, len)) {
         if (e->epoch == g_vk_epoch && (!strict || e->strict_epoch == g_vk_epoch)) {
             use(i, buf, off);
@@ -2197,7 +2212,7 @@ static int buf_get(u64 gva, u64 len, VkBuffer* buf, u64* off, int strict, u64 al
                 g_copy_stage += len;
                 stage_note(why, changed, gva, len);
             }
-            e->frame = vk_submit_number();
+            e->frame = stage_tag();
         }
     }
     use(i, buf, off);
