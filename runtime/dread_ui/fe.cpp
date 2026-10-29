@@ -460,6 +460,7 @@ static void page_audio() {
 
 static const char* const GAME_BUTTONS[17] = {"A", "B", "X", "Y", "Left stick click", "Right stick click", "L", "R", "ZL", "ZR", "+ (pause)", "- (map)",
     "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Disabled"};
+#ifdef _WIN32   // Windows key codes (the X11 backend has its own fixed keys)
 // keyboard_map (main.c, backend_win32.c keymap): 24 actions, each up to two Windows key codes
 static const char KB_DEFAULT[] = "88+32,90,67,86,0,0,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
 static const char* const KB_ACTIONS[24] = {"A", "B (jump)", "X", "Y (shoot)", "Left stick click", "Right stick click", "L (free aim)", "R (missiles)", "ZL", "ZR",
@@ -502,6 +503,7 @@ static void kb_assign(int vk) {
                         : fmt("%s = %s (taken from %s)", KB_ACTIONS[g_kb_capture], key_name(vk).c_str(), moved.c_str()));
     g_kb_capture = -1;
 }
+#endif
 
 static void page_controls() {
     page_title("CONTROLS", "Pair Bluetooth controllers in Windows Settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
@@ -582,6 +584,7 @@ static void page_controls() {
               else { memcpy(g_nav.bind, b, sizeof b); flash("Two actions share a button: pick a different one (not saved until each action has its own)"); } }
     if (row_button("##nr", "Reset menu buttons", "RESET")) { for (int i = 0; i < NAV_COUNT; i++) g_nav.bind[i] = NAV_DEFAULT[i]; set("launcher_bindings", bindings_to_string(g_nav.bind)); flash("Menu buttons reset"); }
     help_text("Locked out? Hold + and - together for 3 seconds on any screen, or use the keyboard (arrows, Enter, Esc) or the mouse.");
+#ifdef _WIN32
     section("KEYBOARD");
     help_text("Press SET, then the key. A key does one thing: giving it to another action takes it from the old one. Esc cancels. Esc, Tab and the F keys keep their jobs.");
     { int k[24][2]; kb_parse(get("keyboard_map"), k);
@@ -591,6 +594,9 @@ static void page_controls() {
               g_kb_capture = g_kb_capture == i ? -1 : i;
       }
       if (row_button("##kbr", "Default keys (WASD, X/Space, Z, C, V, arrows)", "RESET")) { set("keyboard_map", ""); g_kb_capture = -1; flash("Keyboard reset to the default keys"); } }
+#else
+    section("KEYBOARD");
+#endif
     const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8 full resolution)"},
                            {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"}, {"Fast forward", "Tab"}, {"Quit", "Esc"},
                            {"Free aim (L)", "Hold right mouse button, move the mouse"}, {"Shoot (Y)", "Left mouse button"}, {"Missiles (R)", "Middle mouse button"}};
