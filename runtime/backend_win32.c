@@ -251,7 +251,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
   case WM_CLOSE: LOG("window: closed by the user or the system\n"); g_quit=1; return 0;
   case WM_QUERYENDSESSION: LOG("window: Windows is logging off / shutting down\n"); break;
   case WM_POWERBROADCAST: if(w==PBT_APMSUSPEND) LOG("window: the PC is going to sleep\n"); else if(w==PBT_APMRESUMEAUTOMATIC) LOG("window: the PC resumed from sleep\n"); break;
-  case WM_ERASEBKGND: return 1;   /* GL/Vulkan cover the whole client area: a GDI erase with the black class brush blinks the screen (fullscreen Vulkan) */
+  /* GL/Vulkan cover the whole client area once frames come: a GDI erase then blinks the screen (fullscreen Vulkan), so
+     no erase. Before the first frames nothing would paint it and Windows showed the window white at boot: paint it
+     black until then */
+  case WM_ERASEBKGND: { extern int g_frames; if(g_frames<3){ RECT rc; GetClientRect(h,&rc); FillRect((HDC)w,&rc,(HBRUSH)GetStockObject(BLACK_BRUSH)); } return 1; }
+  case WM_PAINT: { extern int g_frames; if(g_frames<3){ PAINTSTRUCT ps; HDC dc=BeginPaint(h,&ps); FillRect(dc,&ps.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH)); EndPaint(h,&ps); return 0; } break; }
   case WM_SIZE: g_ww=LOWORD(l); g_wh=HIWORD(l); if(g_ww<1) g_ww=1; if(g_wh<1) g_wh=1; return 0;
   case WM_SYSKEYDOWN: if(w==VK_RETURN){ if(!(l&(1<<30))) set_fullscreen(!g_fullscreen); return 0; } if(w==VK_F4) break; /* let Alt+F4 through */
   /* fallthrough */
@@ -355,7 +359,7 @@ static void win_thread(void* arg){
     if(!g_want_fs && g_fullscreen) set_fullscreen(0); }
   /* a window with a GL pixel format can't take a Vulkan swapchain reliably: with renderer=vulkan the GL
      context lives on a hidden window and the visible one is left to Vulkan */
-  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidDreadGL";   /* own class: its size must not reach wndproc */
+  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidDreadGL"; gc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH);   /* own class: its size must not reach wndproc */
     RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidDreadGL","Metroid Dread GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
   g_hdc=GetDC(g_glwnd? g_glwnd : g_hwnd);
   { extern int g_snxvk_want; if(!g_snxvk_want) set_pixel_format(g_hdc); }   /* native Vulkan: no GL pixel format on its window (set later if it falls back) */
@@ -468,6 +472,10 @@ static i32 dz(i32 v){ return (v>-7000 && v<7000)? 0 : v; }
 typedef struct {u32 frame;u64 buttons;i32 lx,ly,rx,ry;} TestInput;
 static TestInput* test_inputs;static u32 test_n,test_i;static int test_loaded,test_replay;
 static FILE*test_record;static TestInput test_previous;static int test_recorded;
+/* SWR_TEST_SCRIPT_MS=1 (tests, ported from the 2026-10-26 Codex diagnostics): the replay's first column is milliseconds
+   since the guest started (backend_test_guest_start) instead of presented frames, so inputs land at the same game time
+   whatever the frame rate. SWR_TEST_EXIT_MS ends the run the same way */
+static int test_ms; static u64 test_clock_start;
 static void test_input_load(void){
   if(test_loaded)return;test_loaded=1;
   const char*path=getenv("SWR_TEST_SCRIPT");
@@ -486,7 +494,8 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   test_input_load();u32 frame=(u32)g_frames;
   { static int done; const char*se; if(!done&&(se=getenv("SWR_TEST_SETENV"))&&*se){ u32 at=(u32)strtoul(se,NULL,10); const char*kv=strchr(se,':');   /* test only: "FRAME:NAME=VALUE" sets an env var at that guest frame */
       if(!kv){done=1;} else if(frame>=at){ char k[64]; const char*eq=strchr(kv+1,'='); if(eq&&eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; SetEnvironmentVariableA(k,eq+1); { char pe[200]; snprintf(pe,sizeof pe,"%s=%s",k,eq+1); _putenv(pe); } LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
-  if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}
+  if(test_replay){u64 pos=frame; if(test_ms){ if(!test_clock_start) test_clock_start=plat_ns(); pos=(plat_ns()-test_clock_start)/1000000ull; }
+    while(test_i+1<test_n&&test_inputs[test_i+1].frame<=pos)test_i++;TestInput*v=&test_inputs[test_i];*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}
   if(test_record&&(!test_recorded||*b!=test_previous.buttons||*lx!=test_previous.lx||*ly!=test_previous.ly||*rx!=test_previous.rx||*ry!=test_previous.ry)){
     fprintf(test_record,"%u,%llx,%d,%d,%d,%d\n",frame,(unsigned long long)*b,*lx,*ly,*rx,*ry);fflush(test_record);
     test_previous=(TestInput){frame,*b,*lx,*ly,*rx,*ry};test_recorded=1;
@@ -582,7 +591,8 @@ void video_poll(void){
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
 
-void backend_test_guest_start(void){if(g_script[0]&&getenv("SWR_SCRIPT_GUEST_CLOCK"))g_start=plat_ns();}
+void backend_test_guest_start(void){if(g_script[0]&&getenv("SWR_SCRIPT_GUEST_CLOCK"))g_start=plat_ns();
+  if(getenv("SWR_TEST_SCRIPT_MS")){ test_ms=1; test_clock_start=plat_ns(); LOG("test input clock: start_ns=%llu\n",(unsigned long long)test_clock_start); } }
 
 void frontend_frame(void){
   extern u64 gpu_gl_screenshot(const char* path);
@@ -613,7 +623,8 @@ void frontend_frame(void){
     static u64 heartbeat;u64 now=plat_ns();if(!heartbeat||now-heartbeat>=1000000000ull){heartbeat=now;LOG("test heartbeat: frame=%d fps_limit=%d ns=%llu\n",g_frames,g_opt_fps,(unsigned long long)now);}
     /* SWR_TEST_CRASH_FRAME=N: a crash inside a C-library DLL on this runtime thread (tests the crash report) */
     { const char*cr=getenv("SWR_TEST_CRASH_FRAME"); if(cr&&(u64)g_frames>=strtoull(cr,NULL,10)){ void*(*volatile ms)(void*,int,size_t)=memset; ms((void*)(uintptr_t)0x10,0,16); } }
-    const char*stop=getenv("SWR_TEST_EXIT_FRAME");if(stop&&(u64)g_frames>=strtoull(stop,NULL,10)){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);ExitProcess(0);}
+    const char*stop=getenv("SWR_TEST_EXIT_FRAME"),*stop_ms=getenv("SWR_TEST_EXIT_MS");
+    if((stop&&(u64)g_frames>=strtoull(stop,NULL,10)) || (stop_ms&&test_clock_start&&(plat_ns()-test_clock_start)/1000000ull>=strtoull(stop_ms,NULL,10))){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);ExitProcess(0);}
   }
 
   if(g_shot_req){ g_shot_req=0; char p[MAX_PATH]; SYSTEMTIME t; GetLocalTime(&t); CreateDirectoryA("captures",NULL);

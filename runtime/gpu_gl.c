@@ -2065,6 +2065,22 @@ static int g_nosample=-1;
 static int cs_gpu_src(u64 a, u64 n, GLuint* buf, u32* off);
 static u64 st_cs_gpucopy, st_cs_sync, st_cs_sync_ns;
 
+/* SWR_TRACE_VB=1 (diagnostic): every 5 s, the vertex buffers that cost the most: declared range, bytes hashed and
+   uploaded, draws, and the highest byte the draws actually read (from first/count, instances, or the indices) */
+typedef struct { u64 start, len, hashed, up, need, draws, idraws; u32 stride; } VbTr;
+static VbTr g_vbt[256]; static int g_vbt_on=-1;
+static VbTr* vbt_get(u64 start, u64 len){
+  for(int i=0;i<256;i++){ VbTr* t=&g_vbt[i]; if(t->start==start && t->len==len) return t; if(!t->len){ t->start=start; t->len=len; return t; } }
+  return NULL; }
+static void vbt_report(void){
+  static u64 last; u64 now=plat_ns(); if(now-last<5000000000ull) return; last=now;
+  for(int n=0;n<6;n++){ int best=-1; for(int i=0;i<256;i++) if(g_vbt[i].len && g_vbt[i].hashed && (best<0 || g_vbt[i].hashed>g_vbt[best].hashed)) best=i;
+    if(best<0) break; VbTr* t=&g_vbt[best];
+    LOG("vb trace: %llx len %llu KB stride %u: hashed %.1f MB, uploaded %.1f MB, %llu draws (%llu indexed), reads up to %llu KB\n",(unsigned long long)t->start,
+        (unsigned long long)(t->len>>10),t->stride,t->hashed/1048576.0,t->up/1048576.0,(unsigned long long)t->draws,(unsigned long long)t->idraws,(unsigned long long)(t->need>>10));
+    t->hashed=0; }
+  memset(g_vbt,0,sizeof g_vbt); }
+
 static GLuint buf_cached(GLenum target, u64 start, u64 len){
   if(g_cs_any){ GLuint sb; u32 so;
     if(cs_gpu_src(start,len,&sb,&so)){
@@ -2105,11 +2121,12 @@ static GLuint buf_cached(GLenum target, u64 start, u64 len){
   u8* src=gmem_ptr(start,len); u64 cpu= src? (u64)(src-g_mem) : 0;
   if(!src){ if(g_stage_cap<len){ u8* nb=realloc(g_stage_buf,len); if(!nb) return 0; g_stage_buf=nb; g_stage_cap=len; } gmem_read(start,g_stage_buf,len); src=g_stage_buf; }
   u64 h=fast_hash(src,len,0); st_vb_hashed+=len;
+  VbTr* vt_= g_vbt_on>0 && target==GL_ARRAY_BUFFER? vbt_get(start,len) : NULL; if(vt_) vt_->hashed+=len;
   if(!e){ e=calloc(1,sizeof *e); e->start=start; e->len=len; e->csseen=g_csgen; glGenBuffers(1,&e->id); e->next=vbc[k]; vbc[k]=e; e->hash=h^1; }
   glBindBuffer(target,e->id);
   /* 2026-10-23: orphaning rewritten buffers and uploading them as STREAM_DRAW measured no gain at a 240 cap (worse
      seconds under 170): the per-draw driver stall in heavy rooms is not this upload */
-  if(e->hash!=h){ e->hash=h; glBufferData(target,(GLsizeiptr)len,src,GL_STATIC_DRAW); st_vb_up+=len; e->stable=0; } else if(e->stable<100000) e->stable++;
+  if(e->hash!=h){ e->hash=h; glBufferData(target,(GLsizeiptr)len,src,GL_STATIC_DRAW); st_vb_up+=len; e->stable=0; if(vt_) vt_->up+=len; } else if(e->stable<100000) e->stable++;
   if(e->stable>=63 && len>=4096){ e->shash=sample_hash(start,len); e->schk=g_submit_epoch; }
   e->write_gen=g_gw_gen;
   e->cpu=cpu; e->epoch=g_submit_epoch; e->chk_epoch=g_submit_epoch; return e->id; }
@@ -2363,6 +2380,18 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     u64 len= lim>=start? lim-start+1 : 0; if(len>64u<<20) len=64u<<20;
     if(!len) { VA_OFF(i); continue; }
     GLuint vbid=buf_cached(GL_ARRAY_BUFFER,start,len);
+    if(g_vbt_on<0) g_vbt_on=getenv("SWR_TRACE_VB")!=NULL;
+    if(g_vbt_on>0){ VbTr* t=vbt_get(start,len);
+      if(t){ u32 dv= r[0x620+buf]? (va[3]? va[3] : 1) : 0; u64 hi;
+        t->draws++; t->stride=stride; if(indexed) t->idraws++;
+        if(dv) hi=((u64)base_instance+instances+dv-1)/dv*stride;
+        else if(!indexed) hi=((u64)first+count)*stride;
+        else { u32 fmt=r[0x5F6]; u32 isz= fmt==0? 1 : fmt==1? 2 : 4; u64 ia=((u64)r[0x5F2]<<32)|r[0x5F3]; u32 mx=0;
+          u8* ip=gmem_ptr(ia+(u64)first*isz,(u64)count*isz);
+          if(ip) for(u32 k=0;k<count;k++){ u32 v= isz==1? ip[k] : isz==2? ((u16*)ip)[k] : ((u32*)ip)[k]; if(v>mx && v!=0xFFFFFFFFu && !(isz==2 && v==0xFFFF)) mx=v; }
+          else mx=(u32)(len/(stride? stride : 1));
+          hi=((u64)mx+base_vertex+1)*stride; }
+        if(hi>t->need) t->need=hi; } }
     u32 cnt=attr_count(size), bits=attr_bits(size);
     GLenum gt; GLboolean norm= ty==1||ty==2;
     if(size==0x30) gt= ty==1? GL_INT_2_10_10_10_REV : GL_UNSIGNED_INT_2_10_10_10_REV;
@@ -2381,6 +2410,7 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
       glVertexAttribDivisor(i,div); }
   }
   g_tm[TM_BUF]+=plat_ns()-tb0_; tb0_=plat_ns();
+  if(g_vbt_on>0) vbt_report();
   GLenum mode=topo(topology);
   if(topology==7 || topology==8 || topology==9){ mode=GL_TRIANGLE_FAN; if(topology==7) mode=GL_TRIANGLES; if(topology==8) mode=GL_TRIANGLE_STRIP; }   /* quad strip = tri strip */
   if(indexed){
