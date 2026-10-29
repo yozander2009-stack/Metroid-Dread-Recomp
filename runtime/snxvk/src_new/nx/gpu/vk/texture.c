@@ -5,6 +5,7 @@
    is smaller). Others are loaded from guest memory, staged as they are and deswizzled and converted on the GPU
    (vk/blocklinear.c, vk/texconv.c, vk/astc.c), and checked for changes now and then: often at first, rarely once
    they have stayed the same. */
+#include "common/utilities/bits.h"
 #include <stdlib.h>
 #include <string.h>
 #include "nx/gpu/gpu.h"
@@ -12,6 +13,7 @@
 #include "nx/runtime/platform/log.h"
 #include "nx/gpu/vk/vk.h"
 #include "nx/memory/own.h"
+#include "nx/runtime/platform/tracy.h"
 
 /* the block height and depth (log2 GOBs) of a mip level of a block-linear texture. The hardware shrinks them for
    small levels: the height from the base level on, the depth only from level 1 on and by one step a level
@@ -83,15 +85,24 @@ static int stage_bl(const VkBlMove* m, u64 gva, u64 lsz, VkBuffer* buf, u64* off
 
 /* one level of one layer in guest memory, for vk_astc_upload to ask for its block rows */
 typedef struct {
-    const Surf* t;
+    Surf* t;
     u64 gva;
     u64 lsz;
     u32 rowb, th, lbh, lbd;
 } LevelSource;
+/* A guest read while staging lands GPU results, and landing can submit the frame's command buffer: the upload's
+   commands then belong to the one recording after it, with the image's transfer use established there again */
+static VkCommandBuffer upload_cb(Surf* t, VkCommandBuffer cb) {
+    VkCommandBuffer now = vk_cmd();
+    if (now == cb) return cb;
+    vk_surf_use(now, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    return now;
+}
 /* block linear blocks staged as they are and deswizzled on the GPU into the scratch buffer; pitch linear ones staged
    a row at a time */
-static int astc_rows(void* ctx, VkCommandBuffer cb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off) {
-    const LevelSource* l = ctx;
+static int astc_rows(void* ctx, VkCommandBuffer* pcb, u32 z, u32 nz, u32 y, u32 n, VkBuffer* buf, u64* off) {
+    LevelSource* l = ctx;
     if (l->t->bl) {
         VkBlMove m = {l->rowb, l->th, l->lbh, l->lbd, y, n, z, nz, l->rowb}; /* 16 byte blocks: rows of whole runs */
         VkBuffer staged;
@@ -100,6 +111,7 @@ static int astc_rows(void* ctx, VkCommandBuffer cb, u32 z, u32 nz, u32 y, u32 n,
         *buf = vk_bl_scratch((u64)l->rowb * n * nz, &cap);
         *off = 0;
         if (!*buf || !stage_bl(&m, l->gva, l->lsz, &staged, &at)) return 0;
+        VkCommandBuffer cb = *pcb = upload_cb(l->t, *pcb);
         vk_bl_barrier(cb, 1);
         int ok = vk_bl_move(cb, &m, 0, staged, at, *buf, 0);
         vk_bl_barrier(cb, 0);
@@ -113,6 +125,7 @@ static int astc_rows(void* ctx, VkCommandBuffer cb, u32 z, u32 nz, u32 y, u32 n,
             u64 to = ((u64)k * n + r) * l->rowb;
             vk_guest_read(l->gva + at, l->rowb, p + to, *buf, *off + to);
         }
+    *pcb = upload_cb(l->t, *pcb);
     return 1;
 }
 
@@ -127,7 +140,7 @@ typedef struct {
 } UpConv;
 typedef struct {
     VkCommandBuffer cb;
-    const Surf* t;
+    Surf* t;
     VkBuffer scratch;
     u64 cap, used;
     int open;        /* the barrier before the batch's dispatches is recorded */
@@ -138,12 +151,23 @@ typedef struct {
     VkBuffer src[64]; /* each copy's buffer: the scratch buffer, or staging */
     u32 nreg;
 } Upload;
+/* the buffer a batch records into now: staging can submit, which ends the one the batch was opened on */
+static VkCommandBuffer up_cb(Upload* u) {
+    VkCommandBuffer cb = upload_cb(u->t, u->cb);
+    if (cb != u->cb) {
+        u->cb = cb;
+        u->open = 0; /* the batch's barriers ended with the buffer that held them */
+    }
+    return cb;
+}
 static void up_open(Upload* u) {
+    up_cb(u);
     if (!u->open) vk_bl_barrier(u->cb, 1);
     u->open = 1;
 }
 static int up_flush(Upload* u) {
     int ok = 1;
+    up_cb(u);
     if (u->moves) vk_bl_barrier(u->cb, 0);
     if (u->nconv) {
         up_open(u);
@@ -327,7 +351,6 @@ static int level_upload_pitch(Upload* u, const UpLevel* lv, u64 gva, u64 lsz, u6
     return 1;
 }
 
-static u32 g_tex_upload_gen;
 /* the most staging one piece of a level takes: a bigger level is staged in strips, as no allocation may be bigger
    than g_vk.alloc_cap (memory.c) */
 #define TEX_BAND (64ull << 20)
@@ -338,12 +361,22 @@ void vk_tex_stats(u64* uploads, u64* bytes) {
     *bytes = g_tex_upload_bytes;
 }
 /* 1 when every subresource was copied; 0 when memory or staging ran out, and upload_valid keeps it for a retry */
+static int tex_upload_(Surf* t);
+/* a texture's upload as a profiler zone (SNX_TRACY builds) */
 static int tex_upload(Surf* t) {
+    SNX_ZONE_V(z, "texture upload", t->size);
+    int r = tex_upload_(t);
+    SNX_ZONE_END(z);
+    return r;
+}
+static int tex_upload_(Surf* t) {
     const VkFmt* f = &t->f;
+    SNX_ZONE_T(z_up, "texture upload", "%ux%u", t->w, t->h);
+    SNX_ZONE_VALUE(z_up, t->size);
     g_tex_uploads++;
     g_tex_upload_bytes += t->size;
     t->upload_valid = 0;
-    t->wgen = ++g_tex_upload_gen; /* even a new texture at a reused address invalidates an old target's copy */
+    t->wgen = vk_surf_gen();      /* even a new texture at a reused address invalidates an old target's copy */
     t->took_drawn = 0;            /* memory's own texels again, until tex_take_drawn copies targets in */
     vk_surf_relist(t);
     vk_render_end();              /* copies and clears happen outside rendering passes */
@@ -368,7 +401,7 @@ static int tex_upload(Surf* t) {
             if (f->conv == VKC_ASTC) { /* decoded on the GPU from its block rows, deswizzled on the GPU */
                 complete = up_flush(&u);
                 LevelSource ls = {t, t->gva + at, lsz, rowb, th, lbh, lbd};
-                complete = complete && vk_astc_upload(cb, t, lw, lh, ld, l, layer, astc_rows, &ls);
+                complete = complete && vk_astc_upload(u.cb, t, lw, lh, ld, l, layer, astc_rows, &ls);
                 u.scratch = VK_NULL_HANDLE; /* astc_rows may have grown the scratch buffer: asked for again */
                 u.cap = 0;
             } else {
@@ -403,7 +436,7 @@ static u64 mem_hash(u64 gva, u64 size) {
     for (u64 o = 0; o < size; o += MEM_HASH_PIECE) {
         u64 n = size - o < MEM_HASH_PIECE ? size - o : MEM_HASH_PIECE;
         if (!p) vk_guest_peek(gva + o, piece, n);
-        h = (h ^ vk_hash(p ? p + o : (const u8*)piece, n)) * 1099511628211ull;
+        h = snx_fnv_step(h, vk_hash(p ? p + o : (const u8*)piece, n));
     }
     return h;
 }
@@ -731,8 +764,15 @@ static Surf* tex_check(Surf* t, u64 gva) {
         t->ww_epoch = vk_ww_epoch();
         if (wr >= 0) {
             t->checked = g_vk_present;
-            if (wr && !fresh) tex_rehash(t);
-            t->wseen = wnow + 1; /* this scan's marks are stamped with the clock after wnow */
+            /* Written: hashed again after the check took in the scans that found the writes, so the new contents hold
+               what their marks (the clock as it is now, at most) stand for. A rehash for the front end's writes came
+               before those scans, and is done again. Unchanged, the texture keeps its baseline: the clock before the
+               check plus one is what the next scans taken in are marked with, and the texture took their writes as
+               seen (one game's glyph cache missed the glyphs its CPU drew after a check that marked nothing) */
+            if (wr) {
+                t->wseen = wnow;
+                tex_rehash(t);
+            }
             return t->upload_valid ? t : NULL;
         }
         /* without it, hashed whole once in each epoch it is used in until it settles: what the CPU wrote before a
@@ -772,7 +812,7 @@ static Surf* tex_check(Surf* t, u64 gva) {
     }
     return t->upload_valid ? t : NULL;
 }
-static Surf* tex_from_tic(const u32* tic, int raw) {
+static Surf* tex_from_tic(const u32* tic, int raw, int storage) {
     u64 gva = ((u64)(tic[2] & 0xFFFF) << 32) | tic[1];
     u32 hv = (tic[2] >> 21) & 7;
     int bl = hv == 3 || hv == 4;
@@ -783,11 +823,17 @@ static Surf* tex_from_tic(const u32* tic, int raw) {
     u32 bh = (tic[3] >> 3) & 7, bd = (tic[3] >> 6) & 7, pitch = bl ? 0 : ((tic[3] & 0xFFFF) << 5);
     if (!gva) return NULL;
     if (hv == 0 || type == 6) {
-        /* Buffer TICs describe a linear row of texels. The guest's 1D fetch is represented by our
-           height-one 2D image and the texture shader already supplies y = 0. */
+        /* Buffer TICs describe a linear row of texels, bound as a 2D image the shader's 1D fetch reads at
+           (x mod row, x / row): one row, or rows of 2^SH_TEXEL_ROW_SHIFT texels after another in memory for a longer
+           buffer (UE4's vertex factories keep a mesh's texture coordinates and colors in such buffers, of tens of
+           thousands of texels) */
         if (hv != 0 || type != 6) return NULL;
         w = (((tic[3] & 0xFFFFu) << 16) | (tic[4] & 0xFFFFu)) + 1;
         h = d = 1;
+        if (w > (1u << SH_TEXEL_ROW_SHIFT)) {
+            h = (w + (1u << SH_TEXEL_ROW_SHIFT) - 1) >> SH_TEXEL_ROW_SHIFT;
+            w = 1u << SH_TEXEL_ROW_SHIFT;
+        }
         glevels = 1;
         bl = 0;
         bh = bd = 0;
@@ -809,10 +855,6 @@ static Surf* tex_from_tic(const u32* tic, int raw) {
         f.sint = 0;
     }
     if (type == 6 && f.bpp && w <= UINT32_MAX / f.bpp) pitch = w * f.bpp;
-    if (type == 6 && w > 16384) { /* the row of a 2D image: drawing has no texel buffer binding for it */
-        LOG_LIMIT(1, "vulkan: a buffer texture of %u texels is longer than a texture row here (read as zeros)\n", w);
-        return NULL;
-    }
     if (!f.bpp || !w || w > 16384 || h > 16384 || d > 2048) return NULL;
     if ((u64)w * h * d * (f.bw > 1 ? 1 : f.bpp) > (512ull << 20)) return NULL;
     if (!bl && pitch < (w + f.bw - 1) / f.bw * f.bpp) {
@@ -823,6 +865,7 @@ static Surf* tex_from_tic(const u32* tic, int raw) {
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE && d != 6) vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY && !g_vk.feat.imageCubeArray) vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     u32 layers = vt == VK_IMAGE_VIEW_TYPE_3D ? 1 : d, d3 = vt == VK_IMAGE_VIEW_TYPE_3D ? d : 1;
+    if (vt == VK_IMAGE_VIEW_TYPE_3D && !raw) f = vk_tic_format_3d(tic[0], srgb);
     /* bytes from one layer to the next: all the levels the header has, whichever of them it shows */
     u64 stride = bl ? bl_layer_size(w, h, d3, &f, bh, bd, glevels) : (u64)pitch * ((h + f.bh - 1) / f.bh) * d3;
     /* A texture upload reads guest memory. Complete any compute storage writes that overlap it first. */
@@ -857,6 +900,12 @@ static Surf* tex_from_tic(const u32* tic, int raw) {
         if (f.bpp == rt->f.bpp || f.depth || rt->f.depth) {
             vk_rt_note_read(rt);
             if (rt->layout == VK_IMAGE_LAYOUT_UNDEFINED) goto texture_from_memory;
+            /* Crops are sampling snapshots, without storage usage or a guest
+               layout for publishing writes. Resolve writable mismatches into
+               a surface with the descriptor's own guest layout instead. */
+            if (storage && (rt->w != w || rt->h != h || rt->layers != layers ||
+                            rt->depth3d != d3 || rt->f.vk != f.vk || !rt->storage_capable))
+                goto texture_from_memory;
             /* the same bytes in another color format (an RGBA8 target read as R32_Uint): sampling the target itself
                would convert its texels, so a copy in the texture's format holds them as they are. sRGB and linear
                twins are views of one image and need no copy */
@@ -907,7 +956,8 @@ texture_from_memory:
     return tex_upload(t) ? t : NULL;
 }
 
-VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkComponentMapping* map, int stencil) {
+static VkImageView tex_view(Surf* s, VkImageViewType type, int srgb, const VkComponentMapping* map, int stencil,
+                            u32 levels) {
     /* what a view of each image type can be */
     u32 layers;
     switch (type) {
@@ -938,7 +988,7 @@ VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkCompone
     VkFormat fmt = s->f.depth ? s->f.vk : vk_srgb_as(s->f.vk, srgb);
     stencil = stencil && s->f.stencil;
     u64 key = (u64)type | (u64)map->r << 4 | (u64)map->g << 8 | (u64)map->b << 12 | (u64)map->a << 16 | (u64)fmt << 20 |
-              (u64)stencil << 60;
+              (u64)stencil << 60 | (u64)(levels != s->levels) << 61;
     for (int i = 0; i < s->nsv; i++)
         if (s->sv[i].key == key) return s->sv[i].v;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -949,7 +999,7 @@ VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkCompone
                                 .subresourceRange = {stencil      ? VK_IMAGE_ASPECT_STENCIL_BIT
                                                      : s->f.depth ? VK_IMAGE_ASPECT_DEPTH_BIT
                                                                   : VK_IMAGE_ASPECT_COLOR_BIT,
-                                                     0, s->levels, 0, layers}};
+                                                     0, levels, 0, layers}};
     /* a view in the image's sRGB twin is sampled only: storage, which a render target may have, has no sRGB format */
     VkImageViewUsageCreateInfo vu = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                      .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
@@ -963,6 +1013,17 @@ VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkCompone
     }
     s->sv[s->nsv++] = (SurfView){key, v};
     return v;
+}
+
+VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkComponentMapping* map, int stencil) {
+    return tex_view(s, type, srgb, map, stencil, s->levels);
+}
+
+VkImageView vk_tex_storage_view(Surf* s, VkImageViewType type) {
+    const VkComponentMapping identity = {0};
+    /* A storage descriptor exposes the first level selected by its TIC, not
+       the entire sampled mip chain. Both views share the existing image. */
+    return tex_view(s, type, 0, &identity, 0, 1);
 }
 
 /* empty textures for slots whose texture is missing or doesn't match the shader: zero, or depth 1.0 for shadow
@@ -1003,6 +1064,7 @@ VkImageView vk_null_view(VkImageViewType type, int num) {
             free(s);
             return VK_NULL_HANDLE;
         }
+        vk_mem_track(s->mem);
         vk_render_end(); /* clears happen outside rendering passes */
         VkCommandBuffer cb = vk_cmd();
         vk_surf_use(cb, s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT,
@@ -1155,10 +1217,13 @@ void vk_tex_frame(void) {
        memory if they are needed again. Those whose pixels would be lost (vk_surf_reclaim) go before five minutes
        only under the budget's pressure (vk_mem_trim), and a target holding a draw a texture would take stays until
        then. The recency lists hand out the oldest first, so this costs what goes. The lossy pass looks every 600
-       presents: it passes over the targets it keeps, and asking whether one holds such a draw can hash its memory */
+       presents: it passes over the targets it keeps, and asking whether one holds such a draw can hash its memory.
+       Render targets later ones drew all over hold nothing: every 30 presents those unused for a second and eight
+       presents go (a game at a dynamic resolution makes its scene's targets again each frame) */
     u32 before = vk_present_before(20000000000ull, 120);
     vk_surf_reclaim(VK_LRU_TEX, before, ~0ull, VK_RECLAIM_LOSSLESS);
     vk_surf_reclaim(VK_LRU_RT, before, ~0ull, VK_RECLAIM_LOSSLESS);
+    if (g_vk_present % 30 == 0) vk_rt_reclaim_superseded(vk_present_before(1000000000ull, 8), ~0ull);
     if (g_vk_present % 600 == 0) {
         u32 lossy_before = vk_present_before(300000000000ull, 600);
         vk_surf_reclaim(VK_LRU_TEX, lossy_before, ~0ull, VK_RECLAIM_IDLE);
@@ -1232,11 +1297,13 @@ static void copy_layers(VkCommandBuffer cb, Surf* s, Surf* t, u32 l, u32 dst, u3
 /* a texture whose layers, levels or 3D slices were drawn as render targets of their own is copied from those targets
    on the GPU: they are never written back to its memory. Only a target matching one subresource (or, layered, the
    layers from one), whose backing memory has not been overwritten since its draw. Generated textures can be first
-   sampled several frames later. Targets are never block compressed: such a texture can't take their texels */
+   sampled several frames later. Targets are never block compressed, but a compressed texture takes a target whose
+   texels are as many bytes as its blocks, a texel for a block: a game compressing on the GPU draws the blocks so (one
+   game's text labels, BC5 drawn as RGBA32UI) */
 static void tex_take_drawn(Surf* t) {
     /* a converted format's texels differ from its host image's, but a depth texture takes its targets' host images
        as they are (the same format, below): D24S8's guest packing is converted only when it is loaded from memory */
-    if (!t || t->is_rt || (t->f.conv && !t->f.depth) || t->f.bw != 1) return;
+    if (!t || t->is_rt || (t->f.conv && !t->f.depth)) return;
     Surf* small[32];
     Surf** d = small;
     u64 stride = t->layer_size;
@@ -1341,16 +1408,23 @@ static void tex_take_drawn(Surf* t) {
         u64 rem = off - (u64)layer * stride, lo = 0;
         for (u32 l = 0; l < t->levels && layer < t->layers; l++) {
             u32 lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1;
+            /* a compressed level in blocks, the target's texels. The copy's extent counts the target's texels, and
+               the blocks over a level's edge are the level's */
+            lw = (lw + t->f.bw - 1) / t->f.bw;
+            lh = (lh + t->f.bh - 1) / t->f.bh;
             /* a block-linear level's rows take whole GOBs (64 bytes), so a target drawn as wide as them covers the
-               level (a 120-texel depth pyramid level drawn 128 wide, a cube mip narrower than a GOB one GOB wide):
-               only its left lw texels are the level's */
-            int padded_row = t->bl && s->bl && s->f.vk == t->f.vk && s->w > lw &&
+               level (a 120-texel depth pyramid level drawn 128 wide, a cube mip narrower than a GOB one GOB wide, a
+               230-texel BC5 label's 58 blocks drawn 60 wide): only its left lw texels are the level's */
+            int padded_row = t->bl && s->bl && (s->f.vk == t->f.vk || t->f.bw > 1) && s->w > lw &&
                              ((u64)s->w * s->f.bpp + 63) / 64 == ((u64)lw * t->f.bpp + 63) / 64;
             if (rem == lo && (s->w == lw || padded_row) && s->h == lh) {
                 if (!vk_rt_drawn_fresh(s)) break; /* newer guest memory at this address takes precedence */
-                /* a layered target spaced as the texture's layers fills as many of them as it has */
+                /* a layered target spaced as the texture's layers fills as many of them as it has, at any level: one
+                   game draws each level of its reflection cube through a target of six layers a whole face apart,
+                   whose layer k is face k of that level (taken at level 0 alone, faces 1 to 5 of the blurred levels
+                   kept guest memory's bytes, and its shiny surfaces reflected noise) */
                 u32 count = 1;
-                if (s->layers > 1 && !s->volume && l == 0 && s->layer_size == stride) /* a volume's are GOB slices */
+                if (s->layers > 1 && !s->volume && s->layer_size == stride) /* a volume's are GOB slices */
                     count = s->layers < t->layers - layer ? s->layers : t->layers - layer;
                 copy_layers(copy_begin(s, t), s, t, l, layer, count, lw, lh, 0);
                 mark_copied(s, t);
@@ -1365,7 +1439,7 @@ static void tex_take_drawn(Surf* t) {
 int vk_fmap_on(void);                  /* SwitchRecomp */
 void vk_dlss_before_read(u64 gva); /* SwitchRecomp, dlss.c: DLSS runs on the scene target before anything reads it */
 Surf* vk_tex_from_tic(const u32* tic) {
-    Surf* t = tex_from_tic(tic, 0);
+    Surf* t = tex_from_tic(tic, 0, 0);
     if (t) vk_dlss_before_read(t->gva);
     tex_take_drawn(t);
     if (t && vk_fmap_on()) { /* SNX_FRAME_MAP: which render targets a pass reads (render.c attributes them) */
@@ -1375,6 +1449,12 @@ Surf* vk_tex_from_tic(const u32* tic) {
     }
     return t;
 }
+Surf* vk_tex_from_tic_storage(const u32* tic) {
+    Surf* t = tex_from_tic(tic, 0, 1);
+    if (t) vk_dlss_before_read(t->gva);
+    tex_take_drawn(t);
+    return t;
+}
 Surf* vk_tex_recheck(Surf* t) {
     if (g_cs_any) vk_compute_mem_need(t->gva, t->layer_size * t->layers);
     t = tex_check(t, t->gva);
@@ -1382,7 +1462,7 @@ Surf* vk_tex_recheck(Surf* t) {
     return t;
 }
 Surf* vk_tex_from_tic_raw(const u32* tic) {
-    Surf* t = tex_from_tic(tic, 1);
+    Surf* t = tex_from_tic(tic, 1, 0);
     if (t) vk_dlss_before_read(t->gva);
     tex_take_drawn(t);
     return t;

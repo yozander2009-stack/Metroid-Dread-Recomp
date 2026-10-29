@@ -27,6 +27,10 @@ typedef struct {
        every own_begin and own_drop caller holds it */
     void (*lock)(void);
     void (*unlock)(void);
+    /* the host pages [addr, addr + size) of a landing, whose bytes (size of them) are as it left them, read before
+       the pages are let go of: the write tracking, which takes pages it watches again for written, can tell a later
+       write from them. Called with the producer's lock held. Optional */
+    void (*landed)(u64 addr, u64 size, const u8* bytes);
 } OwnHooks;
 
 /* 0 when the host can trap guest memory (plat_trap_init): own_begin can work from then on. -1: producers land their

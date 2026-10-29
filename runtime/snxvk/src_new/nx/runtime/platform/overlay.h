@@ -10,7 +10,19 @@
 #define OVERLAY_COLS     40 /* the panel, in cells of the 8x16 font: the narrowest */
 #define OVERLAY_COLS_MAX 72 /* and the widest, as far as three quarters of the picture let it */
 #define OVERLAY_ROWS     16 /* the tallest page's: the others are as tall as their items */
-enum { OVERLAY_NONE, OVERLAY_CLOSE, OVERLAY_EXIT, OVERLAY_EDIT };
+/* what a menu action leaves to its caller: the save state ones for the slot overlay_slot names; the keyboard's box
+   answered (overlay_keyboard_take), or a tap on its line, which asks for the system's keyboard again */
+enum {
+    OVERLAY_NONE,
+    OVERLAY_CLOSE,
+    OVERLAY_EXIT,
+    OVERLAY_EDIT,
+    OVERLAY_SAVE,
+    OVERLAY_LOAD,
+    OVERLAY_DELETE,
+    OVERLAY_KEYBOARD,
+    OVERLAY_TYPE
+};
 
 /* whether it is open, for the renderer's thread too */
 int overlay_shown(void);
@@ -49,12 +61,32 @@ void overlay_pointer_move(u64 id, float x, float y, const int safe[4]);
 int overlay_pointer_up(u64 id, float x, float y, int sw, int sh);
 void overlay_pointer_cancel(u64 id);
 void overlay_pointers_reset(void);
-void overlay_draw(SnxUiList* l, int sw, int sh);
+/* the menu, and over the game a notification until its time is up, at now_ns (plat_ns) */
+void overlay_draw(SnxUiList* l, int sw, int sh, u64 now_ns);
+/* a notification of one line in the picture's corner for SNX_OVERLAY_TOAST_MS from now_ns: a save state saved or
+   loaded, a screenshot taken. Under ui_lock */
+#define SNX_OVERLAY_TOAST_MS 3000
+void overlay_toast(const char* text, u64 now_ns);
+int overlay_toasting(u64 now_ns); /* one shows */
+/* The save states' pages: a row per slot, the focused one's thumbnail beside them, and Save, Load and Delete for one
+   (Load and Delete asked first). Slot 0 is the one a load saves over first, which only loads or goes */
+#define OVERLAY_SLOTS_MAX 33
+typedef struct {
+    char when[32]; /* when it was saved, and the play time then; "" for an empty slot */
+    char why[96];  /* why it can't be loaded, "" when it can */
+    u8* thumb;     /* SNX_UI_IMAGE_W x SNX_UI_IMAGE_H RGBA, NULL for none: allocated, the overlay's to free */
+} OverlaySlot;
+/* the slots listed, n of them from slot 0, taken over, under ui_lock: the frontend's as each page opens and after a
+   save or a delete */
+void overlay_slots_set(const OverlaySlot* slots, int n);
+int overlay_slot(void);        /* the slot the last OVERLAY_SAVE, _LOAD or _DELETE is for */
+int overlay_states_shown(void); /* one of the save states' pages shows: the game waits meanwhile */
+int overlay_states_stale(void); /* the slots page opened since the last overlay_slots_set: its list is read again */
 /* the columns the menu's pages and the stopped panel take at scale on a picture sw wide: as many as three quarters of it
    holds, within OVERLAY_COLS and OVERLAY_COLS_MAX */
 int overlay_cols(int sw, int scale);
 /* a fatal error's panel (backend/sdl3.c), a dialog as the menu's pages are: the head, the game's name, the error, what it
-   means and what to do, cut to its width, then Share log, Copy path and Close, one in focus */
+   means and what to do, cut to its width, then Share Log, Copy path and Close, one in focus */
 typedef struct {
     float x, y, w, h;
 } SnxOverlayRect;
@@ -62,7 +94,7 @@ enum { SNX_OVERLAY_ERROR_SHARE, SNX_OVERLAY_ERROR_COPY, SNX_OVERLAY_ERROR_CLOSE,
 typedef struct {
     const char *name, *msg, *how;
     const char* log;  /* the game's log, underlined as a link; NULL for none */
-    const char* said; /* what Share log or Copy path did, over the items; NULL before either */
+    const char* said; /* what Share Log or Copy path did, over the items; NULL before either */
     int focus;        /* one of SNX_OVERLAY_ERROR_SHARE, _COPY and _CLOSE */
     /* drawn: where the log's link and each item are, empty when not shown */
     SnxOverlayRect link, items[SNX_OVERLAY_ERROR_ITEMS];
@@ -70,5 +102,45 @@ typedef struct {
 void overlay_error_draw(SnxUiList* l, int sw, int sh, SnxOverlayError* e);
 /* 1 when x, y falls in r, an empty one taking nothing */
 int overlay_error_hit(const SnxOverlayRect* r, float x, float y);
+
+/* The software keyboard's box, for a game that asks the player for text (am.c, through backend_keyboard_show): a
+   dialog over the game, the same on every platform, with the game's header, sub and guide texts, the line the player
+   types into, how many characters it holds against the game's limits, and the game's OK and Cancel. What the
+   window's text input types (a keyboard, an input method, the system's on-screen keyboard) is added to the line up to
+   its most; Backspace takes its last character away; Enter, A or a tap on OK gives the line, but one short of its
+   least, which the box then says; Esc, B or a tap on Cancel cancels. While it shows and the menu doesn't, it takes
+   the keys, the buttons and the fingers, and the menu goes over it. Under ui_lock */
+#define OVERLAY_KB_UNITS 1024                       /* the most UTF-16 units a line holds, as the game counts them */
+#define OVERLAY_KB_TEXT  (3 * OVERLAY_KB_UNITS + 1) /* its bytes in UTF-8, a 0 after them */
+typedef struct {
+    char text[OVERLAY_KB_TEXT]; /* the game's initial text, UTF-8: the line starts as it, cut to max */
+    /* the game's texts, UTF-8, "" for none: over the line, under it and the OK item's label */
+    char header[3 * 64 + 1], sub[3 * 128 + 1], guide[3 * 256 + 1], ok[3 * 8 + 1];
+    /* the line's UTF-16 units: the least it is given with, and the most (0, or past OVERLAY_KB_UNITS: that) */
+    u32 min, max;
+    int password; /* each character drawn as an asterisk */
+    int numbers;  /* the game's number pad: a system keyboard of digits */
+    u32 ticket;   /* the asker's, handed back with the answer */
+} OverlayKeyboard;
+/* the box for k, in place of one that shows */
+void overlay_keyboard_show(const OverlayKeyboard* k);
+/* the box for ticket taken away unanswered, as the game takes its keyboard away; another one stays */
+void overlay_keyboard_hide(u32 ticket);
+int overlay_keyboard_shown(void); /* for any thread */
+/* text the window's text input typed, UTF-8: as many of its characters as the line has room for, controls left out */
+void overlay_keyboard_type(const char* text);
+/* a key on the line: OVERLAY_KEYBOARD once it answers (the box gone), else OVERLAY_NONE */
+enum { OVERLAY_KEY_BACKSPACE, OVERLAY_KEY_ENTER, OVERLAY_KEY_CANCEL };
+int overlay_keyboard_key(int key);
+/* the answer, each taken once: 0 with the line in out (size bytes), 1 cancelled, and the ticket it is for; -1 for none */
+int overlay_keyboard_take(u32* ticket, char* out, size_t size);
+/* what the window's text input needs while the box shows (1; 0 when it doesn't): the box's ticket, its kind of text,
+   and its line on a picture sw x sh, in its pixels, where an input method puts its window */
+typedef struct {
+    u32 ticket;
+    int password, numbers;
+    SnxOverlayRect line;
+} OverlayTyping;
+int overlay_keyboard_typing(int sw, int sh, OverlayTyping* t);
 
 #endif

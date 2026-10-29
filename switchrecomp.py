@@ -255,6 +255,7 @@ def elf_stack_not_exec(path):
 
 
 def runtime_path(target_win, backend):
+    if os.environ.get('SWR_RUNTIME_OUT'): return os.path.abspath(os.environ['SWR_RUNTIME_OUT'])   # test builds beside bin's
     return os.path.join(HERE, 'bin', 'runtime_%s_%s%s' % ('win64' if target_win else 'linux', backend,
                                                            '.exe' if target_win else ''))
 
@@ -303,7 +304,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if overlay: srcs += [os.path.join(RT, 'dread_ui', f) for f in ('ui.cpp', 'ov.cpp') + (('fe.cpp', 'fe_sys_linux.cpp') if lx_frontend else ('stub_fe.c',))] + [os.path.join(RT, 'imgui', 'src', f) for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui_impl_opengl3.cpp')]
     elif gl and not frontend: srcs += [os.path.join(RT, 'dread_ui', 'stub.c')]
     # renderer=vulkan_native: ScarletNX's GPU front end + Vulkan renderer (GPL-3.0), prebuilt by work-profiler/build_snxvk.py
-    snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss.a' if release else 'libsnxvk_new.a')   # ScarletNX main b5f4f14 (work-profiler/build_snxvk2.py)
+    snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss.a' if release else 'libsnxvk_new.a')   # ScarletNX main 112db409 (work-profiler/build_snxvk2.py)
     if os.environ.get('SWR_SNXVK_LIB'): snxvk = os.path.join(RT, 'snxvk', os.environ['SWR_SNXVK_LIB'])   # e.g. libsnxvk_new.a (re-vendor tests)
     snxvk = snxvk if os.path.isfile(snxvk) and target_win and backend == 'win32' and not os.environ.get('SWR_NO_SNXVK') else None
     cmd = [cc, '-O' + opt, '-w', '-fno-strict-aliasing', '-Wl,-S', '-I', RT, '-I', os.path.join(RT, 'bcn'), '-I', os.path.join(RT, 'spvc'), '-I', os.path.join(RT, 'oh264', 'include'), '-I', os.path.join(RT, 'vp9', 'include'), '-I', os.path.join(RT, 'snxvk', 'deps', 'Vulkan-Headers-1.4.365', 'include')] + srcs + ['-o', out]
@@ -312,6 +313,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if release: cmd += ['-DSWR_RELEASE']
     if os.environ.get('SWR_RUNTIME_DEFS'): cmd += os.environ['SWR_RUNTIME_DEFS'].split()   # e.g. -DSWR_NO_SKIPCUT for a test build
     if snxvk: cmd += ['-DSWR_HAVE_SNXVK', snxvk]
+    if snxvk:   # libsnxvk_<tag>[_nodlss].a is built from src_<tag>: ScarletNX main 112db409 or later there -> snxvk_glue.c's V2
+        tag = os.path.basename(snxvk)[len('libsnxvk_'):].split('.')[0].replace('_nodlss', '')
+        if os.path.isfile(os.path.join(RT, 'snxvk', 'src_' + tag, 'nx', 'gpu', 'shader', 'structure.c')): cmd += ['-DSWR_SNXVK_V2']
     if frontend: cmd += ['-DSWR_HAVE_FRONTEND', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui'), imgui]
     if overlay: cmd += ['-DSWR_HAVE_OVERLAY', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui')]
     if overlay and lx_frontend: cmd += ['-DSWR_HAVE_FRONTEND']

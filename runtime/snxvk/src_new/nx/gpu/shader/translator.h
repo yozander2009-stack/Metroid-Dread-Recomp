@@ -48,4 +48,44 @@ int flow_always(u64 w);
 /* each SYNC, BRK and CONT's target when the CRS stack can be followed at translation time: 1, or 0 when the stack
    has to be kept at run time */
 int shader_resolve_crs(const u64* words, u32 count, u32* pop_targets);
+
+/* A program's control flow as structured constructs (structure.c), as a list of tokens in the order the translator
+   writes them. Scopes are SPIR-V loop constructs: a block scope runs once and ends before the block it was opened
+   for, a loop scope repeats from its header. */
+enum {
+    SHS_BODY,       /* a block's instructions: the words from a up to b */
+    SHS_RETURNED,   /* the body before ended the program: an EXIT that always runs */
+    SHS_OPEN_BLOCK, /* a: the scope */
+    SHS_OPEN_LOOP,  /* a: the scope */
+    SHS_CLOSE,      /* a: the scope. Running off its end leaves it */
+    SHS_IF,         /* on the condition of the branch that ends the body before: its target first */
+    SHS_ELSE,
+    SHS_ENDIF,
+    SHS_BREAK,    /* a: the innermost scope, left; b: the scope + 1 to store as the pending exit first, 0 for none */
+    SHS_CONTINUE, /* a: the innermost scope, a loop, repeated */
+    SHS_END,      /* control runs off the program's last instruction */
+    SHS_SWITCH,   /* on the word the BRX that ends the body before goes to: a cases */
+    SHS_CASE,     /* a: the case's index, b: its word */
+    SHS_DEFAULT,  /* a: the cases (another word ends the program, SHS_END) */
+    SHS_ENDSWITCH
+};
+typedef struct {
+    u32 kind, a, b;
+} ShsToken;
+typedef struct {
+    u8 loop;
+    /* a pending exit may reach its merge: whether one there goes to the parent scope, or to one further out */
+    u8 check, arrive, beyond;
+    u32 parent; /* the enclosing scope + 1, 0 for none */
+} ShsScope;
+typedef struct {
+    ShsToken* token;
+    ShsScope* scope;
+    u32 ntokens, nscopes;
+    int uses_flag; /* some break stores a pending exit */
+} ShStructure;
+/* The structure of a program without calls, unknown jump tables or a CRS stack kept at run time, from the translator's
+   block leaders (a byte a word) and its pops' targets: NULL when the graph is irreducible or the structured form
+   can't take it. One allocation, freed with free */
+ShStructure* shader_structure(const u64* insn, u32 n, const u8* leader, const u32* pop_targets);
 #endif

@@ -66,6 +66,7 @@ void vpad_set_store(void (*store)(const char* key, const char* value));
 /* a setting's current value to the store, named by its variable (&g_settings.controls_scale); a control's place
    with vpad_store_control, whether it is shown with vpad_store_shown */
 void vpad_store(const int* setting);
+void vpad_store_opt(const IniOpt* o); /* any table's setting, as its variable holds it */
 void vpad_store_control(int control);
 void vpad_store_shown(int control);
 
@@ -96,4 +97,10 @@ void vpad_showcase_input(u64 buttons, const i32 sticks[4]);
    more, at now_ns; -1 until the first half second is over */
 int vpad_showcase_fps(u32 presents, u64 now_ns);
 void vpad_showcase_draw(SnxUiList* l, const int safe[4], int fps);
+/* the showcase's box on safe (x, y, w, h into box) and its corner, 0 top left, 1 top right, 2 bottom left, 3 bottom
+   right; -1 while it is off */
+int vpad_showcase_box(const int safe[4], float box[4]);
+/* a corner's word, tl tr bl br, as showcase_corner and stats_corner take them: its index as above, -1 for another */
+int vpad_corner(const char* word);
+const char* vpad_corner_word(int corner);
 #endif

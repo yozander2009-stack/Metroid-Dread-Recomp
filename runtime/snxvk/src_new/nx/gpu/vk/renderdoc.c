@@ -42,7 +42,8 @@ void vk_renderdoc_load(void) {
         return;
     }
     get_api = (pRENDERDOC_GetAPI)plat_dl_sym(lib, "RENDERDOC_GetAPI");
-    if (!get_api || !get_api(eRENDERDOC_API_Version_1_1_2, (void**)&g_rd) || !g_rd) {
+    void* api = NULL; /* GetAPI stores a void*, which g_rd isn't */
+    if (!get_api || !get_api(eRENDERDOC_API_Version_1_1_2, &api) || !(g_rd = api)) {
         WARN("renderdoc: the library has no in-application API 1.1.2\n");
         g_rd = NULL;
         return;

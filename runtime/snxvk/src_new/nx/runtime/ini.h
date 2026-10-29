@@ -58,6 +58,12 @@ int ini_check(const IniOpt* o, const char* v, char* out, size_t n);
 void ini_set_say(void (*say)(const char* line));
 /* o's variable as ini_read reads it back. An INI_TEXT has none: its set keeps what it read */
 void ini_format(const IniOpt* o, char* out, size_t n);
+/* the settings of table whose variable is not at its default (a row without one left out), as key=value between ", ":
+   with INI_CHANGED_DEFAULT each followed by " (default D)", with INI_CHANGED_NO_TEXT a text's by its key alone (a text
+   is often a folder, which names the player's account). How many; out cut where it ends, NUL-terminated */
+#define INI_CHANGED_DEFAULT 1
+#define INI_CHANGED_NO_TEXT 2
+int ini_changed(const IniOpt* table, int flags, char* out, size_t n);
 /* an INI_INT's value v as the menus read it: its word, or the number */
 void ini_word(const IniOpt* o, int v, char* out, size_t n);
 /* v a step down (dir -1) or up (1): words go round, numbers stop at lo and hi */
@@ -70,7 +76,7 @@ size_t ini_list_text(const IniSection* sections, int count, char* out, size_t si
 /* a key an older version used, which does nothing now (docs/DEPRECATIONS.md): what became of it, NULL for another */
 const char* ini_deprecated(const char* key);
 /* the game's .ini's [Deprecated] section, its last: its head, then each key under what became of it. The launcher's
-   Clean old settings takes it from its head to the next section or the end */
+   Clean Old Settings takes it from its head to the next section or the end */
 void ini_deprecated_head(FILE* f);
 void ini_deprecated_key(FILE* f, const char* key, const char* value);
 /* the line a run says about the n deprecated keys path has into out: 1, or 0 for none */

@@ -3,7 +3,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* Texture formats the host can't take as they are, converted on the GPU (vk/texconv.c runs it): 2 byte RGBA texels,
-   RGB32F, packed depth and stencil, and ETC2 and EAC blocks. The body is texconv.glsl, which the tests also run on
+   RGB32F, packed depth and stencil, and ETC2, EAC and BCn blocks. The body is texconv.glsl, which the tests also run on
    the CPU; this file declares what it reads and writes.
 
    One shader for every conversion, the mode a push constant: a dispatch converts one level of one format, so the

@@ -4,14 +4,18 @@ defines is renamed snxv_<name>, so its GPU front end sits next to ours; snxvk_gl
 runtime. Also builds and runs upstream's shader decoder generator (tools/shaderdec) first, as its cmake does."""
 import os, subprocess, sys, concurrent.futures as cf
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
-V = os.path.join(ROOT, 'runtime', 'snxvk'); S = os.path.join(V, 'src_new'); NX = os.path.join(S, 'nx')
+V = os.path.join(ROOT, 'runtime', 'snxvk')
+# SWR_SNX_SRC: the source folder under runtime/snxvk (default src_new); SWR_SNX_TAG: the lib/obj name (default new)
+S = os.path.join(V, os.environ.get('SWR_SNX_SRC', 'src_new')); NX = os.path.join(S, 'nx')
+TAG = os.environ.get('SWR_SNX_TAG', 'new')
 G = os.path.join(ROOT, 'gcc', 'Library', 'bin')
 NODLSS = bool(os.environ.get('SWR_NO_DLSS'))
-OUT = os.path.join(V, 'obj_new_nodlss' if NODLSS else 'obj_new'); os.makedirs(OUT, exist_ok=True)
-LIB = os.path.join(V, 'libsnxvk_new_nodlss.a' if NODLSS else 'libsnxvk_new.a')
+OUT = os.path.join(V, 'obj_' + TAG + ('_nodlss' if NODLSS else '')); os.makedirs(OUT, exist_ok=True)
+LIB = os.path.join(V, 'libsnxvk_' + TAG + ('_nodlss.a' if NODLSS else '.a'))
+NEW = os.path.isfile(os.path.join(NX, 'gpu', 'shader', 'structure.c'))   # upstream after 2026-10-22 (common/ helpers)
 # upstream's code generators (GPL-3.0, same project), vendored next to the sources
 TOOLS = os.path.join(S, 'tools')
-DEPS = {k: os.path.join(V, 'deps', d) for k, d in (('volk', 'volk-vulkan-sdk-1.4.363.0'), ('vma', 'VulkanMemoryAllocator-3.4.0'), ('vkh', 'Vulkan-Headers-1.4.365'))}
+DEPS = {k: os.path.join(V, 'deps', d) for k, d in (('volk', 'volk-vulkan-sdk-1.4.363.0'), ('vma', 'VulkanMemoryAllocator-3.4.0'), ('vkh', 'Vulkan-Headers-1.4.365'), ('xxh', 'xxHash-0.8.3'))}
 # upstream src/nx/CMakeLists.txt: the gpu, shader and vk components (LLVM macro JIT, FFmpeg video and the video
 # component left out: our runtime has its own video; the JIT is a stub, the interpreter runs every macro)
 SRC = ('gpu/gpu.c gpu/maxwell/engines.c gpu/maxwell/mme.c gpu/maxwell/mme_hle.c gpu/maxwell/mme_jit_stub.c '
@@ -25,11 +29,21 @@ SRC = ('gpu/gpu.c gpu/maxwell/engines.c gpu/maxwell/mme.c gpu/maxwell/mme_hle.c 
        'gpu/vk/blocklinear.c gpu/vk/texconv.c gpu/vk/owned.c gpu/vk/dma.c gpu/vk/blit.c gpu/vk/ui.c '
        'gpu/texture/blocklinear.c gpu/texture/depth.c gpu/texture/etc2.c gpu/vk/vic.c gpu/vk/gpuprof.c '
        'gpu/vk/hdr.c gpu/vk/swr_settings.c').split() + (['gpu/vk/dlss_stub.c'] if NODLSS else ['gpu/vk/dlss.c'])
+if NEW:   # ScarletNX main 112db409: spirv_emit and the Vulkan device helpers moved to common/, XXH3 hashing, structured
+          # control flow (structure.c), the FTZ probe; etc2.c went to the tests
+    SRC = [f for f in SRC if f not in ('gpu/shader/spirv_emit.c', 'gpu/texture/etc2.c')]
+    SRC += ['gpu/shader/structure.c', 'gpu/vk/ftz_probe.c', 'gpu/vk/xxh3.c', '../common/utilities/spirv_emit.c',
+            '../common/gpu/vk/vk_common.c', '../common/gpu/vk/ring.c', '../common/gpu/vk/swapchain.c']
 REDIRECT = {'g_opt_vsync': 'snxvk_opt_vsync'}
 GEN = os.path.join(OUT, 'shaderdec')
 INC = ['-I' + S, '-I' + NX, '-I' + GEN, '-I' + DEPS['volk'], '-I' + os.path.join(DEPS['vma'], 'include'),
-       '-I' + os.path.join(DEPS['vkh'], 'include'), '-I' + os.path.join(ROOT, 'runtime')]
+       '-I' + os.path.join(DEPS['vkh'], 'include'), '-I' + DEPS['xxh'], '-I' + os.path.join(ROOT, 'runtime')]
 CF = ['-std=gnu2x', '-O2', '-fno-strict-aliasing', '-DVK_NO_PROTOTYPES', '-DVK_USE_PLATFORM_WIN32_KHR', '-w'] + INC
+if NEW:   # cmake/ship_walk.cmake: the shipped-shader walk's version, the hash of its sources
+    import hashlib
+    _h = ''.join(hashlib.sha256(open(os.path.join(NX, f), 'rb').read()).hexdigest() for f in
+                 ('gpu/shipped_pass.c', 'gpu/shipped_pass.h', 'gpu/shader/shipped.c', 'gpu/shader/shipped.h'))
+    CF.append('-DSNX_SHIP_WALK="%s"' % hashlib.sha256(_h.encode()).hexdigest()[:16])
 ENV = dict(os.environ, PATH=G + os.pathsep + os.environ.get('PATH', ''))
 
 
@@ -63,6 +77,7 @@ SPV = [('gpu/texture/astc.comp', 'astc_spv', 'nx/gpu/texture/astc_spv.h', []),
        ('gpu/video/vic.comp', 'vic_spv', 'nx/gpu/video/vic_spv.h', []),
        ('gpu/video/vic.comp', 'vic_unaligned_spv', 'nx/gpu/video/vic_spv.h', ['VIC_UNALIGNED']),
        ('gpu/vk/query_predicate.comp', 'query_predicate_spv', 'nx/gpu/vk/query_predicate_spv.h', [])]
+if NEW: SPV.append(('gpu/vk/ftz_probe.comp', 'ftz_probe_spv', 'nx/gpu/vk/ftz_probe_spv.h', []))
 
 
 def spirv():   # cmake/glsl.cmake + spirv_source.cmake: the SPIR-V words in a C array beside its header
@@ -82,7 +97,7 @@ def main():
     shaderdec()
     settingsgen()
     spv_c = spirv()
-    jobs = [(os.path.join(OUT, f.replace('/', '_') + '.o'), [os.path.join(G, 'gcc.exe')] + CF + ['-c', os.path.join(NX, f), '-o', os.path.join(OUT, f.replace('/', '_') + '.o')]) for f in SRC]
+    jobs = [(os.path.join(OUT, f.replace('../', '').replace('/', '_') + '.o'), [os.path.join(G, 'gcc.exe')] + CF + ['-c', os.path.join(NX, f), '-o', os.path.join(OUT, f.replace('../', '').replace('/', '_') + '.o')]) for f in SRC]
     for c in spv_c: jobs.append((c[:-2] + '.o', [os.path.join(G, 'gcc.exe')] + CF + ['-c', c, '-o', c[:-2] + '.o']))
     jobs.append((os.path.join(OUT, 'settings.o'), [os.path.join(G, 'gcc.exe')] + CF + ['-c', os.path.join(GEN, 'settings.c'), '-o', os.path.join(OUT, 'settings.o')]))   # g_settings with its defaults
     jobs.append((os.path.join(OUT, 'volk.o'), [os.path.join(G, 'gcc.exe')] + CF + ['-c', os.path.join(DEPS['volk'], 'volk.c'), '-o', os.path.join(OUT, 'volk.o')]))

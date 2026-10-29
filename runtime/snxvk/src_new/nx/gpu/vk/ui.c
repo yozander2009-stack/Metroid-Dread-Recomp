@@ -8,8 +8,10 @@
 #include "nx/gpu/vk/vk.h"
 #include "nx/gpu/vk/ui_spv.h"
 #include "nx/runtime/platform/log.h"
+#include "nx/runtime/platform/hud.h"
 #include "nx/runtime/platform/overlay.h"
 #include "nx/runtime/platform/prepare_screen.h"
+#include "nx/runtime/platform/stats.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/platform/vpad.h"
 
@@ -24,13 +26,18 @@ static VkPipelineLayout g_layout;
 static VkPipeline g_pipe;
 static VkFormat g_pipe_format;
 static VkDescriptorPool g_pool;
-static VkDescriptorSet g_sets[2]; /* the atlas blended (sprites), and at its nearest texel (the font, fills) */
+/* by a quad's sample: the atlas blended (sprites), at its nearest texel (the font, fills), and the picture blended */
+static VkDescriptorSet g_sets[3];
 static VkSampler g_samplers[2];
 static VkImage g_atlas;
 static VmaAllocation g_atlas_mem;
 static VkImageView g_atlas_view;
 static u32 g_atlas_version;
 static float g_atlas_w, g_atlas_h;
+static VkImage g_image; /* ui_image's picture */
+static VmaAllocation g_image_mem;
+static VkImageView g_image_view;
+static u32 g_image_version;
 static VkImage g_sc_img[VK_SC_MAX];
 static VkImageView g_sc_view[VK_SC_MAX];
 
@@ -47,17 +54,17 @@ static int layout_make(void) {
                                       .pSetLayouts = &g_dsl,
                                       .pushConstantRangeCount = 1,
                                       .pPushConstantRanges = &pc};
-    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
     VkDescriptorPoolCreateInfo pci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2, .poolSizeCount = 1, .pPoolSizes = &size};
-    VkDescriptorSetLayout layouts[2];
-    VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 2};
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 3, .poolSizeCount = 1, .pPoolSizes = &size};
+    VkDescriptorSetLayout layouts[3];
+    VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 3};
     int i;
     if (g_layout) return 1;
     if (!VK_OK(vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_dsl))) return 0;
     if (!VK_OK(vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &g_layout))) return 0;
     if (!VK_OK(vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_pool))) return 0;
-    layouts[0] = layouts[1] = g_dsl;
+    layouts[0] = layouts[1] = layouts[2] = g_dsl;
     ai.descriptorPool = g_pool;
     ai.pSetLayouts = layouts;
     if (!VK_OK(vkAllocateDescriptorSets(g_vk.dev, &ai, g_sets))) return 0;
@@ -180,6 +187,7 @@ static void atlas_upload(VkCommandBuffer cb) {
                               .imageExtent = {(u32)w, (u32)h, 1}};
     if (!px || version == g_atlas_version) return;
     if (!VK_OK(vmaCreateBuffer(g_vk.vma, &bci, &bai, &buf, &mem, &info))) return;
+    vk_mem_track(mem);
     memcpy(info.pMappedData, px, (size_t)w * (size_t)h * 4);
     vmaFlushAllocation(g_vk.vma, mem, 0, VK_WHOLE_SIZE);
     vk_defer_buffer(buf, mem);
@@ -189,8 +197,10 @@ static void atlas_upload(VkCommandBuffer cb) {
         g_atlas = VK_NULL_HANDLE;
         return;
     }
+    vk_mem_track(g_atlas_mem);
     vci.image = g_atlas;
     if (!VK_OK(vkCreateImageView(g_vk.dev, &vci, NULL, &g_atlas_view))) {
+        vk_mem_untrack(g_atlas_mem);
         vmaDestroyImage(g_vk.vma, g_atlas, g_atlas_mem);
         g_atlas = VK_NULL_HANDLE;
         return;
@@ -215,6 +225,67 @@ static void atlas_upload(VkCommandBuffer cb) {
     g_atlas_h = (float)h;
     ui_atlas_done();
     LOG("vulkan: the on-screen controls' atlas is %dx%d\n", w, h);
+}
+
+/* ui_image's picture to the GPU when it changed (under ui_lock): one image made the first time, written over after */
+static void image_upload(VkCommandBuffer cb) {
+    u32 version;
+    const u8* px = ui_image_get(&version);
+    VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                            .imageType = VK_IMAGE_TYPE_2D,
+                            .format = VK_FORMAT_R8G8B8A8_UNORM,
+                            .extent = {SNX_UI_IMAGE_W, SNX_UI_IMAGE_H, 1},
+                            .mipLevels = 1,
+                            .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VmaAllocationCreateInfo iai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                 .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                 .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                              .imageExtent = {SNX_UI_IMAGE_W, SNX_UI_IMAGE_H, 1}};
+    const u64 size = (u64)SNX_UI_IMAGE_W * SNX_UI_IMAGE_H * 4;
+    VkBuffer buf;
+    u64 off;
+    u8* to;
+    if (!px || version == g_image_version) return;
+    if (!g_image) {
+        VkDescriptorImageInfo di = {g_samplers[0], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   .dstSet = g_sets[UI_IMAGE],
+                                   .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                   .pImageInfo = &di};
+        if (!VK_OK(vmaCreateImage(g_vk.vma, &ii, &iai, &g_image, &g_image_mem, NULL))) {
+            g_image = VK_NULL_HANDLE;
+            return;
+        }
+        vci.image = g_image;
+        if (!VK_OK(vkCreateImageView(g_vk.dev, &vci, NULL, &g_image_view))) {
+            vmaDestroyImage(g_vk.vma, g_image, g_image_mem);
+            g_image = VK_NULL_HANDLE;
+            return;
+        }
+        di.imageView = g_image_view;
+        vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
+    }
+    to = (u8*)vk_stage(size, 4, &buf, &off);
+    if (!to) return;
+    memcpy(to, px, (size_t)size);
+    copy.bufferOffset = off;
+    /* the last frame's draws sampled it: they finish before the copy writes over it */
+    vk_barrier(cb, g_image, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+               VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    rec_CmdCopyBufferToImage(cb, buf, g_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vk_barrier(cb, g_image, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    g_image_version = version;
 }
 
 /* the swapchain image's view, made once per image */
@@ -266,15 +337,24 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
     if (!layout_make()) return;
     ui_lock();
     atlas_upload(cb);
+    image_upload(cb);
     /* the screen before the game starts, under the menu, hides the on-screen controls: they aren't drawn under it,
        where they would take quads for nothing (nor do they take fingers then, sdl3.c's press_event) */
     if (prepare_screen_shown())
         prepare_screen_draw(&list, sw, sh, safe, overlay_display_percent());
     else {
+        int px, py, scale;
         vpad_draw(&list, safe);
         vpad_showcase_draw(&list, safe, vpad_showcase_fps(g_vk_present, plat_ns()));
+        overlay_place(sw, sh, &px, &py, &scale); /* the menu's letters */
+        stats_draw(&list, safe, scale, plat_ns());
     }
-    overlay_draw(&list, sw, sh);
+    {
+        int px, py, scale;
+        overlay_place(sw, sh, &px, &py, &scale); /* the menu's letters */
+        hud_draw(&list, safe, scale);
+    }
+    overlay_draw(&list, sw, sh, plat_ns());
     ui_unlock();
     n = list.n;
     if (!n || !g_atlas || !pipeline_make(g_vk.sc_format) || !(view = sc_view(sc))) return;
@@ -287,9 +367,11 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
         float px[4] = {q->x, q->x + q->w, q->x + q->w, q->x}, py[4] = {q->y, q->y, q->y + q->h, q->y + q->h};
         float cu[4], cv[4];
         int k;
+        float tw = q->sample == UI_IMAGE ? (float)SNX_UI_IMAGE_W : g_atlas_w,
+              th = q->sample == UI_IMAGE ? (float)SNX_UI_IMAGE_H : g_atlas_h;
         for (k = 0; k < 4; ++k) {
-            cu[k] = uu[(k + 4 - q->turn) % 4] / g_atlas_w;
-            cv[k] = vv[(k + 4 - q->turn) % 4] / g_atlas_h;
+            cu[k] = uu[(k + 4 - q->turn) % 4] / tw;
+            cv[k] = vv[(k + 4 - q->turn) % 4] / th;
         }
         vertex(&v[i * 6 + 0], px[0], py[0], cu[0], cv[0], q->rgba);
         vertex(&v[i * 6 + 1], px[1], py[1], cu[1], cv[1], q->rgba);
@@ -325,9 +407,10 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
         rec_CmdBindVertexBuffers(cb, 0, 1, &buf, &vo);
         /* runs of quads that sample the same way, in their order */
         for (i = 0; i < n; i = run) {
-            for (run = i + 1; run < n && g_quads[run].sharp == g_quads[i].sharp; ++run) continue;
-            rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1,
-                                    &g_sets[g_quads[i].sharp ? 1 : 0], 0, NULL);
+            for (run = i + 1; run < n && g_quads[run].sample == g_quads[i].sample; ++run) continue;
+            if (g_quads[i].sample == UI_IMAGE && !g_image) continue; /* its upload failed */
+            rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_sets[g_quads[i].sample],
+                                    0, NULL);
             rec_CmdDraw(cb, (u32)(run - i) * 6, 1, (u32)i * 6, 0);
         }
         rec_CmdEndRendering(cb);

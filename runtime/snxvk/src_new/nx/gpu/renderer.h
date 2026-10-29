@@ -34,12 +34,16 @@ typedef struct Renderer {
        submitting thread), or a stream goes on after a wait (gpu_park, on the GPU thread) that the CPU may have ended
        after writing data. Caches read guest memory again. Any thread */
     void (*mem_may_have_changed)(void);
+    /* the GPU thread starts running a job (1) or stops (0): the caches' checks while it runs need the CPU's writes from
+       before the submissions and wait ends so far (mem_may_have_changed), and from before those its own waits end,
+       but not those a later submission makes meanwhile */
+    void (*stream_run)(int on);
     /* the 3D engine (maxwell3d.c) */
     void (*clear)(GpuChannel* ch, u32 v);
     void (*draw)(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance,
                  u32 instances);
     /* Maxwell ordering methods: 0 texture barrier, 1 tiled barrier, 2 data-cache invalidate,
-       3 descriptor-cache invalidate, 4 wait for idle. */
+       3 descriptor-cache invalidate, 4 wait for idle, 5 shader instruction invalidate. */
     void (*method_barrier)(int kind);
     /* DRAW_TEXTURE: a texture's rectangle onto color target 0. NULL: not drawn */
     void (*draw_texture)(GpuChannel* ch);
@@ -101,12 +105,29 @@ typedef struct Renderer {
     void (*stream_end)(void);
     void (*release_retire)(u32 id); /* finish this syncpoint's queued releases before its id is reused */
     void (*report_stall)(void); /* the stall watchdog: what the renderer holds back. Any thread, unlocked */
+    /* a game pause (gpu_hold): everything recorded is submitted and done on the GPU, its results landed and every queued
+       release performed, so nothing of the renderer's writes guest memory until the next job. The GPU thread, between
+       jobs. NULL when the renderer has nothing in flight */
+    void (*idle)(void);
+    /* a save state's load, the GPU held and guest memory about to be replaced: every surface, buffer and counter kept
+       of guest memory goes, so each later use reads the state's memory. NULL when the renderer keeps nothing */
+    void (*reset)(void);
+    /* a save state's save, the GPU held: every render target's pixels written back to guest memory where they can be,
+       so the state holds them. NULL when the renderer keeps none */
+    void (*flush_targets)(void);
+    /* a save state's render targets whose pixels guest memory doesn't hold (the depth targets), read back into io (0,
+       or -1), and after the load's reset those of a state, for the targets the loaded game makes. NULL when the
+       renderer keeps none */
+    int (*save_targets)(struct StateIo* io);
+    int (*load_targets)(struct StateIo* io);
     /* presenting a guest framebuffer */
     /* crop: the part shown (left, top, right, bottom), all 0 for the whole buffer */
     /* transform: Android buffer flags, bit 0 horizontal flip and bit 1 vertical flip */
     void (*present_buffer)(u64 cpu_addr, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4],
                            u32 transform);
     u64 (*screenshot)(const char* path); /* the hash of the frame it saved */
+    /* the last presented frame scaled to w x h RGBA8 (a save state's thumbnail): 0, or -1 when there is none */
+    int (*thumbnail)(u8* rgba, u32 w, u32 h);
     /* the window again, its last frame (or black) under the on-screen controls and the game's menu, for when the game
        has shown nothing for a while: the frontend's loop calls it while either shows. NULL when there is no window */
     void (*refresh)(void);

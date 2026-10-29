@@ -64,7 +64,8 @@ static u32 tc_mode(const VkFmt* f) {
         case VKC_D32S8: return TC_D32S8;
         case VKC_NONE: return f->bpp == 8 ? TC_D32S8 : TC_D24S8; /* a depth and stencil format as it is in memory */
     }
-    return TC_ETC2_RGB + (f->conv - VKC_ETC2); /* the ETC2 and EAC kinds, in the same order */
+    /* the ETC2 and EAC kinds, and the BCn ones, each in the same order */
+    return f->conv >= VKC_BC1 ? TC_BC1 + (f->conv - VKC_BC1) : TC_ETC2_RGB + (f->conv - VKC_ETC2);
 }
 
 int vk_tc_converts(const VkFmt* f) {
@@ -76,6 +77,12 @@ static VkTcShape tc_shape(u32 mode, u32 w) {
     if (mode <= TC_A5B5G5R1 || (mode >= TC_VI_RGB565 && mode <= TC_VI_RGBA4444)) {
         s.units = (w + 1) / 2;
         s.out_texels = s.units * 2;
+    } else if (mode >= TC_BC1 && mode <= TC_BC7) {
+        s.units = (w + 3) / 4;
+        s.out_texels = s.units * 4;
+        s.out_rows = 4;
+        if (mode == TC_BC4 || mode == TC_BC4_SNORM) s.out_bpp = 2;
+        if (mode == TC_BC6H_UF || mode == TC_BC6H_SF) s.out_bpp = 8;
     } else if (mode >= TC_VI_RGBX8888) {
         s.units = s.out_texels = w;
     } else if (mode == TC_RGB32F) {
@@ -225,19 +232,19 @@ int vk_tc_dma_remap(VkCommandBuffer cb, const GpuDmaOp* o, u32 lines, VkBuffer i
     return tc_dispatch(cb, &p, (units + 63) / 64, lines, 1, in, in_off, (in_size + 3) & ~3ull, out, out_off,
                        out_at + (u64)out_pitch * lines - out_off);
 }
-int vk_tc_blit(VkCommandBuffer cb, u32 bpp, u32 nb, u32 rows, VkBuffer in, u64 in_size, u64 src_at, u32 in_pitch,
-               u64 col_at, u64 row_at, VkBuffer out, u64 out_at, u32 out_pitch) {
+int vk_tc_blit(VkCommandBuffer cb, u32 bpp, u32 fmt, u32 nb, u32 rows, VkBuffer in, u64 in_size, u64 src_at,
+               u32 in_pitch, u64 col_at, u64 row_at, VkBuffer out, u64 out_at, u32 out_pitch) {
     u64 out_off = out_at & ~(storage_align() - 1);
     u32 units = (nb + 3) / 4;
     if ((col_at | row_at | out_at | out_pitch) & 3) return 0;
-    TcParams p = {.mode = TC_BLIT,
+    TcParams p = {.mode = fmt ? TC_BLIT_FLOAT : TC_BLIT,
                   .units = units,
                   .rows = rows,
                   .in_pitch = in_pitch, /* bytes, for this mode */
                   .out_pitch = out_pitch / 4,
                   .in_bias = (u32)src_at,
                   .out_bias = (u32)((out_at - out_off) / 4),
-                  .remap = bpp,
+                  .remap = fmt ? fmt : bpp,
                   .const_a = (u32)(col_at / 4),
                   .const_b = (u32)(row_at / 4),
                   .line_out = nb};

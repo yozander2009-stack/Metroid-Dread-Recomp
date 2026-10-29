@@ -12,6 +12,7 @@
 /* blocklinear.comp's push constants, member for member */
 typedef struct {
     u32 runs, rows, lin_runs, y0, gob_y0, z0, bh, hmask, bd, dmask, bsh, block_row, slab, bl_bias, lin_bias, to_bl;
+    u32 tail_mask[4];
 } BlParams;
 
 static VkDescriptorSetLayout g_bl_ds;
@@ -76,6 +77,7 @@ VkBuffer vk_bl_scratch(u64 size, u64* cap_out) {
         *cap_out = 0;
         return VK_NULL_HANDLE;
     }
+    vk_mem_track(g_bl_mem);
     *cap_out = g_bl_cap = cap;
     return g_bl_scratch;
 }
@@ -159,6 +161,11 @@ int vk_bl_move(VkCommandBuffer cb, const VkBlMove* m, int to_bl, VkBuffer bl, u6
                   .bl_bias = (u32)((bl_at - bl_off) >> 4) - (u32)(lo >> 4),
                   .lin_bias = (u32)((lin_at - lin_off) >> 4),
                   .to_bl = (u32)to_bl};
+    for (u32 i = 0; i < 4; i++) {
+        u32 tail = m->row_bytes & 15;
+        u32 bytes = !tail ? 4 : tail > 4 * i ? tail - 4 * i : 0;
+        p.tail_mask[i] = bytes >= 4 ? ~0u : (1u << (bytes * 8)) - 1;
+    }
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_bl_pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_bl_layout, 0, 1, &set, 0, NULL);
     rec_CmdPushConstants(cb, g_bl_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);

@@ -5,15 +5,17 @@
 #ifndef SNX_GPU_H
 #define SNX_GPU_H
 #include "common/cpu/aarch64/cpu.h"
+#include "nx/gpu/pushbuffer.h"
 
-/* A method batch of the pushbuffer in progress. A header's count can run past the end of its GPFIFO entry into the
-   next one, so the batch belongs to the channel, not to the entry */
+/* The pushbuffer's decode state (Eden's DmaPusher::DmaState): the command header whose data words are still coming.
+   A header's count can run past the end of its GPFIFO entry into the next one, so the state belongs to the channel,
+   not to the entry */
 typedef struct {
-    u32 mode; /* the header's mode while words are owed: 1 incrementing, 3 non-incrementing, 5 incrementing once */
-    u32 sub;  /* its subchannel */
-    u32 m;    /* the method the next word goes to */
-    u32 cnt;  /* the words still owed */
-} PbBatch;
+    u32 mode;         /* the header's PB_MODE_* while words are owed: INCREASING, NON_INCREASING or INCREASE_ONCE */
+    u32 subchannel;   /* its subchannel */
+    u32 method;       /* the method the next word goes to */
+    u32 method_count; /* the words still owed */
+} PbState;
 
 /* The macro engine (mme.c) of a channel, kept between steps: a method a macro sends can make the stream wait
    (gpu_park), and the macro goes on from here (mme_resume) once the wait ends */
@@ -32,19 +34,37 @@ typedef struct {
     int exiting;     /* the call ends after the next instruction, the exit's delay slot */
 } GpuMme;
 
-/* Inline-to-memory (I2M, the methods at 0x60-0x6D of the 3D, compute and inline-to-memory classes): a launch's
-   destination, and the bytes the data words have brought so far */
-typedef struct {
-    u8* buf;
-    u32 cap;      /* bytes buf has room for */
-    u32 len, pos; /* the bytes the launch wants, and those that came */
-    u32 line, lines, pitch;
-    u32 bh, bd;   /* block height and depth (log2 GOBs) of a block linear destination */
-    u32 w, h, z;  /* its width in bytes, height and slice */
-    u32 x, y;     /* the origin, x in bytes */
-    int linear;
-    u64 addr;
+/* Inline-to-memory (Eden's engine_upload.h): the methods at 0x60-0x6D of the 3D, compute and inline-to-memory
+   classes (maxwell/inline_to_memory_regs.h). A launch (exec_upload, i2m_launch) latches the registers' destination,
+   and the data words (data_upload, i2m_data) fill the buffer; the last byte writes it to memory */
+typedef struct { /* Eden's Upload::Registers, as the launch found them */
+    u32 line_length_in, line_count; /* bytes a line, and lines */
+    struct {
+        u64 address;
+        u32 pitch;                     /* pitch linear: bytes from a line to the next */
+        u32 block_height, block_depth; /* block linear: the block, log2 GOBs high and deep */
+        u32 width, height, layer;      /* the surface's width in bytes, height in rows, and the slice written */
+        u32 x, y;                      /* the origin, x in bytes */
+    } dest;
+} GpuUploadRegs;
+typedef struct { /* Eden's Upload::State */
+    GpuUploadRegs regs;
+    u8* inner_buffer;
+    u32 capacity;     /* bytes inner_buffer has room for */
+    u32 copy_size;    /* the bytes the launch wants */
+    u32 write_offset; /* and those that came */
+    int is_linear;    /* the destination is pitch linear (exec_upload's linear bit), else block linear */
 } GpuI2m;
+
+/* The register files a channel keeps of each engine, by method index (byte offset / 4) */
+#define GPU_ENGINE_METHODS 0x1000 /* a command header's 12-bit method (pushbuffer.h) reaches all of them */
+#define PULLER_NUM_REGS PULLER_NON_PULLER_METHODS /* Eden's Puller::Regs::NUM_REGS */
+#define MAXWELL3D_NUM_REGS 0xE00 /* Eden's Maxwell3D::Regs::NUM_REGS: the registers, and the macro calls above */
+#define KEPLER_COMPUTE_METHODS GPU_ENGINE_METHODS /* Eden's NUM_REGS is 0xCF8: compute_method takes all 12 bits */
+#define FERMI2D_METHODS 0x400 /* the 2D engine's methods kept (Eden's Fermi2D::Regs::NUM_REGS is 0x258) */
+#define MAXWELL_DMA_METHODS 0x200 /* the copy engine's methods kept (its registers end below 0x1D0) */
+#define KEPLER_I2M_METHODS 0x80   /* the inline-to-memory class's (Eden's KeplerMemory::Regs::NUM_REGS is 0x7F) */
+#define GPU_CHANNELS 128 /* channels, one per syncpoint id: nvdrv hands out ids below 128 (NvRmStream's tables) */
 
 /* Groups of the 3D engine's registers, a bit each in GpuChannel.r3d_dirty: maxwell3d_method sets a group's bit when
    a method changes the value of one of its registers (g_m3d_group in maxwell/engines.c), after the shadow RAM's
@@ -69,20 +89,20 @@ enum {
    and dropped when nvdrv closes it (gpu_channel_close) */
 typedef struct GpuChannel {
     u32 id;
-    u32 sub_class[8]; /* the class bound to each subchannel (puller method 0) */
-    PbBatch pb;
-    u32 puller[0x40];
+    u32 sub_class[GPU_SUBCHANNELS]; /* the class bound to each subchannel (PULLER_BIND_OBJECT) */
+    PbState pb;
+    u32 puller[PULLER_NUM_REGS]; /* the puller's registers (PULLER_*) */
     /* the engines' registers, by method */
-    u32 r3d[0x1000]; /* the 3D engine's. 0xE00 up are the macro calls' */
+    u32 r3d[GPU_ENGINE_METHODS]; /* the 3D engine's. MAXWELL3D_NUM_REGS up are the macro calls' */
     /* the register groups (R3D_*) a method changed a register of since the renderer last took them (all of them
        after a reset): what it derived from the other groups' registers still holds */
     u32 r3d_dirty;
-    u32 r3d_shadow[0xE00]; /* the MME shadow RAM (SET_MME_SHADOW_RAM_CONTROL, 3D 0x49) */
+    u32 r3d_shadow[MAXWELL3D_NUM_REGS]; /* the MME shadow RAM (SET_MME_SHADOW_RAM_CONTROL, 3D 0x49) */
     u32 shadow_mode;       /* 0 or 1 track, 2 passthrough, 3 replay */
-    u32 rcomp[0x1000];
-    u32 r2d[0x400];
-    u32 rdma[0x200];
-    u32 ri2m[0x80];
+    u32 rcomp[KEPLER_COMPUTE_METHODS]; /* compute's (maxwell/kepler_compute_regs.h) */
+    u32 r2d[FERMI2D_METHODS];
+    u32 rdma[MAXWELL_DMA_METHODS];
+    u32 ri2m[KEPLER_I2M_METHODS];
     GpuI2m i2m;
     /* macros: the code and start addresses uploaded (3D 0x45-0x48), and the call the stream is collecting the
        parameters of (0xE00 up): a call runs at its batch's last word */
@@ -139,7 +159,7 @@ enum {
     GPU_PARK_FENCE          /* a submission's fence, waited for before its first entry */
 };
 typedef struct {
-    GpuChannel* chan[128]; /* by syncpoint id: nvdrv hands out ids below 128 */
+    GpuChannel* chan[GPU_CHANNELS]; /* by syncpoint id */
     int nchan;
 } GpuState;
 extern GpuState g_gpu;
@@ -209,21 +229,21 @@ typedef struct {
 } GpuDmaOp;
 /* A 2D engine blit (maxwell/fermi2d.c) the renderer does on the GPU: each destination pixel of columns x0 to x1 - 1
    and rows y0 to y1 - 1 the source pixel at column scol[x - x0] and row srow[y - y0] (nearest sampled, the tables
-   the engine works out), bpp bytes each. The sides are surface planes as the DMA engine's are (no origin) */
+   the engine works out), bpp bytes each. The sides are surface planes as the DMA engine's are (no origin). fmt 0
+   copies the pixels' bytes; else both are float formats (GPU_BLIT_FLOAT) and each component is converted */
 typedef struct {
     GpuDmaSide src, dst;
     u32 bpp, x0, x1, y0, y1;
     const u32* scol;
     const u32* srow;
+    u32 fmt;
 } GpuBlit;
-/* maxwell/fermi2d_ref.c: the blit done on the CPU in guest memory, the reference for the tests (not in the runtime) */
-void blit_mem_ref(const GpuBlit* b);
-/* maxwell/dma_ref.c: the launch done on the CPU in guest memory, the reference the tests hold the renderer's dma_copy
-   to (not in the runtime) */
-void dma_copy_ref(const GpuDmaOp* o);
-/* video/nvdec_ref.c: the picture written into guest memory on the CPU, the reference the tests hold the renderer's
-   nvdec_write to (not in the runtime) */
-void nvdec_write_ref(const NvdecPic* p);
+/* a blit's fmt between float formats: the source's components (1 to 4) of sb bytes (2 or 4), the destination's (dn
+   of db bytes), sx when the source's fourth component is padding. A component the source lacks is 0, its alpha 1.
+   bpp is the source's pixel, sn * sb bytes. texconv.glsl's TC_BLIT_FLOAT takes it as it is */
+#define GPU_BLIT_FLOAT(sn, sb, dn, db, sx) ((sn) | (sb) << 4 | (dn) << 8 | (db) << 12 | (u32)(sx) << 16)
+/* the bytes of a blit's destination pixel */
+#define GPU_BLIT_DST_BPP(b)                ((b)->fmt ? ((b)->fmt >> 8 & 15) * ((b)->fmt >> 12 & 15) : (b)->bpp)
 
 /* ---- gpu.c: guest memory through the GPU's address space. A read lands the renderer's pending results over the
    range first, a write lets it land what would overwrite the write later, and records the write (gpu_mem_written).
@@ -251,10 +271,11 @@ u8* gmem_host(u64 gva, u64 size);
 u32 gmem_r32(u64 gva);
 void gmem_w32(u64 gva, u32 v);
 /* the byte offset of (x_bytes, y, z) in a block linear surface width_bytes wide and height rows high, with blocks of
-   2^bh_log2 GOBs high and 2^bd_log2 deep (the caller shrinks them for small surfaces, as the hardware does) */
+   2^bh_log2 GOBs high and 2^bd_log2 deep (the caller shrinks them for small surfaces, as the hardware does). The
+   layout is texture/blocklinear.h's */
 u64 bl_offset(u32 x_bytes, u32 y, u32 z, u32 width_bytes, u32 height, u32 bh_log2, u32 bd_log2);
-/* an inline-to-memory launch from an engine's registers (regs[base] is LINE_LENGTH_IN, regs[base + 0xC] the launch),
-   and its data words */
+/* an inline-to-memory launch from an engine's registers (Eden's ProcessExec: regs[base] is the upload block,
+   I2M_UPLOAD_REGS, so regs[base + UPLOAD_EXEC] is the launch), and its data words (ProcessData) */
 void i2m_launch(GpuChannel* ch, u32* regs, int base);
 void i2m_data(GpuChannel* ch, u32 v);
 u32 gpu_color_bpp(u32 format); /* bytes per pixel of a color format (render targets and 2D surfaces share them) */
@@ -274,6 +295,24 @@ void dma_method(GpuChannel* ch, u32 m, u32 v);
 void dma_snap_launch(u32 channel, u64 job_id, u32 launch_index, const u32* r, u32 v);
 void dma_snap_finish(u32 channel, u64 job_id); /* the job ended: what it left goes */
 void dma_snap_reset(u32 channel);              /* the channel closed: what it queued goes */
+/* save states (runtime/state.c), with the GPU thread held: the channels, the queue, the scans and the copy snapshots
+   into the state (0, or -1). A load reads them first into a staged copy (NULL when the section is damaged), which a
+   refused load frees, and puts it in place once the running game is gone, every channel and queued item there was
+   dropped first */
+struct StateIo;
+typedef struct GpuStaged GpuStaged;
+int gpu_state_save(struct StateIo* io);
+GpuStaged* gpu_state_parse(struct StateIo* io);
+void gpu_state_install(GpuStaged* s);
+void gpu_state_staged_free(GpuStaged* s);
+/* the layout of what gpu_state_save writes as raw bytes beyond GpuChannel, into the save state's schema hash at h, dump
+   taking each struct's walk (state_io.h's StateSchemaFn) */
+void gpu_state_schema(int (*dump)(u64* h, const char* fmt, ...), u64* h);
+typedef struct DmaStaged DmaStaged;
+int dma_snap_save(struct StateIo* io);
+DmaStaged* dma_snap_parse(struct StateIo* io);
+void dma_snap_install(DmaStaged* d);
+void dma_snap_staged_free(DmaStaged* d);
 
 /* maxwell3d.c: the record of GPU-side writes. Each write stamps a new generation on the pages it covers, by GPU
    address and by the guest pages behind them */
@@ -283,6 +322,7 @@ void gpu_mem_written_shader(u64 gva, u64 size); /* a shader's result landing in 
    picture, published over them, memory/own.c): what is built from them checks them again */
 void gpu_mem_written_cpu(u64 cpu, u64 size);
 u64 gpu_mem_generation(void);                   /* the last generation fully published */
+void gpu_mem_written_all(void); /* a save state's load: every page written, after anything asked before */
 int gpu_mem_dirty_since(u64 since, u64 a, u64 sz); /* a GPU-side write after since touched [a, a + sz) */
 
 /* ---- gpu.c: GPFIFO submission and the GPU thread's queue */
@@ -305,6 +345,11 @@ void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq);
 /* something a parked channel may wait for changed (a syncpoint increment, on the GPU thread or off it): look again.
    Any thread */
 void gpu_kick(void);
+/* a game pause, with no guest thread left to submit: the GPU thread runs what is queued up to now (channels waiting on
+   the CPU stay parked), the renderer finishes (Renderer.idle), and the thread waits until gpu_release. 0, or -1 when it
+   didn't get there within timeout_ms (and won't stop when it does) */
+int gpu_hold(int timeout_ms);
+void gpu_release(void);
 extern volatile u64 g_gpu_submits;
 /* the blocking wait the GPU thread is in, for the stall report: what it waits for (a string that lives on) and a number
    that names it, before the wait, and NULL after. Ignored on other threads */

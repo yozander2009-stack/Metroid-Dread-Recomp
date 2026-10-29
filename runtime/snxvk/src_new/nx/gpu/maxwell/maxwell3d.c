@@ -80,6 +80,17 @@ void gpu_mem_written_cpu(u64 cpu, u64 size) {
     pm_unlock(&g_wlk);
 }
 u64 gpu_mem_generation(void) { return __atomic_load_n(&g_wgen, __ATOMIC_ACQUIRE); }
+/* a save state's load: every page reads as written after anything asked before, through the tables' overflow, which
+   covers every page */
+void gpu_mem_written_all(void) {
+    u64 gen;
+    pm_lock(&g_wlk);
+    gen = g_wgen + 1;
+    __atomic_store_n(&g_wgpu.overflow, gen, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wcpu.overflow, gen, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wgen, gen, __ATOMIC_RELEASE);
+    pm_unlock(&g_wlk);
+}
 typedef struct {
     u64 since;
     int dirty;

@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
-/* The operating system under the runtime. One of plat_posix.c and plat_win32.c implements it (threads, time, the
-   guest's address space, files, libraries, the crash handler); profiler_win32.c samples threads on Windows, and the
-   host audio output lives in the window backend. Paths are UTF-8 everywhere. */
+/* The operating system under the runtime. plat_sdl.c implements what SDL does the same way everywhere (the clocks,
+   sleeping, libraries, path queries), and one of plat_posix.c and plat_win32.c the rest (threads, condition variables,
+   the guest's address space, file maps, the crash handler); profiler_win32.c samples threads on Windows, and the host
+   audio output lives in the window backend. Paths are UTF-8 everywhere. */
 #ifndef SNX_PLAT_H
 #define SNX_PLAT_H
 #include "common/cpu/aarch64/cpu.h"
@@ -66,7 +67,11 @@ i64 plat_tz_offset(void); /* local time minus UTC, in seconds */
    AArch64 distributions (mem.c). SNX_HOST_PAGE in the environment, a larger power of two up to 1 MiB, makes a host
    with smaller pages work in those, to test the larger pages' paths on any machine */
 u64 plat_vm_page(void);
-u8* plat_vm_reserve(u64 size); /* aligned to plat_vm_page, inaccessible until committed; NULL on failure */
+u8* plat_vm_reserve(u64 size); /* aligned to plat_vm_page, inaccessible until committed; NULL, the reason in errno */
+/* The process's address space now: what is mapped or reserved in all, and its largest free run between them, for a
+   run that fails for want of it (a thread's stack, a mapping). Whether the system told it (Linux, macOS, iOS and
+   Windows do) */
+int plat_address_space(u64* mapped, u64* largest_free);
 int plat_vm_commit(u8* p, u64 size);       /* readable and writable; 0, or -1 */
 void plat_vm_decommit(u8* p, u64 size);    /* inaccessible again, and zero when committed next */
 /* Calls cb for each run of pages in [p, p + size) written since they were last scanned, and watches them again.
@@ -106,6 +111,8 @@ int plat_trap_init(void (*fault)(u8* p, int write, u32 tid));
 u32 plat_tid(void); /* the calling thread's id, as the system numbers threads */
 /* whether this process's thread tid (plat_tid's) is waiting in a trap now: 1, 0, or -1 when that can't be told */
 int plat_thread_in_fault(u32 tid);
+/* Best-effort fatal diagnostics for the blocked thread, not the trap handler. Never resumes it. */
+void plat_dump_fault_thread(u32 tid);
 /* every page of [p, p + size), whole host pages of pool memory, armed / let go (0, or -1) */
 int plat_trap_arm(u8* p, u64 size);
 int plat_trap_continue(u8* p, u64 size);
@@ -122,19 +129,8 @@ void* plat_dl_sym(void* h, const char* name);
 const char* plat_dl_error(void); /* the reason the last plat_dl_open or plat_dl_sym returned NULL */
 int plat_setenv(const char* name, const char* value); /* for this process and what it loads; 0 on success */
 
-/* ---- files and folders */
+/* ---- files */
 int plat_is_dir(const char* path);
-u64 plat_file_size(const char* path); /* 0 when it can't be read */
-typedef struct {
-    void* h;       /* the platform's state, owned by the iteration */
-    int first;
-    char name[512]; /* the current entry, never "." or ".." */
-    int is_dir;
-    u64 size;
-} PDir;
-int plat_dir_open(PDir* d, const char* path); /* 0, or -1 */
-int plat_dir_next(PDir* d);                   /* 1 with an entry in d, 0 at the end */
-void plat_dir_close(PDir* d);
 /* Reads size bytes at off without moving f's position. The count read, short only at the end of the file, or -1 */
 i64 plat_pread(FILE* f, void* buf, u64 size, u64 off);
 typedef struct {
@@ -151,11 +147,6 @@ void plat_file_unmap(PFileMap* m);
 /* Moves tmp over dst atomically, so dst is always either the old or the new file. On failure dst is untouched and
    tmp deleted: 0, or -1 */
 int plat_replace_file(const char* tmp, const char* dst);
-
-/* ---- user interaction */
-/* Asks the player for a line of text (the software keyboard applet), starting from initial. 0 with the text in out
-   (cap bytes with its terminator), 1 when the player cancelled, -1 when the host has no way to ask */
-int plat_text_input(char* out, size_t cap, const char* initial);
 
 /* Host audio output of interleaved signed 16-bit samples, little-endian as the guest's are, implemented by the window
    backend. plat_audio_open gives a paused stream, or NULL when there is no device (always when headless).

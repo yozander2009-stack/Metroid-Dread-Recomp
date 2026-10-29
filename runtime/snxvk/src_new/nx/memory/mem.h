@@ -8,8 +8,16 @@
 #include "common/utilities/endian.h"
 #include <string.h>
 
-/* The host reservation (128 GiB). A guest address of either width is an offset below it */
-#define AS_SIZE 0x2000000000ull
+/* The most host address space the guest gets (128 GiB), which tables indexed by guest address are sized for */
+#define AS_MAX 0x2000000000ull
+/* A 64-bit application of the pre-2.0 address space type: the console gives these 64 GiB, and everything the game
+   holds (an IPC buffer descriptor's address among them) has to fit in 36 bits */
+#define AS36 (1ull << 36)
+/* The host reservation, which a guest address of either width is an offset below: AS_MAX, or less where the system
+   allows an app less address space (iOS without the paid extended-virtual-addressing entitlement), when mem_init picks
+   a smaller layout to fit it */
+extern u64 g_as_size;
+#define AS_SIZE (g_as_size)
 
 /* The regions of the address space. The 64-bit layout is g_layout's static value, so it holds before mem_layout32 */
 typedef struct {
@@ -73,12 +81,21 @@ enum {
 };
 /* MemoryPermission */
 enum { PERM_NONE = 0, PERM_R = 1, PERM_W = 2, PERM_RW = 3, PERM_X = 4, PERM_RX = 5, PERM_DONTCARE = 0x10000000 };
+/* MemoryAttribute: the bits svcSetMemoryAttribute names, and the set it may change (Uncached and PermissionLocked) */
+enum { MA_LOCKED = 1, MA_IPC_LOCKED = 2, MA_DEVICE_SHARED = 4, MA_UNCACHED = 8, MA_PERMISSION_LOCKED = 0x10 };
+#define MA_SET_MASK 0x18u
 /* what the calls below return besides 0 */
 enum { MEM_BADSTATE = -1, MEM_NOMEM = -2, MEM_LIMIT = -3 };
 
 /* the console's layout below 4 GiB for a 32-bit process, by the NPDM's address space type: 0 with the alias region, 2
    without */
 void mem_layout32(unsigned aspace);
+/* the console's 64 GiB layout for a 64-bit process of the pre-2.0 address space type (the NPDM's 1), where every
+   guest address has to fit in 36 bits */
+void mem_layout36(void);
+/* The guest's address space reserved now, the largest tier the system gives from the console's 128 GiB down to 5 GiB,
+   each refused one said: before the game's code takes a share of a small one. mem_init finds it kept */
+void mem_reserve(void);
 void mem_init(void);
 int mem_map(u64 addr, u64 size, u32 state, u32 perm); /* 0, MEM_BADSTATE when it isn't free, MEM_NOMEM */
 int mem_unmap(u64 addr, u64 size);
@@ -111,6 +128,8 @@ int mem_alias_begin(u64 src, u64 size);
 int mem_alias_map(u64 dst, u64 src, u64 size, u32 state, u32 perm);
 int mem_alias_unmap(u64 dst, u64 size, u64 back);
 void mem_alias_end(u64 src, u64 size);
+/* whether a view shares its source's pages: the alias pool is on (a view is a copy without it) */
+int mem_pool_active(void);
 /* Pool pages of their own (shared memory): size bytes mapped outside the reservation at the pointer returned, with
    their pool offset in off; NULL without a pool or when it is full */
 u8* mem_pool_host(u64 size, u64* off);
@@ -130,6 +149,35 @@ typedef struct {
 int mem_own_prepare(u64 a, u64 size, MemPoolRun* runs, u32 max, u32* n);
 /* the pool offset of guest address a: 0, or -1 when a isn't pool memory */
 int mem_pool_offset(u64 a, u64* off);
+
+/* ---- save states (runtime/state.c), with the game paused and nothing of the GPU's left in guest memory */
+/* The pool's pages in use, in offset order: a run a service maps outside the reservation (a shared memory's pages,
+   mem_pool_host) has host set, and the rest is cut at its ends, so each span is one or the other */
+typedef struct {
+    u64 off, size;
+    int host;
+} MemSpan;
+/* the blocks (mem_query's) and the spans into out, max at most: how many there are */
+u32 mem_blocks(MemBlock* out, u32 max);
+u32 mem_spans(MemSpan* out, u32 max);
+int mem_pool_read(u64 off, void* dst, u64 size); /* 0, or -1 */
+/* A load's new address space, from a state's blocks and spans. mem_restore_begin takes the renderer's lock and the
+   memory lock, lets go of what the GPU holds, and unmaps every block but the modules' code (MS_CODE, which a state
+   keeps as the game loaded it) and every span but the services' host views (a load reconciles those with their
+   shared memories itself, mem_pool_host and mem_pool_host_free, before it begins). Then mem_restore_alloc places
+   each of the state's other spans anew (its offset, or ~0 when the pool is full), mem_restore_write fills them,
+   mem_restore_blocks makes the block list the state's (its pool offsets already this run's, its MS_CODE blocks those
+   mapped now) and maps and commits it, the caller writes the other blocks' bytes at GP, and mem_restore_end sets the
+   heap's and physical memory's sizes, lets go of the locks and tells the JIT and the renderer every block changed.
+   Every call but mem_restore_end returns 0, or -1 with nothing more to do but mem_restore_end */
+int mem_restore_begin(void);
+u64 mem_restore_alloc(u64 size);
+int mem_restore_write(u64 off, const void* p, u64 size);
+int mem_restore_blocks(const MemBlock* blk, u32 n);
+void mem_restore_end(u64 heap_size, u64 phys_mapped);
+/* before any of that, while the game runs: whether blk (n of them) is a block list mem_restore_blocks takes, one that
+   covers the address space in order with the code mapped now. 0, or -1 */
+int mem_restore_check(const MemBlock* blk, u32 n);
 
 extern MemLayout g_layout;
 extern u8* g_mem;

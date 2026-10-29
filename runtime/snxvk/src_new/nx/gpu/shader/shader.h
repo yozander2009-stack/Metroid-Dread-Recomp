@@ -12,6 +12,10 @@ extern "C" {
 enum { ST_VS = 0, ST_TCS = 1, ST_TES = 2, ST_GS = 3, ST_FS = 4, ST_CS = 5 };
 #define SH_MAXTEX         64 /* texture slots per program */
 #define SH_INDEXED_TABLES 10 /* indexed texture tables per program */
+/* A 1D texture is bound as a 2D image, and a buffer texture longer than a row of one as rows of 2^SH_TEXEL_ROW_SHIFT
+   texels (texture.c): a 1D texel fetch at x reads (x mod row, x / row) of it, which is (x, 0) for every texture that
+   fits one row */
+#define SH_TEXEL_ROW_SHIFT 14
 /* a texture slot */
 typedef struct {
     u32 cbuf_off; /* where its handle is in the texture constant buffer, in words */
@@ -33,6 +37,16 @@ static inline int shader_same_indexed_table(const ShTex* a, const ShTex* b) {
     return a->bl_cbuf == b->bl_cbuf && a->cbuf_off == b->cbuf_off && a->flags == b->flags && a->type == b->type &&
            a->array == b->array && a->shadow == b->shadow;
 }
+/* A global buffer (ShaderInfo.gbuf_cbuf_off) is named by where its 64-bit address is: the constant buffer in bits 16-20,
+   the byte offset in it in bits 0-15. NVN's storage buffer descriptors, in cbuf 0 from 0x110 to 0x410 (compute) or
+   0x830, follow the address with the buffer's size (shader_gbuf_sized). A graphics program may also keep a bare
+   address in a constant buffer of its own, with nothing after it: one game's terrain vertex programs read their patch
+   data through such an address in cbuf 6, as Eden tracks them when no NVN descriptor holds the base
+   (global_memory_to_storage_buffer_pass.cpp's Track without the NVN bias). The renderer sizes those by the memory
+   mapped from the address on. The vertex stage's cbuf 0 at 0xb0 is a bare pointer of 16 bytes. */
+#define SH_GBUF_BANK(d)   ((d) >> 16)
+#define SH_GBUF_OFFSET(d) ((d) & 0xFFFFu)
+static inline int shader_gbuf_sized(int stage, u32 d) { return d >= 0x110 && d < (stage == ST_CS ? 0x410u : 0x830u); }
 /* Transform feedback (key of the last program before rasterization): for each of the 4 buffers, the attribute word
    each 4-byte word of a vertex there holds (its ISA attribute address / 4: the position's x is 28, generic i's
    component k 32 + 4 * i + k), of count words, the vertices stride bytes apart. All counts 0: nothing is captured */
@@ -59,7 +73,7 @@ typedef struct {
     /* FP32 arithmetic asking to flush denormals (FTZ/FMZ), and FP32 arithmetic that doesn't. Only flush in every
        FADD, FMUL and FFMA lets the module declare flushing, as Eden declares DenormFlushToZero */
     int fp32_flush, fp32_preserve;
-    u32 gbuf_cbuf_off[16]; /* the global buffers found, by where cbuf 0 holds their address */
+    u32 gbuf_cbuf_off[16]; /* the global buffers found, by where a constant buffer holds their address (SH_GBUF_*) */
     int ngbuf;
     int unsupported; /* instructions or forms translation refused */
     char first_unsupported[96]; /* the longest: an untracked global memory base with its writer */
@@ -68,14 +82,14 @@ typedef struct {
     u32 gbuf_wmask; /* global buffers the program writes */
     struct {
         u32 cbuf_off;
-        u8 type, bindless, bl_cbuf, kind; /* kind: 0 float store, 1 unsigned atomic, 2 unsigned store */
+        u8 type, bindless, bl_cbuf, kind; /* kind: 0 float store, 1 R32ui load/atomic, 2 unsigned store, 3 signed store */
     } img[8];
     int nimg; /* storage images stored to or used atomically */
     /* FS key: textures of integer formats and their signed ones. rt_int_mask and rt_sint_mask are FS's integer
        render targets; for TES rt_int_mask holds the tessellation parameters (register 0xC8), for GS the input
        primitive's vertex count */
     u64 tex_int_mask, tex_sint_mask;
-    u32 rt_int_mask, rt_sint_mask;
+    u32 rt_int_mask, rt_sint_mask; /* FS/CS bits 8-15 also key storage image stores' integer and signed types */
     u32 gp_skip_mask[8]; /* GS key: POST_VTG_SHADER_ATTRIB_SKIP_MASK, a bit per scalar attribute */
     /* FS key: color textures sampled with a depth compare (TEX.DC compares their first component, which a Vulkan
        compare sampler can't do on a color format): the slots, and their compare functions, 3 bits each in slot
@@ -92,13 +106,14 @@ typedef struct {
        reject */
     u32 early_fragment_tests;
     ShXfb xfb; /* key: transform feedback's capture of this program's outputs */
+    int writes_viewport; /* the last vertex stage selects one of the 16 viewport/scissor pairs */
 } ShaderInfo;
 #define SH_DC_COLOR_MAX  10 /* slots tex_dc_color_funcs has room for */
 /* Each stage has a descriptor set (shader_vk_set), its bindings grouped by kind. */
 #define SNX_VKB_CB       0                         /* 18 constant buffers */
 #define SNX_VKB_SSBO     18                        /* 16 global memory buffers */
 #define SNX_VKB_TEX      34                        /* SH_MAXTEX combined image samplers */
-#define SNX_VKB_IMG      (SNX_VKB_TEX + SH_MAXTEX) /* 8 storage images (compute) */
+#define SNX_VKB_IMG      (SNX_VKB_TEX + SH_MAXTEX) /* 8 storage images (compute, vertex, fragment) */
 #define SNX_VKB_RS       (SNX_VKB_IMG + 8)         /* fragment: 1 / the resolution scale (SNX_RS) */
 #define SNX_VKB_FMT      (SNX_VKB_RS + 1)          /* compute: the images' format classes (SNX_FMT) */
 #define SNX_VKB_SMAP     (SNX_VKB_FMT + 1)         /* graphics: storage buffer page indices for aliased bindings */
@@ -120,6 +135,8 @@ extern int g_shader_stage_point_size;
 /* vertex and tessellation programs may write the layer (shaderOutputLayer, the ShaderLayer capability); without it
    their layer writes go away (layer 0). 1 offline */
 extern int g_shader_output_layer;
+/* ViewportIndex output: bit 0 vertex/evaluation, bit 1 geometry. 3 offline. */
+extern int g_shader_viewport_index;
 /* the Geometry capability, for fragment programs reading Layer or PrimitiveId */
 extern int g_shader_geometry;
 /* shaderFloat16, which fp16 texture results need. 1 offline */
@@ -128,11 +145,20 @@ extern int g_shader_float16;
 extern int g_shader_tessellation;
 /* VK_KHR_shader_clock's scopes: bit 0 subgroup, bit 1 device */
 extern int g_shader_clock_scopes;
+/* VK_KHR_shader_maximal_reconvergence: a structured program's lanes reconverge where its constructs merge, so one
+   whose lanes must reconverge (subgroup operations, barriers, derivatives) takes structured control flow too */
+extern int g_shader_maximal_reconvergence;
 /* in clip_enable: a later stage before rasterization (tessellation or geometry) follows, and the last one applies
    the depth mode and the clip distances */
 #define SNX_SH_NOT_LAST (1u << 31)
 /* the descriptor set of a stage's bindings */
 int shader_vk_set(int stage);
+/* can_flush: how the module gets the console's FP32 flush to zero (FTZ on FADD, FMUL and FFMA). SH_FTZ_EMULATE: a
+   test and a select on each such operand and result; SH_FTZ_MODE: the DenormFlushToZero execution mode, in a module
+   whose every such instruction flushes; SH_FTZ_NATIVE: neither, on a device that flushes them by itself (vk/ftz_probe.c) */
+#define SH_FTZ_EMULATE 0
+#define SH_FTZ_MODE    1
+#define SH_FTZ_NATIVE  2
 /* Translates a program (code, readable up to max_bytes) to SPIR-V: malloc'd words, their count in word_count. NULL
    when the program uses something the translator can't express, with si->unsupported and the reason set. */
 u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, size_t* word_count, int can_flush,

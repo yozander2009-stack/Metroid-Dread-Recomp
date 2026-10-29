@@ -8,7 +8,13 @@
    the releases it gates, in order. Whoever needs a queued release sooner (a stream that reads the semaphore, or writes
    over it) performs it itself.
    The compute queue's results are waited for the same way (its batches, put aside, land in order), and so are
-   fragment programs' storage images (their copies recorded at the release, vk_gfx_image_put_aside). */
+   fragment programs' storage images (their copies recorded at the release, vk_gfx_image_put_aside).
+   A release also tells the CPU that the GPU got there, and the CPU may then write what the commands after it read: on
+   the console those run at once, ahead of the CPU. One game rewrites its characters' bone matrices and the bone slots
+   in their vertices once a release in the middle of its frame shows. Performed as soon as the GPU thread met it, the
+   draws after it read the next frame's slots there, and vertices flew to other characters. So the stream holds its
+   releases until it stops, at its end or at a wait (vk_release_submit), when the commands after them have read guest
+   memory, and the ones no GPU work holds are performed then. */
 #include <string.h>
 #include "common/utilities/common.h"
 #include "common/utilities/endian.h"
@@ -18,6 +24,7 @@
 #include "nx/hle/services/nvdrv.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
+#include "nx/runtime/platform/tracy.h" /* tests/vulkan_release.c stubs vk.h */
 
 typedef struct {
     u64 gate;  /* the graphics submit whose completion it waits for */
@@ -42,6 +49,7 @@ enum { PRED_NONE = -3, PRED_ZERO = -2, PRED_NONZERO = -1 };
 
 static Release g_rq[RQ_N];
 static u64 g_rhead, g_rtail; /* releases queued, performed */
+static u64 g_rheld;          /* the first release the stream still holds: those from it on aren't performed yet */
 static u32 g_rincr[SYNC_N];  /* increments queued per syncpoint */
 static PMutex g_rlock = PMUTEX_INIT;
 static PCond g_rcv;
@@ -139,7 +147,7 @@ static void release_through(u64 gate, u64 cgate) {
     for (;;) {
         Release r;
         pm_lock(&g_rlock);
-        if (g_rtail == g_rhead || g_rq[g_rtail % RQ_N].gate > gate || g_rq[g_rtail % RQ_N].cgate > cgate) {
+        if (g_rtail == g_rheld || g_rq[g_rtail % RQ_N].gate > gate || g_rq[g_rtail % RQ_N].cgate > cgate) {
             pm_unlock(&g_rlock);
             break;
         }
@@ -161,16 +169,22 @@ static void release_through(u64 gate, u64 cgate) {
 }
 static void release_thread(void* p) {
     (void)p;
+    SNX_THREAD_NAME("Vulkan release");
     for (;;) {
         u64 gate, cgate;
         pm_lock(&g_rlock);
-        while (g_rtail == g_rhead) pc_wait(&g_rcv, &g_rlock, -1);
+        while (g_rtail == g_rheld) pc_wait(&g_rcv, &g_rlock, -1);
         gate = g_rq[g_rtail % RQ_N].gate;
         cgate = g_rq[g_rtail % RQ_N].cgate;
         pm_unlock(&g_rlock);
+        SNX_ZONE(z_release, "vk release");
         vk_wait_submit(gate);
         vk_compute_wait(cgate);
-        release_through(gate, cgate);
+        {
+            SNX_ZONE(z, "land and release");
+            release_through(gate, cgate);
+            SNX_ZONE_END(z);
+        }
     }
 }
 
@@ -178,30 +192,28 @@ static void release_thread(void* p) {
 static void submit_through(u64 gate) {
     if (gate > vk_last_submit()) vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
 }
-/* r once everything recorded before it has landed: now, when nothing is pending or queued */
+/* r once everything recorded before it has landed and the stream has stopped (g_rheld) */
 static void release(Release* r) {
-    int queued;
+    SNX_ZONE_V(z, "vk release queue", r->samples);
     vk_lock();
+    vk_rt_publish_linear();
     vk_gfx_image_put_aside();
     r->cgate = vk_compute_put_aside();
-    pm_lock(&g_rlock);
-    queued = g_rtail != g_rhead;
-    pm_unlock(&g_rlock);
-    /* a samples-passed report always waits for the GPU: its count is the draws' */
-    if (!r->samples && !vk_buf_pending_any() && !vk_gfx_image_in_flight(0) && !r->cgate && !queued) {
-        perform(r);
-        vk_unlock();
-        return;
-    }
-    /* the work before it: results of earlier submits are older, and the submit being recorded holds the rest (and a
+    /* the work before it: none when nothing is pending (a samples-passed report always waits for the GPU, its count
+       is the draws'). Else results of earlier submits are older, and the submit being recorded holds the rest (and a
        samples-passed report's counts). The release waits for that submit without submitting it now: whoever needs the
        release submits it (submit_through), and so do the end of the GPFIFO submission and a wait in it (stream_end).
        Submitting at each release made Pokemon Legends Z-A submit about 150 times a frame, with storage results
        pending through most of its releases */
     u64 recording = vk_submit_number();
-    r->gate = r->samples || vk_buf_pending_unsubmitted() || vk_gfx_image_in_flight(1) ? recording : vk_last_submit();
+    if (!r->samples && !vk_buf_pending_any() && !vk_gfx_image_in_flight(0) && !r->cgate)
+        r->gate = 0;
+    else
+        r->gate =
+            r->samples || vk_buf_pending_unsubmitted() || vk_gfx_image_in_flight(1) ? recording : vk_last_submit();
     pm_lock(&g_rlock);
-    if (g_rhead - g_rtail == RQ_N) { /* full: the oldest goes now */
+    if (g_rhead - g_rtail == RQ_N) { /* full: the oldest goes now, held or not */
+        g_rheld = g_rhead;
         u64 oldest = g_rq[g_rtail % RQ_N].gate, coldest = g_rq[g_rtail % RQ_N].cgate;
         pm_unlock(&g_rlock);
         submit_through(oldest);
@@ -244,13 +256,17 @@ void vk_release_write(u64 gva, const void* data, u32 len) {
     memcpy(r.data, data, r.len);
     release(&r);
 }
-/* the GPFIFO submission ended or waits: a release still gated on the submit being recorded goes to the GPU, as the
-   guest may look at it now */
+/* the GPFIFO submission ended or waits: the stream's releases go, those no GPU work holds at once, and a release still
+   gated on the submit being recorded goes to the GPU, as the guest may look at it now */
 void vk_release_submit(void) {
+    SNX_ZONE(z, "vk release submit");
     vk_lock();
     pm_lock(&g_rlock);
+    g_rheld = g_rhead; /* the commands after the releases have read guest memory */
     u64 gate = g_rhead != g_rtail ? g_rq[(g_rhead - 1) % RQ_N].gate : 0; /* the gates only grow */
+    if (g_rthread) pc_broadcast(&g_rcv);
     pm_unlock(&g_rlock);
+    release_through(0, 0); /* those no GPU work holds */
     submit_through(gate);
     vk_unlock();
 }
@@ -310,6 +326,8 @@ static void release_match(u64 gva, u64 len, u32 id, int all) {
         return;
     }
     pm_lock(&g_rlock);
+    g_rheld = g_rhead; /* needed now: the stream holds them no longer */
+    if (g_rthread) pc_broadcast(&g_rcv);
     for (u64 i = g_rtail; i < g_rhead; i++) {
         const Release* r = &g_rq[i % RQ_N];
         if (all || (len ? release_overlaps(r, gva, len) : !r->gva && r->id == id)) {

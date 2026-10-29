@@ -4,9 +4,10 @@
    GPU from memory, the destination kept there (docs/GPU_OWNERSHIP.md). maxwell/fermi2d.c works out which source pixel
    each destination column and row takes (nearest sampled, scaled); here the source's surface is staged as the GPU
    sees it (guest bytes, what the GPU holds, render targets drawn over it) and taken apart into rows, the destination
-   rectangle's rows are gathered through the tables (texconv.comp), a row of the rectangle a word an invocation, and
-   copied into the destination's rows, exactly the rectangle's bytes, which go back into its layout and are published
-   over its span. Under vk_lock, in the frame's command buffer */
+   rectangle's rows are gathered through the tables (texconv.comp), a row of the rectangle a word an invocation, the
+   components converted between float formats when the blit says so (TC_BLIT_FLOAT), and copied into the
+   destination's rows, exactly the rectangle's bytes, which go back into its layout and are published over its span.
+   Under vk_lock, in the frame's command buffer */
 #include <string.h>
 #include "nx/gpu/vk/vk.h"
 #include "nx/hle/services/nvdrv.h"
@@ -30,7 +31,7 @@ static u8* stage_range(u64 gva, u64 span, VkBuffer* buf, u64* at) {
 }
 
 static int blit(const GpuBlit* b) {
-    u32 n = b->x1 - b->x0, rows = b->y1 - b->y0, nb = n * b->bpp;
+    u32 n = b->x1 - b->x0, rows = b->y1 - b->y0, bd = GPU_BLIT_DST_BPP(b), nb = n * bd;
     u64 sspan = plane_span(&b->src), dspan = plane_span(&b->dst), cap, sat, dat, tat;
     u32 pa = b->src.bl ? (u32)up(b->src.wb, 16) : b->src.pitch, pb = (u32)up(nb, 4), pc = (u32)up(b->dst.wb, 16);
     /* the scratch: the source's rows, the tables, the gathered rows, the destination's rows (block linear) */
@@ -74,14 +75,14 @@ static int blit(const GpuBlit* b) {
         ok = vk_bl_move(cb, &md, 0, d->buf, dlo, scr, at_c);
     }
     vk_all_barrier(cb);
-    ok = ok && vk_tc_blit(cb, b->bpp, nb, rows, scr, used, at_a, pa, at_t, at_t + 4ull * n, scr, at_b, pb);
+    ok = ok && vk_tc_blit(cb, b->bpp, b->fmt, nb, rows, scr, used, at_a, pa, at_t, at_t + 4ull * n, scr, at_b, pb);
     vk_all_barrier(cb);
     if (ok) { /* the rectangle's bytes into the destination's rows, which go back into its layout */
         if (b->dst.bl)
-            vk_copy_rows(cb, scr, at_b, pb, scr, at_c + (u64)b->x0 * b->bpp, pc, nb, rows);
+            vk_copy_rows(cb, scr, at_b, pb, scr, at_c + (u64)b->x0 * bd, pc, nb, rows);
         else
-            vk_copy_rows(cb, scr, at_b, pb, d->buf, (u64)b->y0 * b->dst.pitch + (u64)b->x0 * b->bpp, b->dst.pitch,
-                         nb, rows);
+            vk_copy_rows(cb, scr, at_b, pb, d->buf, (u64)b->y0 * b->dst.pitch + (u64)b->x0 * bd, b->dst.pitch, nb,
+                         rows);
         vk_all_barrier(cb);
         if (b->dst.bl) ok = vk_bl_move(cb, &md, 1, d->buf, dlo, scr, at_c);
         vk_all_barrier(cb);

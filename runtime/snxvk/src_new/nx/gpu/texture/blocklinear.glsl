@@ -16,7 +16,12 @@
    Everything but k is the same for the GOB's 32 lanes: its block's place (a column of blocks, a row of blocks, a slab
    of 2^bd slices) and its place in the block. The host hands in the shifts and strides (vk/blocklinear.c), and
    the direction picks which side is read with two selects of offsets computed either way, so both directions are
-   the same instructions: one shader and one pipeline, not two. */
+   the same instructions: one shader and one pipeline, not two.
+
+   A swizzle's final partial run merges only valid row bytes with the destination.
+   The host computes its four word masks once; full runs retain one load/store.
+   Each run has one invocation, so the merge needs no atomics. The C++ byte-wise
+   reference checks every tail width and randomized layouts, both directions. */
 
 void main() {
     uint k = gl_LocalInvocationID.x;
@@ -30,5 +35,9 @@ void main() {
     uint gob = ((z & dmask) << bh) | (gy & hmask);
     uint bl = bl_bias + (z >> bd) * slab + (gy >> bh) * block_row + ((run >> 2) << bsh) + (gob << 5) + k;
     uint lin = lin_bias + (gl_WorkGroupID.z * rows + y) * lin_runs + run;
-    dst[to_bl != 0u ? bl : lin] = src[to_bl != 0u ? lin : bl];
+    if (to_bl != 0u && run + 1u == runs && tail_mask[3] != 0xffffffffu) {
+        uvec4 prior = dst[bl];
+        dst[bl] = prior ^ ((prior ^ src[lin]) & tail_mask);
+    } else
+        dst[to_bl != 0u ? bl : lin] = src[to_bl != 0u ? lin : bl];
 }

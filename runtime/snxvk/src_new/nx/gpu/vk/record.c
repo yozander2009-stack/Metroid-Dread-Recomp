@@ -18,6 +18,7 @@
 #include "nx/runtime/platform/log.h"
 #include "nx/gpu/vk/vk.h"
 #include "nx/runtime/platform/plat.h"
+#include "nx/runtime/platform/tracy.h"
 
 typedef void (*RecFn)(const void* args);
 typedef struct {
@@ -25,7 +26,11 @@ typedef struct {
     u64 size; /* of the packet, header included, a multiple of 16 */
 } RecHdr;
 
-#define REC_CAP     (16ull << 20)
+/* The ring holds about a frame of one game's commands (3.8 MB a frame in its underground scene). At 16 MB every packet
+   went to memory last written four frames before, long out of the caches, and the stream through the shared cache
+   likely pushed out what the GPU thread's draws look up: at 4 MB that thread's load misses dropped a tenth and its
+   frames took 5% fewer cycles. The producer waits for room only when the recording thread is a whole frame behind */
+#define REC_CAP     (4ull << 20)
 #define REC_PUBLISH (32ull << 10)
 
 static u8* g_ring;
@@ -43,8 +48,10 @@ static PCond g_cv;
 static void rec_thread(void* arg) {
     u64 tail = 0;
     (void)arg;
+    SNX_THREAD_NAME("Vulkan recorder");
     (void)g_pad0;
     (void)g_pad1;
+    SNX_THREAD_NAME("vk record");
     for (;;) {
         u64 head = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
         /* nothing more yet: sleep until the producer publishes (REC_PUBLISH). It spun 4000 pauses first, which with
@@ -57,11 +64,16 @@ static void rec_thread(void* arg) {
             __atomic_store_n(&g_sleep, 0, __ATOMIC_RELAXED);
             pm_unlock(&g_m);
         }
+        u64 records __attribute__((unused)) = 0; /* the zone's value; only the profiler reads it */
+        SNX_ZONE(z_rec, "vk record");
         while (tail != head) {
             const RecHdr* h = (const RecHdr*)(g_ring + (tail & (REC_CAP - 1)));
             if (h->fn) h->fn(h + 1);
             tail += h->size;
+            records++;
         }
+        SNX_ZONE_VALUE(z_rec, records);
+        SNX_ZONE_END(z_rec);
         __atomic_store_n(&g_tail, tail, __ATOMIC_RELEASE);
     }
 }
@@ -187,6 +199,7 @@ static void submit_run(const void* p) {
                         .pCommandBufferInfos = &c,
                         .signalSemaphoreInfoCount = x->ns,
                         .pSignalSemaphoreInfos = x->s};
+    vk_wait_foreground();
     VkResult r = vkQueueSubmit2(g_vk.gfx, 1, &si, VK_NULL_HANDLE);
     if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
     VK_OK(r);
@@ -229,6 +242,7 @@ static VkResult present_run(const Present* x) {
                            .swapchainCount = 1,
                            .pSwapchains = &x->sc,
                            .pImageIndices = &x->idx};
+    SNX_ZONE(z_queue_present, "vkQueuePresentKHR");
     return vkQueuePresentKHR(g_vk.gfx, &pi);
 }
 static void present_queued(const void* p) {
@@ -289,9 +303,11 @@ VkResult vk_rec_present_result(void) {
 
 /* A graphics pipeline may be a stand-in for one a worker is still making (vk_pipeline_get_deferred): it is waited for
    here, at its bind. One that couldn't be made binds nothing, and the draws after it until the next graphics bind are
-   dropped, as the GPU thread drops a draw without its pipeline (the recording thread's own flag) */
+   dropped, as the GPU thread drops a draw without its pipeline (the recording thread's own flag: 1). With
+   async_pipelines one still being made isn't waited for: its draws are dropped the same way (2) until a later frame
+   binds it made. A new shader's compile, 60 to 400 ms on one driver, stalled the frame it first appeared in */
 static int g_rec_unbound;
-static u64 g_rec_dropped;
+static u64 g_rec_dropped, g_rec_skipped;
 typedef struct {
     VkCommandBuffer cb;
     VkPipelineBindPoint bp;
@@ -299,8 +315,10 @@ typedef struct {
 } BindPipelineArgs;
 static void bind_pipeline_run(const void* p) {
     const BindPipelineArgs* x = p;
-    VkPipeline pipe = vk_pipeline_resolve(x->p);
-    if (x->bp == VK_PIPELINE_BIND_POINT_GRAPHICS) g_rec_unbound = !pipe;
+    int graphics = x->bp == VK_PIPELINE_BIND_POINT_GRAPHICS, pending = 0;
+    VkPipeline pipe =
+        graphics && g_settings.async_pipelines ? vk_pipeline_now(x->p, &pending) : vk_pipeline_resolve(x->p);
+    if (graphics) g_rec_unbound = pipe ? 0 : pending ? 2 : 1;
     if (pipe) vkCmdBindPipeline(x->cb, x->bp, pipe);
 }
 void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
@@ -315,7 +333,12 @@ void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline 
 }
 static int rec_drop_draw(void) {
     if (!g_rec_unbound) return 0;
-    if (!g_rec_dropped++) WARN("vulkan: a pipeline couldn't be made: its draws are dropped\n");
+    if (g_rec_unbound == 2) {
+        if (g_rec_skipped++ % 1000 == 0)
+            LOG("vulkan: %llu draws skipped while their pipelines were made (async_pipelines)\n",
+                (unsigned long long)g_rec_skipped);
+    } else if (!g_rec_dropped++)
+        WARN("vulkan: a pipeline couldn't be made: its draws are dropped\n");
     return 1;
 }
 typedef struct {
@@ -650,7 +673,7 @@ typedef struct {
     VkImageLayout l1, l2;
     u32 n;
     u32 e; /* a filter */
-    u64 v[3]; /* a clear value */
+    VkClearValue v; /* a clear value */
 } XferArgs;
 #define XFER_REGIONS(x) ((const void*)((const u8*)(x) + REC_AL(sizeof *(x))))
 static void copy_buffer_run(const void* p) {
@@ -675,11 +698,11 @@ static void image_to_buffer_run(const void* p) {
 }
 static void clear_color_run(const void* p) {
     const XferArgs* x = p;
-    vkCmdClearColorImage(x->cb, (VkImage)x->h1, x->l1, (const VkClearColorValue*)x->v, x->n, XFER_REGIONS(x));
+    vkCmdClearColorImage(x->cb, (VkImage)x->h1, x->l1, &x->v.color, x->n, XFER_REGIONS(x));
 }
 static void clear_depth_run(const void* p) {
     const XferArgs* x = p;
-    vkCmdClearDepthStencilImage(x->cb, (VkImage)x->h1, x->l1, (const VkClearDepthStencilValue*)x->v, x->n,
+    vkCmdClearDepthStencilImage(x->cb, (VkImage)x->h1, x->l1, &x->v.depthStencil, x->n,
                                 XFER_REGIONS(x));
 }
 u64 g_rec_xfers, g_rec_barriers; /* copies and blits, and barriers, put in the frame's ring (gpuprof.c's gaps) */
@@ -756,7 +779,7 @@ void rec_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, co
         vkCmdClearColorImage(cb, img, l, c, n, r);
         return;
     }
-    memcpy(rec_xfer(clear_color_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v, c, sizeof *c);
+    rec_xfer(clear_color_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v.color = *c;
     rec_commit();
 }
 void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout l, const VkClearDepthStencilValue* c,
@@ -765,7 +788,7 @@ void rec_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayou
         vkCmdClearDepthStencilImage(cb, img, l, c, n, r);
         return;
     }
-    memcpy(rec_xfer(clear_depth_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v, c, sizeof *c);
+    rec_xfer(clear_depth_run, cb, (u64)img, l, 0, 0, n, r, n * sizeof *r)->v.depthStencil = *c;
     rec_commit();
 }
 

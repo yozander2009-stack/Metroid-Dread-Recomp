@@ -24,7 +24,7 @@ the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 o
 | `switchrecomp.py`, `codegen.py`, `a64.py`, `nxloader.py`, `metroid_perf.py` | SwitchRecomp: ARM64 → C translator (Apache-2.0) |
 | `runtime/` | the runtime: kernel, services, GPU → OpenGL, audio, video, input |
 | `runtime/dread_ui/` | front end: `fe.cpp` (setup, Play, settings), `ov.cpp` (in-game menu), `ui.cpp` (theme, widgets, settings table) |
-| `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main b5f4f14) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
+| `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main 112db409) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
 | `dread/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
 | `third_party/imgui-1.92.5/` | Dear ImGui (MIT) |
 | `linux/` | scripts for the Linux / Steam Deck build |

@@ -10,6 +10,8 @@
 #include "nx/runtime/platform/plat.h"
 #include "nx/gpu/gpu.h"
 #include "nx/gpu/vk/vk.h"
+#include "common/gpu/vk/swapchain.h"
+#include "common/gpu/vk/vk_common.h"
 
 int g_vk_preserve_infnan;
 int g_vk_preserve_infnan64;
@@ -24,6 +26,8 @@ static u32 g_vk_owner; /* the thread holding it (plat_tid), 0 when none: a trap'
 void vk_lock(void) {
     if (!t_vkdepth++) {
         if (!pm_trylock(&g_vklock)) { /* held: the GPU thread says so for the stall report */
+            /* Only a contended acquisition gets a zone. */
+            SNX_ZONE(z_wait, "vk lock wait");
             gpu_wait_note("vk_lock, which another thread holds", 0);
             pm_lock(&g_vklock);
             gpu_wait_note(NULL, 0);
@@ -47,52 +51,24 @@ int vk_trylock(void) {
 }
 u32 vk_lock_owner(void) { return __atomic_load_n(&g_vk_owner, __ATOMIC_RELAXED); }
 
-static const char* vk_result_str(VkResult r) {
-    switch (r) {
-        case VK_SUCCESS: return "VK_SUCCESS";
-        case VK_NOT_READY: return "VK_NOT_READY";
-        case VK_TIMEOUT: return "VK_TIMEOUT";
-        case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
-        case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
-        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
-        case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
-        case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
-        case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
-        case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
-        case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
-        case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
-        case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
-        case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
-        default: return "VkResult";
-    }
-}
 int vk_ok_(VkResult r, const char* what, const char* file, int line) {
     if (r >= 0) return 1;
-    WARN("vulkan: %s failed: %s (%d) at %s:%d\n", what, vk_result_str(r), (int)r, file, line);
+    WARN("vulkan: %s failed: %s (%d) at %s:%d\n", what, snx_vk_result_str(r), (int)r, file, line);
     return 0;
 }
 
+u32 g_vk_validation_messages;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev,
                                                VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT* d, void* user) {
     (void)type;
     (void)user;
+    g_vk_validation_messages++;
     if (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
         WARN("vulkan validation: %s\n", d->pMessage);
     else
         LOG("vulkan validation: %s\n", d->pMessage);
     return VK_FALSE;
-}
-
-static int has_layer(const char* name) {
-    u32 n = 0;
-    vkEnumerateInstanceLayerProperties(&n, NULL);
-    VkLayerProperties* l = calloc(n ? n : 1, sizeof *l);
-    vkEnumerateInstanceLayerProperties(&n, l);
-    int found = 0;
-    for (u32 i = 0; i < n && !found; i++) found = !strcmp(l[i].layerName, name);
-    free(l);
-    return found;
 }
 
 /* VkPhysicalDevicePortabilitySubsetFeaturesKHR, which vulkan_beta.h holds back */
@@ -106,81 +82,37 @@ typedef struct {
         triangleFans, vertexAttributeAccessBeyondStride;
 } PortabilityFeatures;
 /* MoltenVK (macOS, iOS) is a portability driver: the loader lists it only for an instance that asks for those */
-static int has_instance_extension(const char* name) {
-    u32 n = 0;
-    vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
-    VkExtensionProperties* e = calloc(n ? n : 1, sizeof *e);
-    vkEnumerateInstanceExtensionProperties(NULL, &n, e);
-    int found = 0;
-    for (u32 i = 0; i < n && !found; i++) found = !strcmp(e[i].extensionName, name);
-    free(e);
-    return found;
-}
-
 void vk_dlss_instance_exts(const char** ext, u32* next, u32 max);
 void vk_dlss_device_exts(VkPhysicalDevice pd, const char** ext, u32* next, u32 max);
 int vk_dlss_init(void);
 static int create_instance(void) {
     u32 nbe = 0;
     const char* const* be = g_opt_headless ? NULL : backend_vk_extensions(&nbe);
-    const char* ext[16];
+    const char* ext[16]; /* SWR: the window's, then DLSS's and HDR's */
     u32 next = 0;
-    for (u32 i = 0; i < nbe && next < 15; i++) ext[next++] = be[i];
+    for (u32 i = 0; be && i < nbe && next < 15; i++) ext[next++] = be[i];
     if (nbe > 15) WARN("vulkan: the window backend wants %u instance extensions, only 15 are taken\n", nbe);
-    const char* layers[1];
-    u32 nlayers = 0;
-    int validation = g_settings.vulkan_validation_layer;
-    if (validation) {
-        if (has_layer("VK_LAYER_KHRONOS_validation")) {
-            layers[nlayers++] = "VK_LAYER_KHRONOS_validation";
-            ext[next++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-        } else {
-            WARN("vulkan: validation was asked for (vk_validation), but "
-                 "VK_LAYER_KHRONOS_validation is not installed\n");
-            validation = 0;
-        }
-    }
-    /* the window backend may ask for it already (SDL does on Apple systems) */
-    int portability = has_instance_extension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME), asked = 0;
-    for (u32 i = 0; i < next; i++) asked |= !strcmp(ext[i], VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    if (portability && !asked) {
-        if (next < 16)
-            ext[next++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-        else
-            portability = 0;
-    }
-    portability |= asked;
     vk_dlss_instance_exts(ext, &next, 16); /* SWR: DLSS (dlss.c) */
     {   /* SWR: HDR output (hdr.c) needs the HDR colour spaces; only asked for when hdr=1 and the loader has it */
         extern int g_opt_hdr, g_vk_hdr_ext;
-        if (g_opt_hdr && !g_opt_headless && next < 16 && has_instance_extension("VK_EXT_swapchain_colorspace")) {
+        if (g_opt_hdr && !g_opt_headless && next < 16 && snx_vk_has_instance_extension("VK_EXT_swapchain_colorspace")) {
             ext[next++] = "VK_EXT_swapchain_colorspace";
             g_vk_hdr_ext = 1;
         }
     }
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-                             .pApplicationName = "ScarletNX",
-                             .pEngineName = "ScarletNX",
-                             .apiVersion = VK_API_VERSION_1_3};
-    VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-                               .flags = portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0,
-                               .pApplicationInfo = &app,
-                               .enabledLayerCount = nlayers,
-                               .ppEnabledLayerNames = layers,
-                               .enabledExtensionCount = next,
-                               .ppEnabledExtensionNames = ext};
-    if (!VK_OK(vkCreateInstance(&ci, NULL, &g_vk.instance))) return 0;
-    volkLoadInstance(g_vk.instance);
-    if (validation) {
-        VkDebugUtilsMessengerCreateInfoEXT di = {.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                                                 .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                                                                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-                                                 .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                                                                VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                                                                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-                                                 .pfnUserCallback = debug_cb};
-        VK_OK(vkCreateDebugUtilsMessengerEXT(g_vk.instance, &di, NULL, &g_vk.debug));
-    }
+    SnxVkInstanceInfo info = {.app_name = "ScarletNX",
+                              .extensions = ext,
+                              .extension_count = next,
+                              .validation = g_settings.vulkan_validation_layer != 0,
+                              .portability = true,
+                              .debug = debug_cb};
+    SnxVkInstance made;
+    if (!VK_OK(snx_vk_instance_create(&info, &made))) return 0;
+    if (info.validation && !made.validation)
+        WARN("vulkan: validation was asked for (vk_validation), but "
+             "VK_LAYER_KHRONOS_validation is not installed\n");
+    g_vk.instance = made.instance;
+    g_vk.debug = made.messenger;
     return 1;
 }
 
@@ -209,67 +141,46 @@ static u32 video_decode_family(void) {
 
 /* Vulkan 1.3 and a graphics queue. Only windowed runs need WSI and presentation support.
    *gfx_queues: how many queues the graphics family has */
-static int device_score(VkPhysicalDevice pd, u32* gfx, u32* compute, u32* gfx_queues) {
-    VkPhysicalDeviceProperties p;
-    vkGetPhysicalDeviceProperties(pd, &p);
-    if (p.apiVersion < VK_API_VERSION_1_3) return -1;
-    u32 n = 0;
-    vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL);
-    VkExtensionProperties* e = calloc(n ? n : 1, sizeof *e);
-    vkEnumerateDeviceExtensionProperties(pd, NULL, &n, e);
-    int swapchain = 0;
-    for (u32 i = 0; i < n; i++) swapchain |= !strcmp(e[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    free(e);
+static int device_score(VkPhysicalDevice pd, const VkPhysicalDeviceProperties* p, u32* gfx, u32* compute,
+                        u32* gfx_queues) {
+    SnxVkExtensions e;
+    int swapchain = snx_vk_device_extensions(pd, &e) && snx_vk_extensions_has(&e, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    snx_vk_extensions_free(&e);
     if (!g_opt_headless && !swapchain) return -1;
     u32 nq = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, NULL);
-    VkQueueFamilyProperties* q = calloc(nq ? nq : 1, sizeof *q);
-    vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, q);
-    *gfx = *compute = ~0u;
-    for (u32 i = 0; i < nq; i++) {
-        VkBool32 present = g_opt_headless; /* a query that fails is no support */
-        if (!g_opt_headless && vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, g_vk.surface, &present) != VK_SUCCESS)
-            present = VK_FALSE;
-        VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT; /* ASTC uploads use compute */
-        if ((q[i].queueFlags & required) == required && present && *gfx == ~0u) *gfx = i;
-    }
+    VkQueueFamilyProperties* q = snx_vk_queue_families(pd, &nq);
+    /* ASTC uploads use compute */
+    *gfx = snx_vk_queue_family(pd, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT,
+                               g_opt_headless ? VK_NULL_HANDLE : g_vk.surface, 0);
+    *compute = ~0u;
     /* a compute family without graphics runs alongside the graphics queue */
     for (u32 i = 0; i < nq; i++)
         if ((q[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && *compute == ~0u)
             *compute = i;
     if (*compute == ~0u) *compute = *gfx;
-    *gfx_queues = *gfx != ~0u ? q[*gfx].queueCount : 0;
+    *gfx_queues = *gfx < nq ? q[*gfx].queueCount : 0;
     free(q);
     if (*gfx == ~0u) return -1;
-    return p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU     ? 3
-           : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
-                                                                    : 1;
+    return p->deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU     ? 3
+           : p->deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
+                                                                     : 1;
+}
+/* device_score as snx_vk_best_device rates a device */
+static int device_rating(VkPhysicalDevice pd, const VkPhysicalDeviceProperties* p, void* user) {
+    u32 gf, cf, gq;
+    (void)user;
+    return device_score(pd, p, &gf, &cf, &gq);
 }
 
 static int create_device(void) {
-    u32 n = 0;
-    vkEnumeratePhysicalDevices(g_vk.instance, &n, NULL);
-    VkPhysicalDevice* pds = calloc(n ? n : 1, sizeof *pds);
-    vkEnumeratePhysicalDevices(g_vk.instance, &n, pds);
-    int best = -1;
-    u32 gfx_queues = 0;
-    for (u32 i = 0; i < n; i++) {
-        u32 gf, cf, gq;
-        int s = device_score(pds[i], &gf, &cf, &gq);
-        if (s > best) {
-            best = s;
-            g_vk.phys = pds[i];
-            g_vk.gfx_family = gf;
-            g_vk.compute_family = cf;
-            gfx_queues = gq;
-        }
-    }
-    free(pds);
-    if (best < 0) {
+    g_vk.phys = snx_vk_best_device(g_vk.instance, VK_API_VERSION_1_3, device_rating, NULL);
+    if (!g_vk.phys) {
         WARN("vulkan: no Vulkan 1.3 device with a suitable %s queue\n", g_opt_headless ? "graphics" : "presentation");
         return 0;
     }
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    u32 gfx_queues = 0;
+    device_score(g_vk.phys, &g_vk.props, &g_vk.gfx_family, &g_vk.compute_family, &gfx_queues);
     VkPhysicalDeviceSubgroupProperties subgroup = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceVulkan12Properties p12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
                                               .pNext = &subgroup};
@@ -295,8 +206,7 @@ static int create_device(void) {
     g_vk_flush_denorm = p12.shaderDenormFlushToZeroFloat32 &&
                         p12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE &&
                         p12.driverID != VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
-    if (!g_vk_flush_denorm)
-        WARN("vulkan: FP32 denormal flush mode unavailable; graphics shaders use per-instruction FTZ fallback\n");
+    /* without it, vk_pipeline_init measures whether the device flushes by itself (vk_ftz_native) */
     if (!g_vk_preserve_infnan) WARN("vulkan: FP32 signed-zero/Inf/NaN preservation unavailable on this GPU\n");
 
     /* compute gets a queue of its own: of a compute-only family, or else a second one of the graphics family */
@@ -328,10 +238,21 @@ static int create_device(void) {
     WANT(depthBounds);
     WANT(wideLines);
     WANT(largePoints);
+    WANT(multiViewport);
     WANT(samplerAnisotropy);
     WANT(occlusionQueryPrecise); /* samples-passed counts (query.c) are exact */
     WANT(sampleRateShading);
-    WANT(textureCompressionBC);
+    /* BCn, ASTC and ETC2 sampled as they are (format.c) where the settings ask for it and the device has them, else
+       decoded on the GPU as they are uploaded */
+    if (g_settings.native_bc) WANT(textureCompressionBC);
+    if (g_settings.native_astc) WANT(textureCompressionASTC_LDR);
+    if (g_settings.native_etc2) WANT(textureCompressionETC2);
+    if (g_settings.native_bc && !want->textureCompressionBC)
+        WARN("vulkan: the GPU can't sample BCn textures: they are decoded on the GPU as they are loaded\n");
+    if (g_settings.native_astc && !want->textureCompressionASTC_LDR)
+        WARN("vulkan: native ASTC textures were asked for, but the GPU can't sample ASTC: they are decoded to RGBA8\n");
+    if (g_settings.native_etc2 && !want->textureCompressionETC2)
+        WARN("vulkan: native ETC2 textures were asked for, but the GPU can't sample ETC2: they are decoded\n");
     WANT(vertexPipelineStoresAndAtomics);
     WANT(fragmentStoresAndAtomics);
     WANT(shaderImageGatherExtended);
@@ -350,9 +271,7 @@ static int create_device(void) {
     int sparse_queue = 0;
     {
         u32 nq = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
-        VkQueueFamilyProperties* q = calloc(nq ? nq : 1, sizeof *q);
-        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, q);
+        VkQueueFamilyProperties* q = snx_vk_queue_families(g_vk.phys, &nq);
         sparse_queue = g_vk.gfx_family < nq && (q[g_vk.gfx_family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
         free(q);
     }
@@ -363,45 +282,57 @@ static int create_device(void) {
     g_shader_geometry = want->geometryShader != 0;
     g_shader_tessellation = want->tessellationShader != 0;
     const char** ext = g_vk.dev_ext;
+    int has_pipeline_robustness = 0, has_robustness2 = 0;
     int has_budget = 0;
     u32 next = 0;
     int has_shader_clock = 0, has_feedback_dynamic = 0, has_cond = 0, has_provoking = 0, video_exts = 0;
-    int has_portability = 0;
+    int has_portability = 0, has_reconvergence = 0;
+    int has_calibrated = 0;
     if (!g_opt_headless) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     {
-        u32 n = 0;
-        vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &n, NULL);
-        VkExtensionProperties* e = calloc(n ? n : 1, sizeof *e);
-        vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &n, e);
-        for (u32 i = 0; i < n; i++) {
-            if (!strcmp(e[i].extensionName, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) g_vk.has_divisor = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME)) g_vk.has_xfb = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME)) g_vk.has_border_color = 1;
-            if (!strcmp(e[i].extensionName, VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) has_shader_clock = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME))
-                g_vk.has_feedback = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME))
-                has_feedback_dynamic = 1;
-            if (!strcmp(e[i].extensionName, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME))
-                g_vk.has_local_read = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) has_cond = 1;
-            if (!strcmp(e[i].extensionName, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME)) has_provoking = 1;
-            /* the driver's budget for each heap, the other processes' use taken out, for VMA: without it VMA took
-               80% of a heap's size as its budget, blind to what the desktop and other programs hold */
-            if (!strcmp(e[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) has_budget = 1;
-            /* a portability driver's subset must be enabled when it has one (MoltenVK) */
-            if (!strcmp(e[i].extensionName, "VK_KHR_portability_subset")) {
-                ext[next++] = "VK_KHR_portability_subset";
-                has_portability = 1;
-            }
-            if (!strcmp(e[i].extensionName, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) ||
-                !strcmp(e[i].extensionName, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) ||
-                !strcmp(e[i].extensionName, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME))
-                video_exts++;
-        }
-        free(e);
+        SnxVkExtensions e;
+        snx_vk_device_extensions(g_vk.phys, &e);
+        g_vk.has_divisor = snx_vk_extensions_has(&e, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+        g_vk.has_xfb = snx_vk_extensions_has(&e, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
+        g_vk.has_border_color = snx_vk_extensions_has(&e, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+        has_shader_clock = snx_vk_extensions_has(&e, VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
+        has_reconvergence = snx_vk_extensions_has(&e, VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+        g_vk.has_feedback = snx_vk_extensions_has(&e, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+        has_feedback_dynamic = snx_vk_extensions_has(&e, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
+        g_vk.has_local_read = snx_vk_extensions_has(&e, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
+        has_cond = snx_vk_extensions_has(&e, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
+        has_provoking = snx_vk_extensions_has(&e, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+        has_pipeline_robustness = snx_vk_extensions_has(&e, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
+        has_robustness2 = snx_vk_extensions_has(&e, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+        /* the driver's budget for each heap, the other processes' use taken out, for VMA: without it VMA took
+           80% of a heap's size as its budget, blind to what the desktop and other programs hold */
+        has_budget = snx_vk_extensions_has(&e, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        /* the GPU's clock next to the client's, for the profiler's GPU track (gpuprof.c's calibration) */
+        has_calibrated = snx_vk_extensions_has(&e, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        /* a portability driver's subset must be enabled when it has one (MoltenVK) */
+        has_portability = snx_vk_extensions_has(&e, "VK_KHR_portability_subset");
+        if (has_portability) ext[next++] = "VK_KHR_portability_subset";
+        video_exts = snx_vk_extensions_has(&e, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) +
+                     snx_vk_extensions_has(&e, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) +
+                     snx_vk_extensions_has(&e, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
+        snx_vk_extensions_free(&e);
     }
     if (has_budget) ext[next++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    /* the extension only with a host time domain among the calibrateable ones: CLOCK_MONOTONIC_RAW is the clock
+       the Tracy client keeps its own time in, so the two domains' pair maps the GPU's timestamps onto it */
+    if (has_calibrated) {
+        u32 nd = 0;
+        if (VK_OK(vkGetPhysicalDeviceCalibrateableTimeDomainsEXT(g_vk.phys, &nd, NULL)) && nd) {
+            VkTimeDomainEXT* dom = malloc(sizeof *dom * nd);
+            if (dom) {
+                if (VK_OK(vkGetPhysicalDeviceCalibrateableTimeDomainsEXT(g_vk.phys, &nd, dom)))
+                    for (u32 i = 0; i < nd; i++)
+                        if (dom[i] == VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT) g_vk.has_calibrated_host = 1;
+                free(dom);
+            }
+        }
+        if (g_vk.has_calibrated_host) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+    }
     g_vk.video_family = g_settings.vulkan_video_decode && video_exts == 3 ? video_decode_family() : ~0u;
     if (g_vk.video_family != ~0u) {
         ext[next++] = VK_KHR_VIDEO_QUEUE_EXTENSION_NAME;
@@ -419,61 +350,47 @@ static int create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
     VkPhysicalDeviceShaderClockFeaturesKHR qclock = {.sType =
                                                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
+    VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR qreconv = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR};
+    VkPhysicalDevicePipelineRobustnessFeaturesEXT qpipeline = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
+    VkPhysicalDeviceRobustness2FeaturesEXT qrobust = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     VkPhysicalDeviceVulkan12Features q12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceVulkan11Features q11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .pNext = &q12};
-    VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q11};
-    void** tail = &q12.pNext;
-    if (g_vk.has_divisor) {
-        *tail = &fdiv;
-        tail = &fdiv.pNext;
-    }
-    if (g_vk.has_border_color) {
-        *tail = &fbc;
-        tail = &fbc.pNext;
-    }
-    if (g_vk.has_xfb) {
-        *tail = &fxfb;
-        tail = &fxfb.pNext;
-    }
+    VkPhysicalDeviceVulkan11Features q11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT qloop = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT};
     VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT qloop_dyn = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT};
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR qlocal = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR};
-    if (g_vk.has_feedback) {
-        *tail = &qloop;
-        tail = &qloop.pNext;
-    }
-    if (has_feedback_dynamic) {
-        *tail = &qloop_dyn;
-        tail = &qloop_dyn.pNext;
-    }
-    if (g_vk.has_local_read) {
-        *tail = &qlocal;
-        tail = &qlocal.pNext;
-    }
     VkPhysicalDeviceConditionalRenderingFeaturesEXT qcond = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT};
-    if (has_cond) {
-        *tail = &qcond;
-        tail = &qcond.pNext;
-    }
     VkPhysicalDeviceProvokingVertexFeaturesEXT qprov = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
-    if (has_provoking) {
-        *tail = &qprov;
-        tail = &qprov.pNext;
-    }
     /* with the subset enabled, each of its features is off until the device asks for it: a view's swizzle, for one */
     PortabilityFeatures qport = {.sType = PORTABILITY_FEATURES_STYPE};
-    if (has_portability) {
-        *tail = &qport;
-        tail = &qport.pNext;
-    }
-    if (has_shader_clock) *tail = &qclock;
+    int robustness = has_pipeline_robustness && has_robustness2;
+    void* const query[] = {&f2,
+                           &q11,
+                           &q12,
+                           g_vk.has_divisor ? &fdiv : NULL,
+                           g_vk.has_border_color ? &fbc : NULL,
+                           g_vk.has_xfb ? &fxfb : NULL,
+                           g_vk.has_feedback ? &qloop : NULL,
+                           has_feedback_dynamic ? &qloop_dyn : NULL,
+                           g_vk.has_local_read ? &qlocal : NULL,
+                           has_cond ? &qcond : NULL,
+                           has_provoking ? &qprov : NULL,
+                           has_portability ? &qport : NULL,
+                           has_reconvergence ? &qreconv : NULL,
+                           robustness ? &qpipeline : NULL,
+                           robustness ? &qrobust : NULL,
+                           has_shader_clock ? &qclock : NULL};
+    snx_vk_chain(query, sizeof query / sizeof *query);
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
+    g_vk.has_vertex_robustness2 = qpipeline.pipelineRobustness && qrobust.robustBufferAccess2;
     g_vk.has_cond_render = has_cond && qcond.conditionalRendering;
     g_vk.has_provoking_last = has_provoking && qprov.provokingVertexLast;
     /* the dynamic state and the barriers within a pass only serve feedback loops */
@@ -481,6 +398,7 @@ static int create_device(void) {
     g_vk.has_feedback_dynamic =
         g_vk.has_feedback && has_feedback_dynamic && qloop_dyn.attachmentFeedbackLoopDynamicState;
     g_vk.has_local_read = g_vk.has_feedback && g_vk.has_local_read && qlocal.dynamicRenderingLocalRead;
+    g_shader_maximal_reconvergence = has_reconvergence && qreconv.shaderMaximalReconvergence;
     g_shader_clock_scopes =
         has_shader_clock ? (qclock.shaderSubgroupClock ? 1 : 0) | (qclock.shaderDeviceClock ? 2 : 0) : 0;
     g_vk.has_divisor = g_vk.has_divisor && fdiv.vertexAttributeInstanceRateDivisor;
@@ -514,6 +432,7 @@ static int create_device(void) {
     g_shader_texture_arrays = q12.shaderSampledImageArrayNonUniformIndexing != 0;
     g_shader_float16 = q12.shaderFloat16 != 0;
     g_shader_output_layer = q12.shaderOutputLayer != 0; /* ShaderLayer: a vertex or tessellation program's layer */
+    g_shader_viewport_index = have.multiViewport ? 2 | (q12.shaderOutputViewportIndex ? 1 : 0) : 0;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .pNext = &f12,
                                             .synchronization2 = VK_TRUE,
@@ -554,6 +473,14 @@ static int create_device(void) {
     if (g_shader_clock_scopes) {
         chain = &fclock;
         ext[next++] = VK_KHR_SHADER_CLOCK_EXTENSION_NAME;
+    }
+    VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR freconv = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR,
+        .pNext = chain,
+        .shaderMaximalReconvergence = VK_TRUE};
+    if (g_shader_maximal_reconvergence) {
+        chain = &freconv;
+        ext[next++] = VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME;
     }
     PortabilityFeatures fport = qport;
     fport.pNext = chain;
@@ -600,6 +527,15 @@ static int create_device(void) {
         chain = &fprov;
         ext[next++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
     }
+    VkPhysicalDevicePipelineRobustnessFeaturesEXT fpipeline = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+        .pNext = chain,
+        .pipelineRobustness = VK_TRUE};
+    if (g_vk.has_vertex_robustness2) {
+        chain = &fpipeline;
+        ext[next++] = VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME;
+        ext[next++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+    }
     u32 nq = g_vk.compute_family == g_vk.gfx_family ? 1 : 2;
     if (g_vk.video_family != ~0u)
         qci[nq++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -628,6 +564,7 @@ static int create_device(void) {
     g_vk.feat2 = (VkPhysicalDeviceFeatures2){
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &g_vk.feat11, .features = g_vk.feat};
     volkLoadDevice(g_vk.dev);
+    pm_lock_announce(&g_vklock, "vulkan"); /* the device's calls, every thread's */
     vkGetDeviceQueue(g_vk.dev, g_vk.gfx_family, 0, &g_vk.gfx);
     vkGetDeviceQueue(g_vk.dev, g_vk.compute_family, second ? 1 : 0, &g_vk.compute);
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr,
@@ -721,7 +658,7 @@ int vk_swapchain_create(int srgb) {
     VkSurfaceCapabilitiesKHR caps;
     VkResult cr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps);
     if (cr != VK_SUCCESS) { /* asked again on each present while it fails: said a few times */
-        WARN_LIMIT(4, "vulkan: the window's surface could not be queried: %s (%d)\n", vk_result_str(cr), (int)cr);
+        WARN_LIMIT(4, "vulkan: the window's surface could not be queried: %s (%d)\n", snx_vk_result_str(cr), (int)cr);
         if (cr == VK_ERROR_SURFACE_LOST_KHR) g_vk.sc_lost = 1;
         return 0;
     }
@@ -731,54 +668,44 @@ int vk_swapchain_create(int srgb) {
     }
     int ww, wh; /* what presents compare against, whatever the surface makes of it */
     backend_window_size(&ww, &wh);
-    VkExtent2D ext = caps.currentExtent;
-    if (ext.width == 0xFFFFFFFFu) { /* Wayland: the swapchain decides, so the window's size */
-        ext.width = ww > 0 ? (u32)ww : 0;
-        ext.height = wh > 0 ? (u32)wh : 0;
-    }
-    if (ext.width < caps.minImageExtent.width) ext.width = caps.minImageExtent.width;
-    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
-    if (ext.width > caps.maxImageExtent.width) ext.width = caps.maxImageExtent.width;
-    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
+    /* Wayland: the swapchain decides, so the window's size */
+    VkExtent2D ext = snx_vk_swap_extent(&caps, (VkExtent2D){ww > 0 ? (u32)ww : 0, wh > 0 ? (u32)wh : 0});
     if (!ext.width || !ext.height) return 0;
 
-    u32 nf = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
-    VkSurfaceFormatKHR* fs = calloc(nf ? nf : 1, sizeof *fs);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, fs);
     /* 8-bit, in the encoding of the frames presented: a blit from an sRGB target to a UNORM image decodes the bytes,
        where the console's display shows them as they are */
-    VkSurfaceFormatKHR fmt = fs[0];
-    int found = 0;
-    for (int pass = srgb ? 0 : 1; pass < 2 && !found; pass++)
-        for (u32 i = 0; i < nf && !found; i++) {
-            VkFormat a = pass ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_B8G8R8A8_SRGB,
-                     b = pass ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
-            if ((fs[i].format == a || fs[i].format == b) && fs[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                fmt = fs[i];
-                found = 1;
-            }
-        }
+    static const VkFormat srgb_formats[] = {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB};
+    static const VkFormat unorm_formats[] = {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
+    VkSurfaceFormatKHR fmt;
+    if (!(srgb && snx_vk_surface_format(g_vk.phys, g_vk.surface, srgb_formats, 2, &fmt)))
+        snx_vk_surface_format(g_vk.phys, g_vk.surface, unorm_formats, 2, &fmt);
     {   /* SWR: HDR output (hdr.c): scRGB FP16, else HDR10 PQ, when hdr=1 and the display (Windows HDR on) offers it */
         extern int g_vk_sc_hdr;
         int vk_hdr_wanted(void);
         int was = g_vk_sc_hdr;
         g_vk_sc_hdr = 0;
-        for (int want = 1; want <= 2 && vk_hdr_wanted() && !g_vk_sc_hdr; want++)
-            for (u32 i = 0; i < nf; i++)
-                if ((want == 1 && fs[i].format == VK_FORMAT_R16G16B16A16_SFLOAT &&
-                     fs[i].colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) ||
-                    (want == 2 && fs[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-                     fs[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)) {
-                    fmt = fs[i];
-                    g_vk_sc_hdr = want;
-                    break;
-                }
-        if (vk_hdr_wanted() && !g_vk_sc_hdr && !was)
-            LOG_LIMIT(1, "vulkan: hdr=1 but the display offers no HDR format (is Windows HDR on?): SDR output\n");
+        if (vk_hdr_wanted()) {
+            u32 nf = 0;
+            vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
+            VkSurfaceFormatKHR* fs = calloc(nf ? nf : 1, sizeof *fs);
+            if (fs) vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, fs);
+            else nf = 0;
+            for (int want = 1; want <= 2 && !g_vk_sc_hdr; want++)
+                for (u32 i = 0; i < nf; i++)
+                    if ((want == 1 && fs[i].format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+                         fs[i].colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) ||
+                        (want == 2 && fs[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+                         fs[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)) {
+                        fmt = fs[i];
+                        g_vk_sc_hdr = want;
+                        break;
+                    }
+            free(fs);
+            if (!g_vk_sc_hdr && !was)
+                LOG_LIMIT(1, "vulkan: hdr=1 but the display offers no HDR format (is Windows HDR on?): SDR output\n");
+        }
         if (g_vk_sc_hdr) srgb = 0; /* the HDR pass writes the swapchain; the frame goes to its own SDR image */
     }
-    free(fs);
     if (srgb && fmt.format != VK_FORMAT_B8G8R8A8_SRGB && fmt.format != VK_FORMAT_R8G8B8A8_SRGB) {
         LOG_LIMIT(1, "vulkan: the window has no sRGB format: frames in sRGB show darker\n");
     }
@@ -800,9 +727,7 @@ int vk_swapchain_create(int srgb) {
 
     /* an image for each frame in flight beyond what the driver keeps: a frame's present waits in the recording ring
        (vk_rec_present) while the next frame acquires, which takes no wait, so with one image fewer it found none */
-    u32 count = caps.minImageCount + VK_FRAMES;
-    if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
-    if (count > VK_SC_MAX) count = VK_SC_MAX > caps.minImageCount ? VK_SC_MAX : caps.minImageCount;
+    u32 count = snx_vk_swap_image_count(&caps, VK_FRAMES, VK_SC_MAX);
     VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     if (!(caps.supportedCompositeAlpha & alpha)) /* the lowest one it has */
         alpha = (VkCompositeAlphaFlagBitsKHR)(caps.supportedCompositeAlpha & -caps.supportedCompositeAlpha);
@@ -838,7 +763,7 @@ int vk_swapchain_create(int srgb) {
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &sc);
     if (cr != VK_SUCCESS) { /* tried again on each present while it fails: said a few times */
-        WARN_LIMIT(4, "vulkan: the swapchain could not be made: %s (%d)\n", vk_result_str(cr), (int)cr);
+        WARN_LIMIT(4, "vulkan: the swapchain could not be made: %s (%d)\n", snx_vk_result_str(cr), (int)cr);
         if (cr == VK_ERROR_SURFACE_LOST_KHR) g_vk.sc_lost = 1;
         if (old) swapchain_retire();
         return 0;
@@ -875,8 +800,11 @@ int vk_swapchain_create(int srgb) {
 int vk_init(void) {
     pm_init(&g_vklock);
     if (g_opt_headless) {
-        /* Load libvulkan/vulkan-1 directly. No SDL video driver or headless-surface extension is needed. */
-        if (!VK_OK(volkInitialize())) return 0;
+        /* Load libvulkan/vulkan-1 directly, or the driver the program's folders carry (an Apple app's MoltenVK): no SDL
+           video driver or headless-surface extension is needed. */
+        void* own = backend_vk_driver();
+        if (own) volkInitializeCustom((PFN_vkGetInstanceProcAddr)own);
+        else if (!VK_OK(volkInitialize())) return 0;
     } else {
         PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)backend_vk_loader();
         if (!gipa) {

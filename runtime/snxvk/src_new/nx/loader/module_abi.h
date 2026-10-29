@@ -33,6 +33,14 @@ typedef struct SnxModule {
     const char* title;
     u64 title_id;
     u32 main_stack, main_prio, main_core;
+    /* the module's functions (SNX_ABI 14), for code the guest patches: fn[i] was compiled from guest code in
+       [fn_lo[i], fn_lo[i] + fn_len[i]), and runs its entry through dispatch instead once stale[i] isn't 0, which the
+       runtime sets (relaxed: the function reads it with a relaxed load) when a line in that range changed */
+    u32 nfns;
+    const GuestFn* fn;
+    const u64* fn_lo;
+    const u32* fn_len;
+    u8* stale;
 } SnxModule;
 
 /* What a 32-bit program's module returns from snx_module_arm() instead. Its code is AArch32 blocks
@@ -60,13 +68,16 @@ SNX_ABI_CHECK(modinfo_size, sizeof(SnxModInfo) == 88);
 SNX_ABI_CHECK(modinfo_base, offsetof(SnxModInfo, base) == 8 && offsetof(SnxModInfo, build_id) == 24);
 SNX_ABI_CHECK(modinfo_text, offsetof(SnxModInfo, text_off) == 56 && offsetof(SnxModInfo, bss_size) == 80);
 SNX_ABI_CHECK(modinfo_nro, offsetof(SnxModInfo, is_nro) == 84);
-SNX_ABI_CHECK(module_size, sizeof(SnxModule) == 96);
+SNX_ABI_CHECK(module_size, sizeof(SnxModule) == 128);
 SNX_ABI_CHECK(module_mods, offsetof(SnxModule, mods) == 8 && offsetof(SnxModule, nentries) == 16);
 SNX_ABI_CHECK(module_entries, offsetof(SnxModule, entry_addr) == 24 && offsetof(SnxModule, entry_fn) == 32);
 SNX_ABI_CHECK(module_code, offsetof(SnxModule, interp) == 40 && offsetof(SnxModule, code_lo) == 48 &&
                                offsetof(SnxModule, code_hi) == 56);
 SNX_ABI_CHECK(module_title, offsetof(SnxModule, title) == 64 && offsetof(SnxModule, title_id) == 72);
 SNX_ABI_CHECK(module_main, offsetof(SnxModule, main_stack) == 80 && offsetof(SnxModule, main_core) == 88);
+SNX_ABI_CHECK(module_fns, offsetof(SnxModule, nfns) == 92 && offsetof(SnxModule, fn) == 96 &&
+                              offsetof(SnxModule, fn_lo) == 104 && offsetof(SnxModule, fn_len) == 112 &&
+                              offsetof(SnxModule, stale) == 120);
 SNX_ABI_CHECK(arm_size, sizeof(SnxArmModule) == 72);
 SNX_ABI_CHECK(arm_entries, offsetof(SnxArmModule, entry_addr) == 24 && offsetof(SnxArmModule, entry_fn) == 32);
 SNX_ABI_CHECK(arm_title, offsetof(SnxArmModule, title) == 40 && offsetof(SnxArmModule, title_id) == 48);

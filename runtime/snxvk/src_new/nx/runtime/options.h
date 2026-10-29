@@ -26,6 +26,10 @@ int snx_setting_known(const char* key);
 /* reads path, applies it with the overrides, writes it back with its help, and watches it: ini_poll reloads it when it
    changes and saves what the game's menu set */
 void ini_open(const char* path);
+/* the Debug section's settings not at their default (ini_changed's flags), then gdbstub when the GDB stub runs, between
+   ", ": how many. ini_open and a reload show the list at the top of the picture (hud.h), a reload that changes it in the
+   log too */
+int options_debug(int flags, char* out, size_t n);
 /* the path ini_open read, "" before it */
 const char* ini_file(void);
 /* about once a second, from the main loop. final: at exit, where an edit still being saved is left for the next start

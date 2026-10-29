@@ -17,11 +17,19 @@
    appended as they are made, each {u32 type, u32 payload bytes, u64 check of the payload} and its payload, a multiple
    of 8 bytes. Reading stops at the first record that doesn't check out, and a file of another key is started over.
    Modules are known to the file by a u64 of their handle, and records refer to shaders by their number in the file
-   and their check, never by handle */
+   and their check, never by handle.
+
+   The main file's key starts with what its PF_SOURCE and PF_PIPE records depend on (pf_open's guest part: the device,
+   its features, the layout of a pipeline key), and the rest is the build and the driver, which only the SPIR-V and
+   ShaderInfo of a PF_SHADER record depend on. A file whose guest part is the same is rebuilt rather than started
+   over: each shader translated again from the program its PF_SOURCE record keeps, and each pipeline made again, into
+   a file of the new key. After an update of the runtime or the driver every pipeline would otherwise be new again,
+   made as the game first draws with it, with the frame waiting (a second on NVIDIA for one game's largest) */
 #define PF_SHADER  1
 #define PF_PIPE    2
 #define PF_SCAN    3 /* the shipped programs' walk (gpu/shipped_pass.c) read a file, or all of them: two u64s */
 #define PF_SHIPREF 4 /* a shader of the shipped file, by where its record starts there and the record's check */
+#define PF_SOURCE  5 /* what the PF_SHADER record right after it was translated from (PfSource) */
 #define PF_MAX     (256u << 20) /* past this size nothing more is appended */
 #define PF_REC     16           /* a record's header: type, payload bytes, check */
 /* a shader record: this, then ncbr constant buffer reads ({idx, off, ok, v}, VkCbRead's words) and nspv SPIR-V
@@ -33,6 +41,15 @@ typedef struct {
     u32 mask[20];
     ShaderInfo si;
 } PfShader;
+/* a source record: this, then ncbr constant buffer reads ({idx, off, ok, v}), ncode bytes of the program as the
+   translator read it (both parts merged, for VertexA and VertexB) and, with PF_SRC_XFB, the ShXfb it was translated
+   with. Of a build-independent layout: no ShaderInfo, whose layout the build decides */
+#define PF_SRC_XFB 1u
+typedef struct {
+    u64 hash, qh, qh_a;
+    u32 stage, clen, clen_a, ncbr, ncode, flags;
+    u32 mask[20];
+} PfSource;
 /* a pipeline record: this, then keylen bytes of the PipeKey with its module handles zeroed. sh: the shaders' record
    numbers (from 1; 0 for none) in the order vs, tcs, tes, gs, fs, and check: those records' checks */
 typedef struct {
@@ -62,20 +79,28 @@ typedef struct {
 /* What reading a file hands back. shader: a record, with its reads and SPIR-V, made into a module; the module's u64
    (its handle's bits), or 0 when it couldn't be made. pipe: a record whose shaders were all made, with their modules'
    u64s (0 for none) and the key's bytes. shipref: a PF_SHIPREF record's place and check, made into a module as a
-   shader record is (its u64, 0 when it couldn't be) */
+   shader record is (its u64, 0 when it couldn't be). source: in a file being rebuilt (pf_open), a PF_SOURCE record,
+   its reads, program and transform feedback layout (NULL without PF_SRC_XFB) translated again and kept in the new
+   file: the module's u64, which stands for the PF_SHADER record after it, or 0. rebuild is set while a file is */
 typedef struct {
     u64 (*shader)(void* ctx, const PfShader* s, const u32* cbr, const u32* spv);
     void (*pipe)(void* ctx, const u64 modules[5], const void* key, u32 keylen);
     u64 (*shipref)(void* ctx, u64 at, u64 check);
+    u64 (*source)(void* ctx, const PfSource* s, const u32* cbr, const u8* code, const ShXfb* xfb);
     void* ctx;
+    int rebuild;
 } PfLoad;
 /* opens path: the records written there with the same key go to load in their order, and what follows is appended.
-   A missing file, or one with another key, is started over. The counts of shader and pipeline records handed on go
-   in loaded[0] and [1] */
-void pf_open(PFile* pf, const char* path, const char* key, const PfLoad* load, u32 loaded[2]);
+   A missing file, or one with another key, is started over, except that one whose key's first guest bytes are the
+   same is rebuilt: started over, with each PF_SOURCE record handed to load->source (which records the shader in the
+   new file), and each pipeline whose shaders were made to load->pipe. The counts of shader and pipeline records
+   handed on go in loaded[0] and [1] */
+void pf_open(PFile* pf, const char* path, const char* key, size_t guest, PfLoad* load, u32 loaded[2]);
 /* a shader record for module (made from spv; 0 for none), whose number pf_pipe then refers to; skipped once the file
-   is full. Where the record starts in the file, 0 when it wasn't written */
-u64 pf_shader(PFile* pf, u64 module, const PfShader* s, const u32* cbr, const u32* spv);
+   is full. With src (its reads src_cbr, its program code, xfb with PF_SRC_XFB), a PF_SOURCE record right before it.
+   Where the shader record starts in the file, 0 when it wasn't written */
+u64 pf_shader(PFile* pf, u64 module, const PfShader* s, const u32* cbr, const u32* spv, const PfSource* src,
+              const u8* code, const ShXfb* xfb);
 /* a pipeline record with modules (vs, tcs, tes, gs, fs; 0 for none): skipped when one of them has no record */
 void pf_pipe(PFile* pf, const u64 modules[5], const void* key, u32 keylen);
 /* a PF_SCAN record: what was read (shipped_pass.h's SHIP_FILE or SHIP_ALL) and its id */
@@ -94,6 +119,8 @@ void pf_shipref(PFile* pf, u64 module, u64 at, u64 check);
 typedef void (*PfEach)(void* ctx, u32 type, const u8* payload, u32 len, u64 at);
 void pf_open_mapped(PFile* pf, const char* path, const char* key, PfEach each, void* ctx);
 void pf_unseal(PFile* pf);
+/* the appending ended and the view unmapped, for a file nothing reads afterwards */
+void pf_close(PFile* pf);
 /* the process's id, for a temporary file of its own: two runs of a game started together would write the same one */
 unsigned pf_pid(void);
 void pf_seal(PFile* pf);

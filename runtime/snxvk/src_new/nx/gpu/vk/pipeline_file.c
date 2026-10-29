@@ -14,7 +14,7 @@
 #endif
 
 #define PF_MAGIC   "SNXVKSH\n"
-#define PF_VERSION 1
+#define PF_VERSION 2 /* 2: PF_SOURCE records, and a key whose guest part comes first */
 
 /* the check of a payload: words of it after its type and size (FNV-1a over 32-bit words, with a last mix) */
 static u64 pf_mix(u64 h, const void* p, size_t n) {
@@ -131,19 +131,32 @@ static int pf_append(PFile* pf, u32 type, const void* const* piece, const size_t
     return 0;
 }
 
-u64 pf_shader(PFile* pf, u64 module, const PfShader* s, const u32* cbr, const u32* spv) {
-    const void* piece[3];
-    size_t len[3];
+u64 pf_shader(PFile* pf, u64 module, const PfShader* s, const u32* cbr, const u32* spv, const PfSource* src,
+              const u8* code, const ShXfb* xfb) {
+    const void* piece[4];
+    size_t len[4];
     u64 check, at = 0;
+    int bad = 0;
+    pm_lock(&pf->lock);
+    if (src) { /* the source first, in the same hold of the lock: the shader record that follows is what it made */
+        piece[0] = src;
+        len[0] = sizeof *src;
+        piece[1] = cbr; /* the shader's reads */
+        len[1] = (size_t)src->ncbr * 16;
+        piece[2] = code;
+        len[2] = src->ncode;
+        piece[3] = xfb;
+        len[3] = src->flags & PF_SRC_XFB ? sizeof *xfb : 0;
+        bad = pf_append(pf, PF_SOURCE, piece, len, 4, &check);
+    }
     piece[0] = s;
     len[0] = sizeof *s;
     piece[1] = cbr;
     len[1] = (size_t)s->ncbr * 16;
     piece[2] = spv;
     len[2] = (size_t)s->nspv * 4;
-    pm_lock(&pf->lock);
     at = pf->size;
-    if (!pf_append(pf, PF_SHADER, piece, len, 3, &check)) {
+    if (!bad && !pf_append(pf, PF_SHADER, piece, len, 3, &check)) {
         pf->nsh++;
         pf_map_add(pf, module, pf->nsh, check);
     } else
@@ -272,7 +285,7 @@ static size_t pf_read(PFile* pf, const u8* buf, size_t at, size_t size, const Pf
                 load->pipe(load->ctx, mods, p + sizeof q, q.keylen);
                 loaded[1]++;
             }
-        } else
+        } else if (type != PF_SOURCE) /* a source matters only to a rebuild (pf_rebuild) */
             break;
         at += PF_REC + len;
     }
@@ -281,8 +294,86 @@ static size_t pf_read(PFile* pf, const u8* buf, size_t at, size_t size, const Pf
     return at;
 }
 
-void pf_open(PFile* pf, const char* path, const char* key, const PfLoad* load, u32 loaded[2]) {
-    size_t hsize = 0, size = 0, used = 0;
+/* pf_read's for a file being rebuilt into a new one of another key, which load->source and load->pipe write to: a
+   PF_SHADER record stands for the module the PF_SOURCE record before it was translated into again, as its layout
+   (ShaderInfo's) is the old build's; a PF_SHIPREF names a record of a shipped file that was started over. Called
+   without pf->lock, which the callbacks' writing takes */
+static void pf_rebuild(const u8* buf, size_t at, size_t size, const PfLoad* load, u32 loaded[2]) {
+    struct {
+        u64 check, module;
+    }* rec = NULL;
+    u32 cap = 0, n = 0;
+    u64 source = 0; /* the module of the last PF_SOURCE record, for the PF_SHADER record after it */
+    while (size - at >= PF_REC) {
+        u32 type = pf_get32(buf + at), len = pf_get32(buf + at + 4);
+        const u8* p = buf + at + PF_REC;
+        u64 h;
+        if (len % 8 || len > size - at - PF_REC) break;
+        h = pf_end(pf_mix(pf_start(type, len), p, len));
+        if (h != pf_get64(buf + at + 8)) break;
+        if (type == PF_SOURCE) {
+            PfSource s;
+            ShXfb xfb;
+            u64 need;
+            if (len < sizeof s) break;
+            memcpy(&s, p, sizeof s);
+            need = sizeof s + (u64)s.ncbr * 16 + s.ncode + (s.flags & PF_SRC_XFB ? sizeof xfb : 0);
+            if (need > len || len - need >= 8 || s.stage > ST_FS || s.ncode % 8) break;
+            if (s.flags & PF_SRC_XFB) memcpy(&xfb, p + sizeof s + (size_t)s.ncbr * 16 + s.ncode, sizeof xfb);
+            source = load->source(load->ctx, &s, (const u32*)(const void*)(p + sizeof s),
+                                  p + sizeof s + (size_t)s.ncbr * 16, s.flags & PF_SRC_XFB ? &xfb : NULL);
+            if (source) loaded[0]++;
+        } else if (type == PF_SHADER || type == PF_SHIPREF) {
+            if (n + 1 >= cap) {
+                u32 c = cap ? cap * 2 : 1024;
+                void* grown = realloc(rec, c * sizeof *rec);
+                if (!grown) break;
+                rec = grown;
+                cap = c;
+            }
+            n++;
+            rec[n].check = h;
+            rec[n].module = type == PF_SHADER ? source : 0;
+            source = 0;
+        } else if (type == PF_PIPE) {
+            PfPipe q;
+            u64 mods[5];
+            int i, ok = 1;
+            if (len < sizeof q) break;
+            memcpy(&q, p, sizeof q);
+            if (q.keylen > len - sizeof q || len - sizeof q - q.keylen >= 8) break;
+            for (i = 0; i < 5; i++) {
+                mods[i] = 0;
+                if (!q.sh[i]) continue;
+                if (q.sh[i] > n || rec[q.sh[i]].check != q.check[i] || !rec[q.sh[i]].module)
+                    ok = 0;
+                else
+                    mods[i] = rec[q.sh[i]].module;
+            }
+            if (ok) {
+                load->pipe(load->ctx, mods, p + sizeof q, q.keylen);
+                loaded[1]++;
+            }
+        } else
+            break;
+        at += PF_REC + len;
+    }
+    free(rec);
+}
+
+/* whether buf (size bytes) is a file of this format whose key's first guest bytes are key's: the size of its header,
+   else 0 */
+static size_t pf_same_guest(const u8* buf, size_t size, const char* key, size_t guest) {
+    u32 v, len;
+    if (!guest || size < 16 || memcmp(buf, PF_MAGIC, 8)) return 0;
+    v = pf_get32(buf + 8);
+    len = pf_get32(buf + 12);
+    if (v != PF_VERSION || len < guest || len > size - 16 || memcmp(buf + 16, key, guest)) return 0;
+    return ((size_t)16 + len + 7) & ~(size_t)7;
+}
+
+void pf_open(PFile* pf, const char* path, const char* key, size_t guest, PfLoad* load, u32 loaded[2]) {
+    size_t hsize = 0, size = 0, used = 0, old_head = 0;
     u8 *head = pf_header(key, &hsize), *buf = NULL;
     FILE* f;
     long length = -1;
@@ -300,6 +391,7 @@ void pf_open(PFile* pf, const char* path, const char* key, const PfLoad* load, u
     if (f && length >= (long)hsize && (unsigned long)length <= 2ul * PF_MAX && !fseek(f, 0, SEEK_SET)) {
         size = (size_t)length;
         buf = (u8*)malloc(size);
+        SNX_ZONE_V(z, "shader cache read", size);
         if (buf && fread(buf, 1, size, f) != size) {
             free(buf);
             buf = NULL;
@@ -311,7 +403,11 @@ void pf_open(PFile* pf, const char* path, const char* key, const PfLoad* load, u
         if (used < size)
             LOG("vulkan: %s: the records past %lu of its %lu bytes were cut short or changed, and are dropped\n", path,
                 (unsigned long)used, (unsigned long)size);
-    } else if (length > 0)
+    } else if (buf && (old_head = pf_same_guest(buf, size, key, guest)) != 0)
+        LOG("vulkan: %s is of another build or driver: its shaders are translated again and its pipelines made "
+            "again\n",
+            path);
+    else if (length > 0)
         LOG("vulkan: %s is of another build, GPU or driver, or unreadable: started over\n", path);
     if (used && used == size) {
         pf->f = fopen(path, "ab");
@@ -334,9 +430,14 @@ void pf_open(PFile* pf, const char* path, const char* key, const PfLoad* load, u
     pf->size = used;
     if (!pf->f)
         WARN("vulkan: cannot write %s (%s): shaders and pipelines made are not kept for the next run\n", path, why);
-    free(buf);
     free(head);
     pm_unlock(&pf->lock);
+    if (old_head) { /* into the file just started over, which the callbacks write to */
+        load->rebuild = 1;
+        pf_rebuild(buf, old_head, size, load, loaded);
+        load->rebuild = 0;
+    }
+    free(buf);
 }
 
 unsigned pf_pid(void) {
@@ -435,6 +536,15 @@ void pf_unseal(PFile* pf) {
             WARN("vulkan: cannot write %s (%s): what is made is not kept for the next run\n", pf->path,
                  snx_os_error(why, sizeof why));
     }
+    pm_unlock(&pf->lock);
+}
+void pf_close(PFile* pf) {
+    pm_lock(&pf->lock);
+    if (pf->f) {
+        fclose(pf->f);
+        pf->f = NULL;
+    }
+    plat_file_unmap(&pf->view);
     pm_unlock(&pf->lock);
 }
 void pf_seal(PFile* pf) {

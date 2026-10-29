@@ -1,0 +1,23 @@
+#version 450
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   Copyright 2026 the ScarletNX contributors */
+/* Whether the device flushes FP32 subnormals by itself (vk/ftz_probe.c): each invocation's a * b, a + c and
+   fma(a, b, c) from the words the host wrote, in a module that keeps signed zeros, infinities and NaNs as the
+   translator's do (SignedZeroInfNanPreserve) and declares no denormal mode, as the translator's don't where the device
+   has no DenormFlushToZero. CMake compiles it into SPIR-V at build time (cmake/glsl.cmake). */
+#extension GL_EXT_spirv_intrinsics : require
+spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4466], 4461, 32);
+layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
+
+/* a, b and c for each of the 8 invocations, then the products, sums and fused results */
+layout(std430, set = 0, binding = 0) buffer Words {
+    uint words[];
+};
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    float a = uintBitsToFloat(words[i]), b = uintBitsToFloat(words[8 + i]), c = uintBitsToFloat(words[16 + i]);
+    words[24 + i] = floatBitsToUint(a * b);
+    words[32 + i] = floatBitsToUint(a + c);
+    words[40 + i] = floatBitsToUint(fma(a, b, c));
+}

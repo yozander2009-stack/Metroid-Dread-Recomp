@@ -181,14 +181,16 @@ SRC_IGNORE = ['*.o', '*.a', '*.obj', '*.exe', '*.dll', '__pycache__', 'obj', 'ob
               'lsfg.c', 'lsfg_spvc.cpp', 'spvc']   # no frame generation (it loads Lossless Scaling's DLL) in the public source
 
 
-def snx_keep():
+def snx_keep(s2=None):
     """the renderer files the build reads (runtime/snxvk/src_new): the sources build_snxvk2.py compiles, everything they
     #include (C and GLSL), the generator inputs and tools, our shader sources. Upstream ScarletNX's other parts (its game
     -dump extractor and decryption, GUI, recompiler) are not built here and stay out of the public source"""
     import re
-    s2 = os.path.join(ROOT, 'runtime', 'snxvk', 'src_new'); nx = os.path.join(s2, 'nx')
+    s2 = s2 or os.path.join(ROOT, 'runtime', 'snxvk', 'src_new'); nx = os.path.join(s2, 'nx')
     b = open(os.path.join(ROOT, 'work-profiler', 'build_snxvk2.py'), encoding='utf-8').read()
     src = ''.join(re.findall(r"'([^']*)'", re.search(r"SRC = \((.*?)\)\.split\(\)", b, re.S).group(1))).split()
+    for extra in re.findall(r"SRC \+= \[(.*?)\]", b, re.S):   # ScarletNX main 112db409's (common/ among them)
+        src += re.findall(r"'([^']+)'", extra)
     src += ['gpu/vk/dlss.c', 'gpu/vk/dlss_stub.c', 'gpu/vk/vma.cpp', 'gpu/shader/maxwell_opcodes.def', 'runtime/settings.txt']
     src += re.findall(r"\('([^']+\.comp)'", b)
     todo = [os.path.join(nx, f) for f in src]
@@ -227,7 +229,8 @@ def src_ignore(d, names):
                 if not any(k.startswith(q + os.sep) for k in _SNX_KEEP): out.add(x)
             elif q not in _SNX_KEEP: out.add(x)
     if os.path.dirname(n) == os.path.normpath(os.path.join(ROOT, 'runtime', 'snxvk', 'deps')):
-        keep = {'include', 'LICENSE.md', 'LICENSE.txt', 'LICENSES', 'README.md', 'volk.c', 'volk.h'}
+        keep = {'include', 'LICENSE.md', 'LICENSE.txt', 'LICENSES', 'README.md', 'volk.c', 'volk.h',
+                'LICENSE', 'xxhash.h', 'xxhash.c', 'xxh3.h', 'xxh_x86dispatch.c', 'xxh_x86dispatch.h'}   # + xxHash 0.8.3
         out |= set(names) - keep
     # ScarletNX's game-file driver (container extraction and decryption): none of it is in our build, only
     # its headers are included on the way to fs.h, so the public source carries the headers and not the code
@@ -313,7 +316,7 @@ the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 o
 | `switchrecomp.py`, `codegen.py`, `a64.py`, `nxloader.py`, `metroid_perf.py` | SwitchRecomp: ARM64 → C translator (Apache-2.0) |
 | `runtime/` | the runtime: kernel, services, GPU → OpenGL, audio, video, input |
 | `runtime/dread_ui/` | front end: `fe.cpp` (setup, Play, settings), `ov.cpp` (in-game menu), `ui.cpp` (theme, widgets, settings table) |
-| `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main b5f4f14) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
+| `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main 112db409) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
 | `dread/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
 | `third_party/imgui-1.92.5/` | Dear ImGui (MIT) |
 | `linux/` | scripts for the Linux / Steam Deck build |

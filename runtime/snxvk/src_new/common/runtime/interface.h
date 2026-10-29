@@ -30,6 +30,10 @@ typedef struct RtAPI {
        modules call it (RISC-V, LoongArch and PowerPC64 before POWER8, which have no such instruction every machine
        carries): snx_runtime_cas128 (SNX_ABI 12). The values are the host's reads of p[0] and p[1] */
     uint32_t (*cas128)(uint64_t* p, uint64_t o0, uint64_t o1, uint64_t n0, uint64_t n1);
+    /* IC IVAU of the 64-byte cache line at addr: the guest wrote code there and makes it visible, so what was
+       compiled from that line is stale (SNX_ABI 14), and the runtime compiles it again. NULL for a runtime that has
+       nothing to drop */
+    void (*code_changed)(struct CPU* c, uint64_t addr);
 } RtAPI;
 #define SNX_SVC_COUNT 0x100
 
@@ -41,9 +45,9 @@ uint32_t snx_runtime_cas128(uint64_t* p, uint64_t o0, uint64_t o1, uint64_t n0, 
    undone when the second finds another value, so that callers of this one see the 16 bytes change at once */
 uint32_t snx_runtime_cas128_locked(uint64_t* p, uint64_t o0, uint64_t o1, uint64_t n0, uint64_t n1);
 
-/* the layout modules were built with: twelve pointers in this order, nothing between them */
+/* the layout modules were built with: thirteen pointers in this order, nothing between them */
 #define SNX_RTAPI_SLOT sizeof(void (*)(void))
-typedef char snx_check_rtapi_size[sizeof(RtAPI) == 12 * SNX_RTAPI_SLOT ? 1 : -1];
+typedef char snx_check_rtapi_size[sizeof(RtAPI) == 13 * SNX_RTAPI_SLOT ? 1 : -1];
 typedef char snx_check_rtapi_head[offsetof(RtAPI, svc) == 0 && offsetof(RtAPI, undef) == SNX_RTAPI_SLOT &&
                                           offsetof(RtAPI, note_hint) == 2 * SNX_RTAPI_SLOT &&
                                           offsetof(RtAPI, ticks) == 3 * SNX_RTAPI_SLOT
@@ -53,7 +57,8 @@ typedef char snx_check_rtapi_tail
     [offsetof(RtAPI, brk) == 4 * SNX_RTAPI_SLOT && offsetof(RtAPI, fpcr_changed) == 5 * SNX_RTAPI_SLOT &&
              offsetof(RtAPI, sev) == 6 * SNX_RTAPI_SLOT && offsetof(RtAPI, wfe) == 7 * SNX_RTAPI_SLOT &&
              offsetof(RtAPI, poll) == 8 * SNX_RTAPI_SLOT && offsetof(RtAPI, svcs) == 9 * SNX_RTAPI_SLOT &&
-             offsetof(RtAPI, miss) == 10 * SNX_RTAPI_SLOT && offsetof(RtAPI, cas128) == 11 * SNX_RTAPI_SLOT
+             offsetof(RtAPI, miss) == 10 * SNX_RTAPI_SLOT && offsetof(RtAPI, cas128) == 11 * SNX_RTAPI_SLOT &&
+             offsetof(RtAPI, code_changed) == 12 * SNX_RTAPI_SLOT
          ? 1
          : -1];
 #undef SNX_RTAPI_SLOT

@@ -30,6 +30,19 @@ typedef struct {
 static Pieces** g_pieces;
 static u32 g_npieces, g_cappieces;
 
+/* VMA allocations as Tracy memory events. */
+#if defined(SNX_TRACY)
+void vk_mem_track(VmaAllocation a) {
+    VmaAllocationInfo info;
+    if (!a) return;
+    vmaGetAllocationInfo(g_vk.vma, a, &info);
+    SNX_MEM_ALLOC((const void*)a, info.size, "gpu");
+}
+void vk_mem_untrack(VmaAllocation a) {
+    if (a) SNX_MEM_FREE((const void*)a, "gpu");
+}
+#endif
+
 void vk_mem_init(int sparse_queue) {
     VkPhysicalDeviceMaintenance3Properties m3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m3};
@@ -63,6 +76,7 @@ static int pieces_bind(VkImage img, const VkMemoryRequirements* req, Pieces* p, 
             break;
         }
         p->n++;
+        vk_mem_track(p->pages[i]);
         binds[i] = (VkSparseMemoryBind){
             .resourceOffset = at, .size = size, .memory = info.deviceMemory, .memoryOffset = info.offset};
     }
@@ -84,7 +98,10 @@ static int pieces_bind(VkImage img, const VkMemoryRequirements* req, Pieces* p, 
 }
 
 static void pieces_free(Pieces* p) {
-    for (u32 i = 0; i < p->n; i++) vmaFreeMemory(g_vk.vma, p->pages[i]);
+    for (u32 i = 0; i < p->n; i++) {
+        vk_mem_untrack(p->pages[i]);
+        vmaFreeMemory(g_vk.vma, p->pages[i]);
+    }
     free(p);
 }
 
@@ -142,11 +159,13 @@ int vk_image_create_r(const VkImageCreateInfo* ii, VkImage* img, VmaAllocation* 
     }
     VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     *res = vmaCreateImage(g_vk.vma, ii, &aci, img, mem, NULL);
+    if (VK_OK(*res)) vk_mem_track(*mem);
     return VK_OK(*res);
 }
 
 void vk_image_destroy(VkImage img, VmaAllocation mem) {
     if (mem || !img) {
+        vk_mem_untrack(mem);
         vmaDestroyImage(g_vk.vma, img, mem);
         return;
     }

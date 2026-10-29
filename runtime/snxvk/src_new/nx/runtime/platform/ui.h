@@ -13,8 +13,11 @@ typedef struct {
     u16 u, v, uw, vh; /* the atlas texels drawn there */
     u32 rgba;         /* each texel times this colour, R G B A from the low byte */
     u8 turn;          /* the texels turned this many quarters clockwise */
-    u8 sharp;         /* the nearest texel, not a blend: the font at whole steps */
+    u8 sample;        /* how: UI_BLEND, UI_SHARP or UI_IMAGE */
 } SnxUiQuad;
+/* the atlas blended, the atlas's nearest texel (the font at whole steps), or ui_image's picture blended, its texels
+   in u, v, uw and vh */
+enum { UI_BLEND, UI_SHARP, UI_IMAGE };
 typedef struct {
     SnxUiQuad* q;
     int n, max; /* quads past max are dropped */
@@ -31,6 +34,20 @@ void ui_fill(SnxUiList* l, float x, float y, float w, float h, u32 rgba);
 int ui_picture(SnxUiList* l, float x, float y, float side);
 /* ASCII text, 0xFE the font's square, in 8x16 glyphs at a whole scale; returns the width drawn */
 float ui_text(SnxUiList* l, float x, float y, int scale, const char* s, u32 rgba);
+/* an icon of the menus' (gui/icons.h), two of the font's cells at a whole scale, as the launcher draws it beside a
+   label; returns the width drawn, 0 for GUI_ICON_NONE. Its texels are in the atlas beside the picture, on its rows:
+   icon i's 16x16 from x SNX_UI_ICONS_X + 16 * i */
+#define SNX_UI_ICONS_X SNX_UI_PICTURE
+float ui_icon(SnxUiList* l, float x, float y, int scale, unsigned icon, u32 rgba);
+/* One picture apart from the atlas, SNX_UI_IMAGE_W x SNX_UI_IMAGE_H: the menu's save state thumbnail. ui_image draws it
+   at x, y, w x h: 0 while there is none, which draws nothing */
+#define SNX_UI_IMAGE_W 320
+#define SNX_UI_IMAGE_H 180
+int ui_image(SnxUiList* l, float x, float y, float w, float h);
+/* the picture's texels, R G B A bytes, opaque, copied (NULL: none), under ui_lock */
+void ui_image_set(const u8* rgba);
+/* the picture for the renderer, under ui_lock: its texels, NULL for none, and version counting the pictures given */
+const u8* ui_image_get(u32* version);
 
 /* The atlas, each texel the bytes R G B A (a little-endian u32) with alpha premultiplied, made from the sprites'
    image when the window opens (sdl3.c decodes it to the same bytes, SDL's RGBA32), the users read by then, and freed

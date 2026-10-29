@@ -27,13 +27,15 @@
 #     float LO HI         a float, clamped
 #     text SIZE           text, up to SIZE - 1 bytes
 #     default VALUE       its value until one is read, as the .ini writes it ("" or none for empty text)
-#     default-if MACRO V  its default where MACRO is defined (#ifdef)
+#     default-if MACRO V  its default where MACRO is defined (#if defined): up to four, the first that holds
 #     once                written to the .ini only once it is set (the default stays its value until then)
 #     words W|W...        the menus' words (ini.h): an int's for LO, LO + step..., a text's value=word
 #     step N, shift N     the menus' step and shift (ini.h)
 #     label TEXT          the menus' name when it is not NAME (the game's menu shows a page's settings by it)
 #     startup             read when the game starts only
 #     in-game             the game's own (its menu's, or the driver's): the launcher's Settings leave it out
+#     recompile           a game's setting the recompile takes too, as -r's --KEY=VALUE and from a played dump's
+#                         options: its row also in g_recompile_game_ini, which the driver links (one value, no set)
 #     set FUNCTION        called after each read (ini.h's set), declared by settings.h
 #     each LIST           one setting for each instance of LIST, in its order: the member an array
 #     help TEXT           its help, a line each
@@ -57,7 +59,7 @@ setting Game dump
     once
     startup
     in-game
-    help The dump the game was made from, which the recompile writes here. Without Extract game container the game
+    help The dump the game was made from, which the recompile writes here. Without Extract dump the game
     help reads its ExeFS and RomFS from it, and Extract to tmpfs extracts it again when tmpfs was emptied. Empty or
     help left out: the link <name>.source in the game's folder, which older versions made
 setting Game addons
@@ -78,6 +80,27 @@ setting Game mods off
     help The game's mods left out of play, folders of mods/ in its data folder: their names, a / between two. Every
     help other mod there is played, its exefs/ and romfs/ laid over the game's as an update's are, in their names'
     help order. The launcher's list of updates, DLCs and mods writes it. A mod's exefs/ is recompiled into the game
+setting Game cheats off
+    key cheats_off
+    text 2048
+    once
+    startup
+    in-game
+    help The game's cheats left out, of the Atmosphere-format cheats/<build id>.txt in its data folder: their names
+    help as their [name] lines give them, a | between two (a name with a | in it cannot be left out). Every other cheat
+    help there runs, once per frame shown. The launcher's list of updates, DLCs, mods and cheats writes it
+setting Save state slots
+    key state_slots
+    int 1 32
+    default 10
+    help The save state slots the menu's Save states page lists and F9 steps through. A state is the whole game at
+    help one moment, kept in states/ in the game's folder. The game's own save files are never part of one
+setting Save state backup
+    key state_auto_backup
+    int 0 1
+    default 1
+    words Off|On
+    help 1 = the game is saved to the auto slot before each save state is loaded over it, so a load can be undone
 
 table g_display_ini
 setting TV mode
@@ -119,14 +142,28 @@ setting Showcase corner
     set vpad_showcase_corner_set
     words tl=Top left|tr=Top right|bl=Bottom left|br=Bottom right
     help The corner showcase draws in: tl top left, tr top right, bl bottom left, br bottom right
+setting Stats
+    key stats
+    int 0 1
+    default 0
+    words Off|On
+    help 1 = the frames a second, the last frame's time, the processor and memory the game takes and a graph of its
+    help last 120 frames' times, in a corner over the game. F12 or the game's menu turns it on and off
+setting Stats corner
+    key stats_corner
+    text 3
+    default tl
+    set stats_corner_set
+    words tl=Top left|tr=Top right|bl=Bottom left|br=Bottom right
+    help The corner stats draws in, as showcase_corner's; in showcase's own corner it goes beside showcase's box
 
 table g_graphics_ini
 setting Resolution scale
     key resolution
-    float 0.25 4
+    float 0.25 16
     default 1
     startup
-    help The scale of the game's 3D rendering, 0.25 to 4: 1 = the console's, 2 = double, 0.5 = half
+    help The scale of the game's 3D rendering, 0.25 to 16: 1 = the console's, 2 = double, 0.5 = half
 setting Shadows
     key shadows
     int 0 1
@@ -174,6 +211,15 @@ setting Memory (GB)
     startup
     help The memory the game sees: below 6 the console's 3.2 GB, 6 = 4.8 GB, 8 = 6.8 GB. A game that runs out on
     help the console's amount needs 6
+setting Memory fit
+    key memory_fit
+    int 0 1
+    default 0
+    default-if SNX_IOS 1
+    startup
+    words Off|On
+    help On = the game sees no more of Memory (GB) than the device can still give it, measured as it starts, less what
+    help the rest of ScarletNX takes: a device with less than the console's is not run out of memory. Off = all of it
 setting Heap limit (MB)
     key heap_max_mb
     text 32
@@ -181,15 +227,50 @@ setting Heap limit (MB)
     startup
     set options_heap_max_set
     help The most heap the game can allocate, in MB; 0 = as much as its memory allows
+setting Map limit (MB)
+    key map_limit_mb
+    int 0 1048576
+    default 0
+    default-if SNX_IOS 256
+    startup
+    words No limit|#
+    help The most of the game's files mapped into memory, in MB, as the game first reads them; 0 = no limit. A file past
+    help it is read from disk when the game asks, slower, which leaves address space for threads and graphics where a
+    help device has little
+setting Map limit (files)
+    key map_limit_files
+    int 0 1000000
+    default 0
+    default-if SNX_IOS 2048
+    startup
+    words No limit|#
+    help The most of the game's files mapped, as the game first reads them; 0 = no limit. A file past it is read from
+    help disk when the game asks: each mapped file holds a descriptor, of which a device may give the whole app a few
+    help thousand
+setting Thread stack (MB)
+    key thread_stack_mb
+    int 1 256
+    default 32
+    default-if SNX_IOS 8
+    startup
+    help The host stack of each of the game's threads, in MB: a game's deep calls take it. Less leaves address space
+    help for more threads where a device has little, and a game that calls very deep may then stop
 setting Pipeline threads
     key pipeline_threads
     int 0 32
     default 0
     startup
     words Auto|#
-    help The threads that make the GPU's new pipelines while the game goes on: 0 = a quarter of the computer's
-    help threads, two to six; 1 to 32 = that many. More make a first run's new pipelines sooner, with less CPU left
+    help The threads that make the GPU's new pipelines while the game goes on: 0 = all the computer's threads but
+    help two, two to twelve; 1 to 32 = that many. More make a first run's new pipelines sooner, with less CPU left
     help for the game
+setting Async pipelines
+    key async_pipelines
+    int 0 1
+    default 0
+    words Off|On
+    help 1 = what a new shader draws is skipped while its pipeline is made, instead of the game waiting for it: no
+    help pause where a new shader first appears, and the things it draws show up a few frames late
 setting Prepare shaders
     key prepare_shaders
     int 0 2
@@ -203,20 +284,26 @@ setting Prepare shaders
     help Esc quits (on Android, back opens the menu)
 setting JIT threads
     key jit_threads
-    int 0 8
+    int 0 4
     default 0
     startup
     words Auto|#
-    help Threads compiling the code the recompiler missed: 0 = every CPU the game may use but two (at most 8).
+    help Threads compiling the code the recompiler missed: 0 = every CPU the game may use but two (at most 4).
     help They yield to the game
+# The JIT's level is the recompile's Optimization level by default (g_recompile_ini's opt, 2), as an AOT pack built from
+# the cache needs the cache's level and the pack's to agree. A phone has no such setting: its JIT compiles at O0, as any
+# other level breaks it (guest_jit.c), and cmake/settings.cmake leaves the block out
+# SNX_PHONE_BEGIN
 setting JIT optimization
     key jit_opt
     text 2
-    default 0
+    default 2
     startup
     words 0=O0|1=O1|2=O2|3=O3|s=Os|z=Oz
     help LLVM's optimization of the code the runtime JIT compiles when the game reaches code the recompiler missed:
-    help 0 none, 3 the most, s or z the smallest. It applies to the next run, which compiles its JIT code again
+    help 0 none, 3 the most, s or z the smallest. It is the recompile's Optimization level by default (2), which an AOT
+    help pack built from the cache needs to match. It applies to the next run, which compiles its JIT code again
+# SNX_PHONE_END
 
 # the on-screen controls' (platform/vpad.c): their settings in the game's menu's order, then a control's place in the
 # order of SNX_VPAD_ (VPAD_CONTROLS, which the list controls follows)
@@ -286,7 +373,7 @@ setting Touch screen
     int 0 2
     default 2
     set backend_touch_mode_set
-    words Off|Fingers|Mouse too
+    words Off|Fingers|Fingers and mouse
     help The game's touch screen: 1 = fingers, 2 = fingers and the mouse's left button, 0 = off
 
 table g_vpad_shown_ini
@@ -443,6 +530,13 @@ setting Log level
     int 0 2
     default 1
     help The log's detail, 0 to 2: 2 logs everything, which slows the game down
+setting Log size limit
+    key log_max
+    int 1 1024
+    default 16
+    help The game log's size in MiB, 1 to 1024: past it the run's start stays and the oldest lines after it go, said in
+    help the log and once over the game, so the log always ends with the last lines. The 5 last runs' logs are kept,
+    help the ones before this run's in logs/ beside it, named by when each was last written
 setting Answer unknown commands
     key auto_stub_ipc
     int 0 1
@@ -465,6 +559,66 @@ setting Vulkan validation layer
     words Off|On
     help 1 = the Vulkan validation layer (VK_LAYER_KHRONOS_validation, the Vulkan SDK's) checks every Vulkan call and
     help logs what it finds. It slows the game down a lot, and a missing layer is only a warning
+setting Native ASTC
+    key native_astc
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = ASTC textures are sampled as the game's blocks where the GPU samples ASTC (most phone and tablet GPUs),
+    help in a quarter to a 36th of the memory. 0 = they are decoded to RGBA8 on the GPU, as they are on GPUs without
+    help ASTC (most desktop ones), to compare the two. On such a GPU 1 is a warning at start
+setting Native BC
+    label Native BCn
+    key native_bc
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = BC1 to BC7 textures, which most games use, are sampled as the game's blocks where the GPU samples BCn
+    help (desktop GPUs and some phone ones). 0 = they are decoded on the GPU, as they are on GPUs without BCn (most
+    help phone ones, Mali among them), to compare the two on a desktop GPU
+setting Native ETC2
+    key native_etc2
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = ETC2 and EAC textures are sampled as the game's blocks where the GPU samples ETC2 (most phone and tablet
+    help GPUs), in a quarter to an eighth of the memory. 0 = they are decoded on the GPU, as they are on GPUs without
+    help ETC2 (most desktop ones), to compare the two. On such a GPU 1 is a warning at start
+setting SLP vectorizer
+    key slp_vectorizer
+    int 0 1
+    default 0
+    startup
+    words Off|On
+    recompile
+    help LLVM's SLP vectorizer, which packs scalar instructions into SIMD ones, in the recompile and the JIT. Off
+    help while LLVM 23 can break a module with it and stop the recompile (llvm-project issue 231525). It applies to
+    help the next recompile, and to the JIT's next run
+setting FPSR flags
+    key fpsr_flags
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    recompile
+    help 1 = the game's code keeps FPSR's flags (floating point's inexact, underflow, overflow, division by zero and
+    help invalid, and the saturation flag QC) as the console raises them, which costs every such operation a test of
+    help its result. 0 = only the results are the console's: a game that never reads FPSR (few do) runs its floating
+    help point and saturating arithmetic faster. It applies to the next recompile, and to the JIT's next run
+setting Volatile load/stores
+    key volatile_memory
+    int 0 1
+    default 0
+    startup
+    words Off|On
+    recompile
+    help 1 = every load and store of the game's code happens exactly where the game has it. 0 = LLVM may merge two
+    help loads of one address, or a store and a load, between the game's barriers, as the console's memory model
+    help allows, which makes its code faster. 1 is for finding whether a bug is one of those. It applies to the
+    help next recompile, and to the JIT's next run
 setting GDB JIT symbols
     key gdb_jit
     int 0 1
@@ -474,6 +628,16 @@ setting GDB JIT symbols
     help 1 = with the GDB stub (-S or -s, Linux only), hands the code the JIT compiles at run time to GDB, which
     help names it. While GDB is attached it stops the whole game to read each compile, which slows a 32-bit game (its
     help blocks compile one at a time) to a crawl. Each compile's object is also kept in memory for the whole run
+setting Alias pool
+    key alias_pool
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = a view of guest memory (MapMemory, MapProcessMemory, code memory's owner and slave) shares its source's
+    help host pages, as the console's do, where the host's pages are 4 KiB (Linux and Android). 0 = every view is a
+    help copy: a write through it reaches the source at its unmap, or at a flushed line (IC IVAU, DC CVAC) after the
+    help write, as hosts without a pool run (Windows among them). For tests of that path, and a diagnosis
 setting Profiler
     key profile
     int 0 1
@@ -581,6 +745,45 @@ setting RenderDoc frames
     startup
     help The presents RenderDoc captures takes, a comma between: N is the Nth present, Ns the first after N seconds of
     help the scripted input's clock. Empty: none
+# SNX_TRACY_DEBUG_BEGIN
+setting Tracy profiler
+    key tracy_profiler
+    int 0 1
+    default 0
+    startup
+    words Off|On
+    help 1 = starts the run with the Tracy client up; connect the GUI to 127.0.0.1:8086 (discovery is off, so its
+    help "connect to the next instrumented process" does not find it). A capture and the GUI cannot both
+    help have the run: the capture takes its one connection
+setting Tracy sampling
+    key tracy_sampling
+    int 0 1
+    default 0
+    startup
+    words Off|On
+    help 1 = starts the sampler at the first connection, for the trace's flame graphs. With JIT'd guest code and the
+    help drivers' own threads, the sample stacks read as [unknown] over the instrumented zones
+setting Tracy port
+    key tracy_port
+    text 6
+    default ""
+    startup
+    help The port the client listens on and the capture connects to, a number of 1 to 65535. Empty: one of the
+    help run's own, so an earlier capture or GUI on 8086 is not in the way
+setting Tracy capture tool
+    key tracy_capture_tool
+    text 1024
+    default ""
+    startup
+    help The tracy-capture to start: a path, or a name on PATH. Empty: beside the runtime, then on PATH
+setting Tracy open trace
+    key tracy_open_trace
+    int 0 1
+    default 1
+    startup
+    words Off|On
+    help 1 = opens the trace in tracy-profiler when the run ends
+# SNX_TRACY_DEBUG_END
 
 # the unattended runs' (platform/unattended.c): read as the .ini's settings are, from the command line, but in no section,
 # so never written back
@@ -628,6 +831,34 @@ setting Keyboard text
     default ""
     once
     help The text the software keyboard answers instead of asking (shorter than the game's minimum: cancelled)
+setting Pauses
+    key pause
+    text 512
+    default ""
+    once
+    help Pauses of the whole game, a comma between: at:length pauses it at that many ms of the scripted input's clock
+    help for length ms. Each checks that guest memory doesn't change while the game is paused, and logs the result
+setting State saves
+    key state_save
+    text 512
+    default ""
+    once
+    help Save states the run writes, a comma between: at:slot saves to that slot at that many ms of the scripted
+    help input's clock
+setting State loads
+    key state_load
+    text 512
+    default ""
+    once
+    help Save states the run loads, a comma between: at:slot loads that slot at that many ms of the scripted input's
+    help clock
+setting State checks
+    key state_check
+    text 512
+    default ""
+    once
+    help Save state round trips, a comma between: at saves the game at that many ms of the scripted input's clock into
+    help the check slot, loads it back at once, and logs whether guest memory and guest time came back the same
 
 # ---- the 3DS driver's (scarletnx-3ds --key=value), in no section of the game's .ini ----
 
@@ -674,6 +905,55 @@ setting CTR script
     help buttons in hex as hid:USER's pad has them (1 A, 2 B, 4 Select, 8 Start, 10 Right, 20 Left, 40 Up, 80 Down,
     help 100 R, 200 L, 400 X, 800 Y), each held for press_len ms
 
+# ---- the Vita driver's (scarletnx-vita --key=value), in no section of the game's .ini ----
+
+table g_vita_debug_ini
+setting Vita import trace
+    key vita_hle_trace
+    int 0 2
+    default 0
+    words Off|Missing|All
+    help 1 = logs each call of an imported function the runtime doesn't implement, 2 = every call, with its
+    help thread, r0 to r3 and its result
+setting Vita run-time compile trace
+    key vita_jit_trace
+    int 0 1
+    default 0
+    words Off|On
+    help 1 = logs each block the Vita runtime compiles while the game runs (the game's module lacked it), Thumb ones
+    help with the pc's low bit set as the hints file writes them
+setting Vita GXM trace
+    key vita_gxm_trace
+    int 0 1
+    default 0
+    words Off|On
+    help 1 = logs each scene, draw and display queue entry the Vita game makes through sceGxm
+setting Vita shader corpus
+    key vita_shader_corpus
+    text 1024
+    default ""
+    help A folder the Vita runtime writes each GXP program it translates to, with what it was translated for, as
+    help <hash>.gxp: tools/snx_vita_usse.c translates such a folder again (the game's own code: keep it local)
+setting Vita script
+    key vita_script
+    text 4096
+    default ""
+    help The Vita game's scripted input (--script= too): when:buttons, comma between, when in ms from the start and
+    help buttons in hex as SceCtrl has them (1 Select, 8 Start, 10 Up, 20 Right, 40 Down, 80 Left, 100 L, 200 R,
+    help 1000 Triangle, 2000 Circle, 4000 Cross, 8000 Square, and the left stick pushed all the way: 1000000 right,
+    help 2000000 left, 4000000 up, 8000000 down), each held for vita_press_len ms
+setting Vita press length
+    key vita_press_len
+    int 0 INT_MAX
+    default 300
+    help How long each press of the Vita game's script is held, in ms (--press_len= too)
+setting Vita screenshot interval
+    key vita_shot_every
+    int 0 INT_MAX
+    default 0
+    help With --shot=PATH, also a screenshot every this many vblanks (60 a second), PATH_0000.ppm on; 0 = only the
+    help last frame's
+
 section Game: g_game_ini
 section Display: g_display_ini
 section Graphics: g_graphics_ini
@@ -689,6 +969,7 @@ section Debug: g_debug_ini
 # off until picked, as the launcher keeps them: picking one turns it on
 table g_launch_ini launcher
 setting gdbstub
+    label GDB stub
     key gdbstub
     text 4
     default off
@@ -702,26 +983,57 @@ setting Extract to tmpfs
     help Extract to tmpfs, in memory (the temporary folder's scarletnx/work/<title ID>), which the game reads its RomFS
     help from
 setting Extract game container
+    label Extract dump
     key extract
     text 4
     default off
     words on=On
     help Extract a dump's ExeFS and RomFS into its game's folder. Off, the game reads them from the dump
+# SNX_TRACY_BEGIN
+setting Tracy capture
+    key tracy_capture
+    text 4
+    default off
+    words on=On
+    help Records Switch runs to captures/ beside the game, and opens the trace in the profiler when the run ends. Off,
+    help the client does not start; F10 starts a 60-second capture. tracy-capture must be on PATH, and the runtime
+    help must be built with SNX_TRACY
+# SNX_TRACY_END
 
 table g_recompile_ini recompile
 setting Optimization level
     key opt
     text 2
     default 2
-    words 0=0|1=1|2=2|3=3|z=z
+    words 0=O0|1=O1|2=O2|3=O3|s=Os|z=Oz
     help LLVM's optimization of the game's code when it is recompiled: 0 none, 3 the most, z the smallest. A game
-    help made already keeps its code until it is recompiled
+    help made already keeps its code until it is recompiled. Only an AOT pack built from the game's JIT cache needs it
+    help to match JIT optimization
 setting AOT threads
     key aot_threads
     int 0 1024
     default 0
     words Auto|#
     help The threads compiling the game's code when it is recompiled: 0 = one for each of the computer's cores
+setting Unit size
+    key unit_instructions
+    int 1 INT_MAX
+    default 90000
+    default-if __ANDROID__ 20000
+    default-if SNX_IOS 20000
+    words # instructions
+    help The instructions a code unit takes, whole functions at a time, when the game is recompiled: each is compiled
+    help on its own, and a smaller one takes less memory at once, which a phone needs (Android's allocator ran out at
+    help 90000 on several threads, and iOS ends an app at its limit). A game made already keeps its units until it is
+    help recompiled
+setting Unit cache limit
+    key unit_cache_gb
+    int 0 100000
+    default 0
+    words No limit|# GB
+    help The most the cache of compiled code units may hold, in GB: units/ of the cache folder, where every recompile
+    help finds the units it compiled before. Past it the units reused longest ago are removed. 0 = no limit. Either
+    help way the cache always leaves a tenth of its disk free, removing its oldest units for a new one
 
 # LLVM's own: every pass of its pipelines for -O0 to -Oz, on unless turned off, and each option LLVM's C API sets on the
 # pass builder and the target machine, LLVM's own value until it is set
@@ -742,7 +1054,7 @@ setting @simplifycfg
     name Control flow simplification
     help Merges, removes and simplifies basic blocks (simplifycfg)
 setting @loop-unroll
-    name Loop unrolling
+    name Loop unrolling pass
     help Unrolls loops with known trip counts (loop-unroll)
 setting @loop-vectorize
     name Loop vectorization pass
@@ -760,7 +1072,7 @@ setting @SLPVectorization
     name SLP vectorization
     help Whether the pipeline packs scalar instructions into SIMD ones (LLVMPassBuilderOptionsSetSLPVectorization)
 setting @LoopUnrolling
-    name Loop unrolling option
+    name Loop unrolling
     help Whether the pipeline unrolls loops (LLVMPassBuilderOptionsSetLoopUnrolling)
 setting @FastISel
     name Fast instruction selection

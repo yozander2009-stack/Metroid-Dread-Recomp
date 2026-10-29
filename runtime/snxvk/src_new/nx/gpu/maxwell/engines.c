@@ -1,171 +1,236 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors
    Ported from Eden (src/video_core/engines/maxwell_3d.cpp, src/video_core/engines/draw_manager.cpp,
-   src/video_core/engines/maxwell_3d.h):
+   src/video_core/engines/maxwell_3d.h, src/common/cpu_features.h):
    SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
    SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
    SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project */
-/* The 3D engine's methods (MAXWELL_B, 0xB197): the shadow RAM, draws and their merging into instanced draws, inline
-   indices, render enable, the report semaphores and counters shared with the compute engine, macro calls, barriers.
-   Register numbers are method indices (byte offset / 4) */
+/* The 3D engine's methods (MAXWELL_B, 0xB197), as gpu.c's puller hands them over (maxwell3d_method): the MME shadow
+   RAM, draws and their merging into instanced draws (Eden's DrawManager), inline indices, render enable, the report
+   semaphores and counters shared with the compute engine (Eden's ProcessQueryGet), macro calls, barriers. What a
+   draw or clear does with the state is maxwell3d.c's and the renderer's. Register names are maxwell_3d_regs.h's:
+   method indices (byte offset / 4) */
 #include "nx/gpu/maxwell/engines_int.h"
+#include "nx/gpu/maxwell/maxwell_3d_regs.h"
+
+/* ------------------------------------------------------------ the file's state */
+/* the counter reports whose made-up values a render enable must not compare (MADEUP_N, madeup_*) */
+#define MADEUP_N 64
+/* the kinds of draw that merge with their own kind only */
+enum { DRAW_ARRAYS, DRAW_INDEXED, DRAW_ARRAY_INSTANCED, DRAW_IB32, DRAW_IB16, DRAW_IB8 };
+/* r3d_draw's indexed (gpu.h) */
+enum { R3D_DRAW_VERTICES = 0, R3D_DRAW_INDEX_BUFFER = 1, R3D_DRAW_INLINE_INDICES = 3 };
+/* the renderer's method_barrier kinds (renderer.h) */
+enum {
+    BARRIER_TEXTURE = 0,
+    BARRIER_TILED = 1,
+    BARRIER_DATA_CACHE = 2,
+    BARRIER_DESCRIPTOR_CACHE = 3,
+    BARRIER_WAIT_FOR_IDLE = 4,
+    BARRIER_SHADER_INSTRUCTIONS = 5
+};
+/* The draw held while the next ones may be more instances of it, as Eden's DrawManager holds an instanced draw
+   (DrawMode::Instance) until a method that isn't one of its draws ends it (DrawDeferred). Unlike Eden it is one for
+   all channels: another channel's method ends it too */
+typedef struct {
+    GpuChannel* ch; /* NULL: none */
+    u32 kind;
+    int indexed;
+    u32 topology, first, count, base_vertex, base_instance;
+    u32 start, n; /* the instance it started at, and its instances */
+} DeferredDraw;
+/* the GPU thread's alone */
+static struct {
+    u64 last_tick_ns; /* the guest time of the last timestamp (gpu_ticks) */
+    u64 madeup[MADEUP_N];
+    u32 madeup_next;
+    DeferredDraw deferred;
+} g_engines;
 
 /* ------------------------------------------------------------ timestamps */
-/* The timestamp a report or semaphore carries: the guest clock when the stream reaches it, as 614.4 MHz GPU ticks
-   (ns * 384 / 625), at least 16 ns past the one before so that stamps strictly increase. sead compares them with the
-   CPU's tick. It is not real GPU time. The GPU thread's alone */
+/* GM20B's timer counts at 614.4 MHz (Eden's common/cpu_features.h GPUTickFreq, its NsToGPUTickRatio): ticks =
+   ns * 614400000 / 10^9 = ns * 384 / 625. With ns = q * 625 + rem, that is q * 384 + rem * 384 / 625 exactly
+   (rem * 384 < 625 * 384 can't carry), which never overflows where ns * 384 would */
+#define GPU_TICKS_PER_NS_NUM 384u
+#define GPU_TICKS_PER_NS_DEN 625u
+/* stamps step at least this many ns, more than one tick (625 / 384 ns), so that they strictly increase */
+#define GPU_TICK_MIN_STEP_NS 16u
+/* The timestamp a report or semaphore carries: the guest clock when the stream reaches it, as GPU ticks, past the
+   one before. sead compares them with the CPU's tick. It is not real GPU time */
 u64 gpu_ticks(void) {
-    static u64 last;
     u64 ns = guest_ns();
-    if (ns < last + 16) ns = last + 16;
-    last = ns;
-    return ns / 625 * 384 + ns % 625 * 384 / 625;
+    if (ns < g_engines.last_tick_ns + GPU_TICK_MIN_STEP_NS) ns = g_engines.last_tick_ns + GPU_TICK_MIN_STEP_NS;
+    g_engines.last_tick_ns = ns;
+    return ns / GPU_TICKS_PER_NS_DEN * GPU_TICKS_PER_NS_NUM +
+           ns % GPU_TICKS_PER_NS_DEN * GPU_TICKS_PER_NS_NUM / GPU_TICKS_PER_NS_DEN;
 }
 
 /* ------------------------------------------------------------ made-up counter values */
 /* Counter reports other than samples passed after its reset carry made-up values, and a condition comparing them
-   could skip a draw the game needs: a render enable over an address that last got one draws. The last 64 such
+   could skip a draw the game needs: a render enable over an address that last got one draws. The last MADEUP_N such
    addresses; a release or a real count written there takes it out */
-#define MADEUP_N 64
-static u64 g_madeup[MADEUP_N];
-static u32 g_madeup_next;
 static int madeup_has(u64 a) {
     u32 i;
     for (i = 0; i < MADEUP_N; i++)
-        if (a && g_madeup[i] == a) return 1;
+        if (a && g_engines.madeup[i] == a) return 1;
     return 0;
 }
 static void madeup_set(u64 a, int made) {
     u32 i;
     for (i = 0; i < MADEUP_N; i++)
-        if (a && g_madeup[i] == a) {
-            if (!made) g_madeup[i] = 0;
+        if (a && g_engines.madeup[i] == a) {
+            if (!made) g_engines.madeup[i] = 0;
             return;
         }
-    if (made && a) g_madeup[g_madeup_next++ % MADEUP_N] = a;
+    if (made && a) g_engines.madeup[g_engines.madeup_next++ % MADEUP_N] = a;
 }
 
 /* ------------------------------------------------------------ report semaphores */
-/* one word (STRUCTURE_SIZE ONE_WORD, bit 28), or the value as 64 bits and the timestamp */
+/* a report's write: one word (short_query), or the value as 64 bits and the timestamp (Eden's StampQueryResult) */
 static void report_write(u64 a, u64 value, int one) {
-    u8 d[16]; /* guest memory's bytes, little-endian */
+    u8 d[MAXWELL3D_REPORT_BYTES]; /* guest memory's bytes, little-endian */
     if (one) {
         snx_st_le32(d, (u32)value);
         gpu_release_write(a, d, 4);
     } else {
         snx_st_le64(d, value);
         snx_st_le64(d + 8, gpu_ticks());
-        gpu_release_write(a, d, 16);
+        gpu_release_write(a, d, MAXWELL3D_REPORT_BYTES);
     }
 }
-/* the counters a CLEAR_REPORT_VALUE (3D 0x54C) resets, as bits by report selector */
+#define REPORT_BIT(r) (1u << (r))
+/* the counters a CLEAR_REPORT_VALUE resets, as REPORT_BIT of their reports */
 static u32 reset_selectors(u32 v) {
     switch (v) {
-        case 0x01: return 1u << 0x15 | 1u << 0x02; /* samples passed */
-        case 0x02: return 1u << 0x0A | 1u << 0x0C | 1u << 0x0E | 1u << 0x10; /* ZCull stats */
-        case 0x10: return 1u << 0x0B; /* transform feedback primitives written */
-        case 0x12: return 1u << 0x01; /* vertices generated */
-        case 0x13: return 1u << 0x03 | 1u << 0x12; /* input primitives */
-        case 0x15: return 1u << 0x05; /* vertex shader invocations */
-        case 0x16: return 1u << 0x1B; /* tessellation control invocations */
-        case 0x17: return 1u << 0x1D; /* tessellation evaluation invocations */
-        case 0x18: return 1u << 0x1F; /* tessellation evaluation primitives */
-        case 0x1A: return 1u << 0x07; /* geometry shader invocations */
-        case 0x1B: return 1u << 0x09; /* geometry shader primitives */
-        case 0x1C: return 1u << 0x0F; /* clipper input */
-        case 0x1D: return 1u << 0x11; /* clipper output */
-        case 0x1E: return 1u << 0x13; /* fragment shader invocations */
-        case 0x1F: return 1u << 0x12; /* generated primitives (Ryujinx and Eden disagree) */
+        case CLEAR_REPORT_ZPASS_PIXEL_COUNT:
+            return REPORT_BIT(REPORT_ZPASS_PIXEL_COUNT64) | REPORT_BIT(REPORT_ZPASS_PIXEL_COUNT);
+        case CLEAR_REPORT_ZCULL_STATS:
+            return REPORT_BIT(REPORT_ZCULL_STATS0) | REPORT_BIT(REPORT_ZCULL_STATS1) | REPORT_BIT(REPORT_ZCULL_STATS2) |
+                   REPORT_BIT(REPORT_ZCULL_STATS3);
+        case CLEAR_REPORT_STREAMING_PRIMITIVES_SUCCEEDED: return REPORT_BIT(REPORT_STREAMING_PRIMITIVES_SUCCEEDED);
+        case CLEAR_REPORT_VERTICES_GENERATED: return REPORT_BIT(REPORT_VERTICES_GENERATED);
+        case CLEAR_REPORT_PRIMITIVES_GENERATED:
+            return REPORT_BIT(REPORT_PRIMITIVES_GENERATED) | REPORT_BIT(REPORT_VTG_PRIMITIVES_OUT);
+        case CLEAR_REPORT_VERTEX_SHADER_INVOCATIONS: return REPORT_BIT(REPORT_VERTEX_SHADER_INVOCATIONS);
+        case CLEAR_REPORT_TESSELLATION_INIT_INVOCATIONS: return REPORT_BIT(REPORT_TESSELLATION_INIT_INVOCATIONS);
+        case CLEAR_REPORT_TESSELLATION_SHADER_INVOCATIONS: return REPORT_BIT(REPORT_TESSELLATION_SHADER_INVOCATIONS);
+        case CLEAR_REPORT_TESSELLATION_SHADER_PRIMITIVES_GENERATED:
+            return REPORT_BIT(REPORT_TESSELLATION_SHADER_PRIMITIVES_GENERATED);
+        case CLEAR_REPORT_GEOMETRY_SHADER_INVOCATIONS: return REPORT_BIT(REPORT_GEOMETRY_SHADER_INVOCATIONS);
+        case CLEAR_REPORT_GEOMETRY_SHADER_PRIMITIVES_GENERATED:
+            return REPORT_BIT(REPORT_GEOMETRY_SHADER_PRIMITIVES_GENERATED);
+        case CLEAR_REPORT_CLIPPER_INVOCATIONS: return REPORT_BIT(REPORT_CLIPPER_INVOCATIONS);
+        case CLEAR_REPORT_CLIPPER_PRIMITIVES_GENERATED: return REPORT_BIT(REPORT_CLIPPER_PRIMITIVES_GENERATED);
+        case CLEAR_REPORT_PIXEL_SHADER_INVOCATIONS: return REPORT_BIT(REPORT_PIXEL_SHADER_INVOCATIONS);
+        /* Ryujinx and Eden disagree on what this one resets */
+        case CLEAR_REPORT_VTG_PRIMITIVES_OUT: return REPORT_BIT(REPORT_VTG_PRIMITIVES_OUT);
         default: return 0;
     }
 }
+/* CLEAR_REPORT_VALUE: the counters reset count from the draws so far; samples passed is counted for real from the
+   reset of ZPASS_PIXEL_COUNT on */
 static void counter_reset(GpuChannel* ch, u32 v) {
     u32 mask = reset_selectors(v), s;
-    for (s = 0; s < 32; s++)
-        if (mask & (1u << s)) ch->counter_base[s] = g_draws;
+    for (s = 0; s < REPORT_COUNT; s++)
+        if (mask & REPORT_BIT(s)) ch->counter_base[s] = g_draws;
     ch->counter_reset |= mask;
-    if (v == 1 && g_renderer->samples_reset) g_renderer->samples_reset(ch); /* samples passed is counted from here */
+    if (v == CLEAR_REPORT_ZPASS_PIXEL_COUNT && g_renderer->samples_reset) g_renderer->samples_reset(ch);
     if (!mask) LOG_LIMIT(8, "gpu: counter reset %x\n", v);
 }
+/* made-up counts: three vertices a draw for vertices generated, this many for the others */
+#define MADEUP_VERTICES_PER_DRAW 3u
+#define MADEUP_COUNT 1000u
+/* a REPORT_ONLY of report sel: the payload for REPORT_PAYLOAD (as Eden finds the hardware gives), samples passed
+   counted by the renderer once reset, else a made-up count */
 static void counter_report(GpuChannel* ch, u64 a, u32 sel, u32 payload, int one) {
     u64 v;
-    if (!sel) { /* the payload, as Eden finds the hardware gives */
+    if (sel == REPORT_PAYLOAD) {
         report_write(a, payload, one);
         madeup_set(a, 0);
         return;
     }
-    if ((sel == 0x15 || sel == 0x02) && (ch->counter_reset & (1u << sel)) && g_renderer->samples_report &&
-        g_renderer->samples_report(ch, a, one ? 4 : 16, gpu_ticks())) {
+    if ((sel == REPORT_ZPASS_PIXEL_COUNT64 || sel == REPORT_ZPASS_PIXEL_COUNT) &&
+        (ch->counter_reset & REPORT_BIT(sel)) && g_renderer->samples_report &&
+        g_renderer->samples_report(ch, a, one ? 4 : MAXWELL3D_REPORT_BYTES, gpu_ticks())) {
         madeup_set(a, 0);
         return;
     }
-    /* made up: three vertices a draw for vertices generated, 1000 for the others, counted from a reset */
-    if (ch->counter_reset & (1u << sel))
-        v = (g_draws - ch->counter_base[sel]) * (sel == 1 ? 3 : 1000);
+    u64 per_draw = sel == REPORT_VERTICES_GENERATED ? MADEUP_VERTICES_PER_DRAW : MADEUP_COUNT;
+    if (ch->counter_reset & REPORT_BIT(sel))
+        v = (g_draws - ch->counter_base[sel]) * per_draw;
     else
-        v = sel == 1 ? g_draws * 3 : 1000;
+        v = sel == REPORT_VERTICES_GENERATED ? g_draws * MADEUP_VERTICES_PER_DRAW : MADEUP_COUNT;
     report_write(a, v, one);
     madeup_set(a, 1);
 }
 void query_get(GpuChannel* ch, u32* r, int base, u32 v) {
-    u64 a = ((u64)(r[base] & 0xFF) << 32) | r[base + 1];
+    u64 a = gpu_packed_va(r[base], r[base + 1]);
     u32 payload = r[base + 2];
-    int one = (v >> 28) & 1; /* bit 4 is the release's timing (after reads or writes), not its size */
-    switch (v & 3) {
-        case 0: /* release */
+    int one = report_semaphore_short_query(v); /* release, bit 4, is its timing (after reads or writes), not its size */
+    if (report_semaphore_reduction_enable(v))
+        LOG_LIMIT(4, "gpu: report semaphore reduction %u is not emulated: the payload is written as it is\n",
+                  report_semaphore_reduction_op(v));
+    switch (report_semaphore_operation(v)) {
+        case REPORT_SEMAPHORE_OPERATION_RELEASE:
             report_write(a, payload, one);
             madeup_set(a, 0);
             break;
-        case 1: /* acquire: GE (bit 16) or EQ */ gpu_park(ch, GPU_PARK_REPORT, a, payload, (v >> 16) & 1); break;
-        case 2: /* report a counter, selector bits 23-27 */ counter_report(ch, a, (v >> 23) & 31, payload, one); break;
+        case REPORT_SEMAPHORE_OPERATION_ACQUIRE:
+            gpu_park(ch, GPU_PARK_REPORT, a, payload,
+                     report_semaphore_comparison(v) == REPORT_SEMAPHORE_COMPARISON_GREATER_OR_EQUAL);
+            break;
+        case REPORT_SEMAPHORE_OPERATION_REPORT_ONLY:
+            counter_report(ch, a, report_semaphore_report(v), payload, one);
+            break;
         default: LOG_LIMIT(4, "gpu: report semaphore trap %08x is not emulated: nothing is written\n", v); break;
     }
 }
 
 /* ------------------------------------------------------------ render enable */
-/* Decided when the mode (0x556) or the override (0x651) is written, as Eden's ProcessQueryCondition, and kept until
-   one of them is written again */
+/* Decided when the mode or the override is written, as Eden's ProcessQueryCondition, and kept until one of them is
+   written again */
 static void render_enable_update(GpuChannel* ch) {
     const u32* r = ch->r3d;
-    u64 a = ((u64)(r[0x554] & 0xFF) << 32) | r[0x555];
-    u32 mode = r[0x556] & 7, pred = 0;
+    u64 a = gpu_packed_va(r[MAXWELL3D_RENDER_ENABLE_ADDRESS_HIGH], r[MAXWELL3D_RENDER_ENABLE_ADDRESS_LOW]);
+    u32 mode = r[MAXWELL3D_RENDER_ENABLE_MODE] & MAXWELL3D_RENDER_ENABLE_MODE_MASK, pred = 0;
     int on = 1, known;
     if (ch->render_pred) {
         g_renderer->render_predicate_drop(ch->render_pred);
         ch->render_pred = 0;
     }
-    switch (r[0x651] & 3) {
-        case 1: on = 1; break; /* ALWAYS */
-        case 2: on = 0; break; /* NEVER */
+    switch (r[MAXWELL3D_RENDER_ENABLE_OVERRIDE] & MAXWELL3D_RENDER_ENABLE_OVERRIDE_MASK) {
+        case MAXWELL3D_RENDER_ENABLE_OVERRIDE_ALWAYS_RENDER: on = 1; break;
+        case MAXWELL3D_RENDER_ENABLE_OVERRIDE_NEVER_RENDER: on = 0; break;
         default:
             switch (mode) {
-                case 0: on = 0; break;
-                case 1: on = 1; break;
-                case 2: { /* CONDITIONAL: both words of the report's value set */
+                case MAXWELL3D_RENDER_ENABLE_FALSE: on = 0; break;
+                case MAXWELL3D_RENDER_ENABLE_TRUE: on = 1; break;
+                case MAXWELL3D_RENDER_ENABLE_CONDITIONAL: { /* both words of the report's value set */
                     u32 w[2];
                     gmem_read(a, w, 8);
                     on = madeup_has(a) || (w[0] && w[1]);
                     break;
                 }
-                case 3: /* IF_EQUAL and IF_NOT_EQUAL: two reports' values, 16 bytes apart (their stamps don't count) */
-                case 4: {
+                case MAXWELL3D_RENDER_ENABLE_IF_EQUAL: /* two reports' values (their stamps don't count) */
+                case MAXWELL3D_RENDER_ENABLE_IF_NOT_EQUAL: {
                     u64 x, y;
-                    if (madeup_has(a) || madeup_has(a + 16)) {
+                    int equal = mode == MAXWELL3D_RENDER_ENABLE_IF_EQUAL;
+                    if (madeup_has(a) || madeup_has(a + MAXWELL3D_REPORT_BYTES)) {
                         on = 1;
                         break;
                     }
                     /* NVN's occlusion test, a count against zero: while the count isn't known the GPU compares, and
                        the draws wait for it there. Reading it here waited for the GPU to run everything recorded
                        until then, with the GPU idle meanwhile (renderer.h render_predicate) */
-                    known = g_renderer->render_predicate ? g_renderer->render_predicate(a, mode == 3, &pred) : -1;
+                    known = g_renderer->render_predicate ? g_renderer->render_predicate(a, equal, &pred) : -1;
                     if (known >= 0) {
                         on = known != 0;
                         if (known == 2) ch->render_pred = pred;
                         break;
                     }
                     gmem_read(a, &x, 8);
-                    gmem_read(a + 16, &y, 8);
-                    on = (x == y) == (mode == 3);
+                    gmem_read(a + MAXWELL3D_REPORT_BYTES, &y, 8);
+                    on = (x == y) == equal;
                     break;
                 }
                 default: LOG_LIMIT(4, "gpu: render enable mode %u draws\n", mode); break;
@@ -176,81 +241,78 @@ static void render_enable_update(GpuChannel* ch) {
 }
 
 /* ------------------------------------------------------------ draws */
-/* the kinds of draw that merge with their own kind only */
-enum { DRAW_ARRAYS, DRAW_INDEXED, DRAW_ARRAY_INSTANCED, DRAW_IB32, DRAW_IB16, DRAW_IB8 };
-/* the draw held while the next ones may be more instances of it: GPU thread state, one for all channels */
-static struct {
-    GpuChannel* ch; /* NULL: none */
-    u32 kind;
-    int indexed;
-    u32 topology, first, count, base_vertex, base_instance;
-    u32 start, n; /* the instance it started at, and its instances */
-} g_pend;
-int r3d_pending_on(void) { return g_pend.ch != NULL; }
+int r3d_pending_on(void) { return g_engines.deferred.ch != NULL; }
+/* the held draw, drawn (Eden's DrawDeferred) */
 void r3d_pending_flush(void) {
-    GpuChannel* ch = g_pend.ch;
+    DeferredDraw* p = &g_engines.deferred;
+    GpuChannel* ch = p->ch;
     if (!ch) return;
-    g_pend.ch = NULL;
-    r3d_draw(ch, g_pend.indexed, g_pend.topology, g_pend.first, g_pend.count, g_pend.base_vertex,
-             g_pend.base_instance + g_pend.start, g_pend.n);
+    p->ch = NULL;
+    r3d_draw(ch, p->indexed, p->topology, p->first, p->count, p->base_vertex, p->base_instance + p->start, p->n);
 }
-/* a draw of instance inst: one more instance of the held draw when everything else is the same */
+/* a draw of instance inst: one more instance of the held draw when everything else is the same, else the held one
+   is drawn and this one held */
 static void queue_draw(GpuChannel* ch, u32 kind, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex,
                        u32 inst) {
-    u32 bi = ch->r3d[0x50E];
-    if (g_pend.ch == ch && g_pend.kind == kind && g_pend.topology == topology && g_pend.first == first &&
-        g_pend.count == count && g_pend.base_vertex == base_vertex && g_pend.base_instance == bi &&
-        g_pend.start + g_pend.n == inst) {
-        g_pend.n++;
+    DeferredDraw* p = &g_engines.deferred;
+    u32 bi = ch->r3d[MAXWELL3D_GLOBAL_BASE_INSTANCE_INDEX];
+    if (p->ch == ch && p->kind == kind && p->topology == topology && p->first == first && p->count == count &&
+        p->base_vertex == base_vertex && p->base_instance == bi && p->start + p->n == inst) {
+        p->n++;
         return;
     }
     r3d_pending_flush();
-    g_pend.ch = ch;
-    g_pend.kind = kind;
-    g_pend.indexed = indexed;
-    g_pend.topology = topology;
-    g_pend.first = first;
-    g_pend.count = count;
-    g_pend.base_vertex = base_vertex;
-    g_pend.base_instance = bi;
-    g_pend.start = inst;
-    g_pend.n = 1;
+    p->ch = ch;
+    p->kind = kind;
+    p->indexed = indexed;
+    p->topology = topology;
+    p->first = first;
+    p->count = count;
+    p->base_vertex = base_vertex;
+    p->base_instance = bi;
+    p->start = inst;
+    p->n = 1;
 }
-/* DRAW_BEGIN (0x586): the topology, and the instance: the next one (bit 26), the first (bits 26-27 clear) or the
-   same */
+/* Draw.begin (Eden's DrawManager::DrawBegin): the next instance (SUBSEQUENT, or the undefined 3), the first, or the
+   same (UNCHANGED) */
 static void draw_begin(GpuChannel* ch, u32 v) {
-    if (v & (1u << 26))
+    u32 id = draw_begin_instance_id(v);
+    if (id & MAXWELL3D_DRAW_INSTANCE_SUBSEQUENT)
         ch->instance_count++;
-    else if (!(v & (1u << 27)))
+    else if (id == MAXWELL3D_DRAW_INSTANCE_FIRST)
         ch->instance_count = 0;
 }
-/* DRAW_END (0x585): the inline indices when some came, else the index buffer's range when its count is set (and
-   then used up), else the vertex range */
+/* Draw.end (Eden's DrawManager::DrawEnd): the inline indices when some came, else the index buffer's range when its
+   count is set (and then used up), else the vertex range */
 static void draw_end(GpuChannel* ch) {
     u32* r = ch->r3d;
-    u32 topology = r[0x586] & 0xFFFF;
+    u32 topology = draw_begin_topology(r[MAXWELL3D_DRAW_BEGIN]);
     if (ch->inline_n) {
         r3d_pending_flush();
-        r3d_draw(ch, 3, topology, 0, ch->inline_n, r[0x50D], r[0x50E] + ch->instance_count, 1);
+        r3d_draw(ch, R3D_DRAW_INLINE_INDICES, topology, 0, ch->inline_n, r[MAXWELL3D_GLOBAL_BASE_VERTEX_INDEX],
+                 r[MAXWELL3D_GLOBAL_BASE_INSTANCE_INDEX] + ch->instance_count, 1);
         ch->inline_n = 0;
-    } else if (r[0x5F8]) {
-        queue_draw(ch, DRAW_INDEXED, 1, topology, r[0x5F7], r[0x5F8], r[0x50D], ch->instance_count);
-        r[0x5F8] = 0;
+    } else if (r[MAXWELL3D_INDEX_BUFFER_COUNT]) {
+        queue_draw(ch, DRAW_INDEXED, R3D_DRAW_INDEX_BUFFER, topology, r[MAXWELL3D_INDEX_BUFFER_FIRST],
+                   r[MAXWELL3D_INDEX_BUFFER_COUNT], r[MAXWELL3D_GLOBAL_BASE_VERTEX_INDEX], ch->instance_count);
+        r[MAXWELL3D_INDEX_BUFFER_COUNT] = 0;
     } else
-        queue_draw(ch, DRAW_ARRAYS, 0, topology, r[0x35D], r[0x35E], 0, ch->instance_count);
+        queue_draw(ch, DRAW_ARRAYS, R3D_DRAW_VERTICES, topology, r[MAXWELL3D_VERTEX_BUFFER_FIRST],
+                   r[MAXWELL3D_VERTEX_BUFFER_COUNT], 0, ch->instance_count);
 }
-/* the inline index methods' indices, widened to u32 */
+/* the inline index methods' indices, widened to u32 (Eden's SetInlineIndexBuffer), INLINE_MAX at most */
 #define INLINE_MAX (16u << 20)
+#define INLINE_FIRST_CAP 1024u
 static void inline_push(GpuChannel* ch, const u32* idx, u32 n) {
     if (ch->inline_n + n > ch->inline_cap) {
-        u32 cap = ch->inline_cap ? ch->inline_cap * 2 : 1024;
+        u32 cap = ch->inline_cap ? ch->inline_cap * 2 : INLINE_FIRST_CAP;
         u32* b;
         if (ch->inline_n + n > INLINE_MAX) {
             WARN_LIMIT(4, "gpu: more than %u inline indices: the rest are dropped\n", INLINE_MAX);
             return;
         }
         if (cap > INLINE_MAX) cap = INLINE_MAX;
-        b = (u32*)realloc(ch->inline_indices, (size_t)cap * 4);
+        b = (u32*)realloc(ch->inline_indices, (size_t)cap * sizeof *b);
         if (!b) {
             WARN_LIMIT(4, "gpu: no memory for %u inline indices\n", cap);
             return;
@@ -258,74 +320,86 @@ static void inline_push(GpuChannel* ch, const u32* idx, u32 n) {
         ch->inline_indices = b;
         ch->inline_cap = cap;
     }
-    memcpy(ch->inline_indices + ch->inline_n, idx, (size_t)n * 4);
+    memcpy(ch->inline_indices + ch->inline_n, idx, (size_t)n * sizeof *idx);
     ch->inline_n += n;
 }
 /* ------------------------------------------------------------ the shadow RAM and the merged draw */
-/* the methods the shadow RAM leaves alone: the class's own (below 0x80), the window origin, and the data streams */
+/* the methods the shadow RAM leaves alone: the class's own, the window origin, and the data streams */
 static int shadowed(u32 m) {
-    return m >= 0x80 && m != 0x4EB && m != 0x4C1 && m != 0x57A && m != 0x57C && !(m >= 0x8E4 && m <= 0x8F3);
+    return m >= MAXWELL3D_SHADOW_FIRST && m != MAXWELL3D_WINDOW_ORIGIN && m != MAXWELL3D_INLINE_INDEX_4X8_INDEX0 &&
+           m != MAXWELL3D_DRAW_INLINE_INDEX && m != MAXWELL3D_INLINE_INDEX_2X16_EVEN &&
+           !(m >= MAXWELL3D_CONST_BUFFER_BUFFER && m <= MAXWELL3D_CONST_BUFFER_BUFFER_LAST);
 }
+/* a transform feedback buffer's start_offset, the write pointer its load resets */
+#define XFB_START_OFFSET(i) \
+    (MAXWELL3D_TRANSFORM_FEEDBACK_BUFFERS + MAXWELL3D_TRANSFORM_FEEDBACK_BUFFER_STRIDE * (i) + \
+     MAXWELL3D_TRANSFORM_FEEDBACK_BUFFER_START_OFFSET)
+/* a stage's bind group config, which binds a constant buffer */
+#define BIND_GROUP_CONFIG(i) \
+    (MAXWELL3D_BIND_GROUPS + MAXWELL3D_BIND_GROUP_STRIDE * (i) + MAXWELL3D_BIND_GROUP_RAW_CONFIG)
 /* whether a write of v to m leaves the held draw alone: what the next instance of it rewrites, and any other register
    written with the value it has, except the methods that act */
 static int keeps_draw(const u32* r, u32 m, u32 v) {
     switch (m) {
-        case 0x586: return (v & (1u << 26)) != 0; /* BEGIN of the next instance */
-        case 0x486:
-        case 0x585:
-        case 0x35D:
-        case 0x35E:
-        case 0x5F7:
-        case 0x5F8:
-        case 0x5FC:
-        case 0x5FD:
-        case 0x5FE: return 1;
-        case 0x44:
-        case 0x45:
-        case 0x46:
-        case 0x47:
-        case 0x48:
-        case 0x6C:
-        case 0xE4: /* a transform feedback buffer's write pointer: draws held before it capture where it was */
-        case 0xEC:
-        case 0xF4:
-        case 0xFC:
-        case 0x1D1:
-        case 0x6D:
-        case 0xB2:
-        case 0x378:
-        case 0x3DD:
-        case 0x3DF:
-        case 0x42B:
-        case 0x4C1:
-        case 0x509:
-        case 0x50A:
-        case 0x545:
-        case 0x54C:
-        case 0x556:
-        case 0x57A:
-        case 0x57C:
-        case 0x651:
-        case 0x674:
-        case 0x6C3:
-        case 0x8C4:
-        case 0x904:
-        case 0x90C:
-        case 0x914:
-        case 0x91C:
-        case 0x924: return 0;
+        case MAXWELL3D_DRAW_BEGIN: return draw_begin_instance_id(v) & MAXWELL3D_DRAW_INSTANCE_SUBSEQUENT;
+        case MAXWELL3D_VERTEX_ARRAY_INSTANCE_SUBSEQUENT:
+        case MAXWELL3D_DRAW_END:
+        case MAXWELL3D_VERTEX_BUFFER_FIRST:
+        case MAXWELL3D_VERTEX_BUFFER_COUNT:
+        case MAXWELL3D_INDEX_BUFFER_FIRST:
+        case MAXWELL3D_INDEX_BUFFER_COUNT:
+        case MAXWELL3D_INDEX_BUFFER32_SUBSEQUENT:
+        case MAXWELL3D_INDEX_BUFFER16_SUBSEQUENT:
+        case MAXWELL3D_INDEX_BUFFER8_SUBSEQUENT: return 1;
+        case MAXWELL3D_WAIT_FOR_IDLE:
+        case MAXWELL3D_LOAD_MME_INSTRUCTION_PTR:
+        case MAXWELL3D_LOAD_MME_INSTRUCTION:
+        case MAXWELL3D_LOAD_MME_START_ADDRESS_PTR:
+        case MAXWELL3D_LOAD_MME_START_ADDRESS:
+        case MAXWELL3D_LAUNCH_DMA:
+        /* a transform feedback buffer's write pointer: draws held before it capture where it was */
+        case XFB_START_OFFSET(0):
+        case XFB_START_OFFSET(1):
+        case XFB_START_OFFSET(2):
+        case XFB_START_OFFSET(3):
+        case MAXWELL3D_TRANSFORM_FEEDBACK_ENABLED:
+        case MAXWELL3D_INLINE_DATA:
+        case MAXWELL3D_SYNC_INFO:
+        case MAXWELL3D_INVALIDATE_SHADER_CACHE:
+        case MAXWELL3D_INVALIDATE_SHADER_CACHE_NO_WFI:
+        case MAXWELL3D_FRAGMENT_BARRIER:
+        case MAXWELL3D_INVALIDATE_TEXTURE_DATA_CACHE:
+        case MAXWELL3D_TILED_CACHE_BARRIER:
+        case MAXWELL3D_DRAW_TEXTURE_SRC_Y0:
+        case MAXWELL3D_INLINE_INDEX_4X8_INDEX0:
+        case MAXWELL3D_INVALIDATE_SAMPLER_CACHE_NO_WFI:
+        case MAXWELL3D_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI:
+        case MAXWELL3D_ZPASS_PIXEL_COUNT_ENABLE:
+        case MAXWELL3D_CLEAR_REPORT_VALUE:
+        case MAXWELL3D_RENDER_ENABLE_MODE:
+        case MAXWELL3D_DRAW_INLINE_INDEX:
+        case MAXWELL3D_INLINE_INDEX_2X16_EVEN:
+        case MAXWELL3D_RENDER_ENABLE_OVERRIDE:
+        case MAXWELL3D_CLEAR_SURFACE:
+        case MAXWELL3D_REPORT_SEMAPHORE_QUERY:
+        case MAXWELL3D_FIRMWARE_CALL_4:
+        case BIND_GROUP_CONFIG(0):
+        case BIND_GROUP_CONFIG(1):
+        case BIND_GROUP_CONFIG(2):
+        case BIND_GROUP_CONFIG(3):
+        case BIND_GROUP_CONFIG(4): return 0;
         default: return r[m] == v;
     }
 }
 static void barrier(int kind) {
     if (g_renderer->method_barrier) g_renderer->method_barrier(kind);
 }
-/* a macro call (0xE00 up: the even method starts a call, the odd one takes more parameters): it runs at the batch's
-   last word */
+/* a macro call (MAXWELL3D_MACRO_REGISTERS_START up: the even method starts a call, the odd one takes more
+   parameters): it runs at the batch's last word */
 static void macro_call(GpuChannel* ch, u32 m, u32 v, int last) {
     if (!ch->mme_collecting) {
         ch->mme_collecting = 1;
-        ch->mme_index = (m - 0xE00) >> 1;
+        ch->mme_index = (m - MAXWELL3D_MACRO_REGISTERS_START) >> 1;
         ch->mme_nparams = 0;
     }
     if (ch->mme_nparams < sizeof ch->mme_params / sizeof ch->mme_params[0])
@@ -346,38 +420,69 @@ static void macro_call(GpuChannel* ch, u32 m, u32 v, int last) {
    as this runs for nearly every method word: more groups than 7 widen the table */
 enum { G_ACTS = 0x80 };
 _Static_assert(R3D_XFB < G_ACTS, "the 3D register groups fit below G_ACTS");
-/* a vertex stream's stride and enable word and its divisor, around its address (0x701-0x702) */
-#define M3D_STREAM(i) [0x700 + 4 * (i)] = R3D_VFORMAT, [0x703 + 4 * (i)] = R3D_VFORMAT
-static const u8 g_m3d_group[0xE00] = {
-    [0x44] = G_ACTS, [0x45] = G_ACTS, [0x46] = G_ACTS, [0x47] = G_ACTS, [0x48] = G_ACTS, [0x49] = G_ACTS,
-    [0x6C] = G_ACTS, [0x6D] = G_ACTS, [0xB2] = G_ACTS, [0xE4] = G_ACTS, [0xEC] = G_ACTS, [0xF4] = G_ACTS,
-    [0xFC] = G_ACTS, [0x1D1] = G_ACTS | R3D_XFB, [0x35D] = G_ACTS, [0x35E] = G_ACTS, [0x378] = G_ACTS,
-    [0x3DD] = G_ACTS, [0x3DF] = G_ACTS, [0x42B] = G_ACTS, [0x485] = G_ACTS, [0x486] = G_ACTS, [0x4C1] = G_ACTS,
-    [0x4EB] = G_ACTS, [0x509] = G_ACTS, [0x50A] = G_ACTS, [0x545] = G_ACTS, [0x54C] = G_ACTS, [0x556] = G_ACTS,
-    [0x57A] = G_ACTS, [0x57C] = G_ACTS, [0x585] = G_ACTS, [0x586] = G_ACTS, [0x5F7] = G_ACTS, [0x5F8] = G_ACTS,
-    [0x5F9] = G_ACTS, [0x5FA] = G_ACTS, [0x5FB] = G_ACTS, [0x5FC] = G_ACTS, [0x5FD] = G_ACTS, [0x5FE] = G_ACTS,
-    [0x651] = G_ACTS, [0x674] = G_ACTS, [0x6C3] = G_ACTS, [0x8C4] = G_ACTS, [0x8E4 ... 0x8F3] = G_ACTS,
-    [0x904] = G_ACTS, [0x90C] = G_ACTS, [0x914] = G_ACTS, [0x91C] = G_ACTS, [0x924] = G_ACTS,
+/* a vertex stream's stride and enable word and its frequency (divisor), around its address */
+#define M3D_STREAM(i)                                                                     \
+    [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i)] = R3D_VFORMAT,      \
+    [MAXWELL3D_VERTEX_STREAMS + MAXWELL3D_VERTEX_STREAM_STRIDE * (i) +                    \
+     MAXWELL3D_VERTEX_STREAM_FREQUENCY] = R3D_VFORMAT
+/* a color target's format */
+#define M3D_RT_FORMAT(i) [MAXWELL3D_RT + MAXWELL3D_RT_STRIDE * (i) + MAXWELL3D_RT_FORMAT] = R3D_RTFORMAT
+static const u8 g_m3d_group[MAXWELL3D_MACRO_REGISTERS_START] = {
+    [MAXWELL3D_INVALIDATE_SHADER_CACHE] = G_ACTS, [MAXWELL3D_INVALIDATE_SHADER_CACHE_NO_WFI] = G_ACTS,
+    [MAXWELL3D_WAIT_FOR_IDLE] = G_ACTS, [MAXWELL3D_LOAD_MME_INSTRUCTION_PTR] = G_ACTS,
+    [MAXWELL3D_LOAD_MME_INSTRUCTION] = G_ACTS, [MAXWELL3D_LOAD_MME_START_ADDRESS_PTR] = G_ACTS,
+    [MAXWELL3D_LOAD_MME_START_ADDRESS] = G_ACTS, [MAXWELL3D_SHADOW_RAM_CONTROL] = G_ACTS,
+    [MAXWELL3D_LAUNCH_DMA] = G_ACTS, [MAXWELL3D_INLINE_DATA] = G_ACTS, [MAXWELL3D_SYNC_INFO] = G_ACTS,
+    [XFB_START_OFFSET(0)] = G_ACTS, [XFB_START_OFFSET(1)] = G_ACTS, [XFB_START_OFFSET(2)] = G_ACTS,
+    [XFB_START_OFFSET(3)] = G_ACTS, [MAXWELL3D_TRANSFORM_FEEDBACK_ENABLED] = G_ACTS | R3D_XFB,
+    [MAXWELL3D_VERTEX_BUFFER_FIRST] = G_ACTS, [MAXWELL3D_VERTEX_BUFFER_COUNT] = G_ACTS,
+    [MAXWELL3D_FRAGMENT_BARRIER] = G_ACTS, [MAXWELL3D_INVALIDATE_TEXTURE_DATA_CACHE] = G_ACTS,
+    [MAXWELL3D_TILED_CACHE_BARRIER] = G_ACTS, [MAXWELL3D_DRAW_TEXTURE_SRC_Y0] = G_ACTS,
+    [MAXWELL3D_VERTEX_ARRAY_INSTANCE_FIRST] = G_ACTS, [MAXWELL3D_VERTEX_ARRAY_INSTANCE_SUBSEQUENT] = G_ACTS,
+    [MAXWELL3D_INLINE_INDEX_4X8_INDEX0] = G_ACTS, [MAXWELL3D_WINDOW_ORIGIN] = G_ACTS,
+    [MAXWELL3D_INVALIDATE_SAMPLER_CACHE_NO_WFI] = G_ACTS, [MAXWELL3D_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI] = G_ACTS,
+    [MAXWELL3D_ZPASS_PIXEL_COUNT_ENABLE] = G_ACTS, [MAXWELL3D_CLEAR_REPORT_VALUE] = G_ACTS,
+    [MAXWELL3D_RENDER_ENABLE_MODE] = G_ACTS, [MAXWELL3D_DRAW_INLINE_INDEX] = G_ACTS,
+    [MAXWELL3D_INLINE_INDEX_2X16_EVEN] = G_ACTS, [MAXWELL3D_DRAW_END] = G_ACTS, [MAXWELL3D_DRAW_BEGIN] = G_ACTS,
+    [MAXWELL3D_INDEX_BUFFER_FIRST] = G_ACTS, [MAXWELL3D_INDEX_BUFFER_COUNT] = G_ACTS,
+    [MAXWELL3D_INDEX_BUFFER32_FIRST] = G_ACTS, [MAXWELL3D_INDEX_BUFFER16_FIRST] = G_ACTS,
+    [MAXWELL3D_INDEX_BUFFER8_FIRST] = G_ACTS, [MAXWELL3D_INDEX_BUFFER32_SUBSEQUENT] = G_ACTS,
+    [MAXWELL3D_INDEX_BUFFER16_SUBSEQUENT] = G_ACTS, [MAXWELL3D_INDEX_BUFFER8_SUBSEQUENT] = G_ACTS,
+    [MAXWELL3D_RENDER_ENABLE_OVERRIDE] = G_ACTS, [MAXWELL3D_CLEAR_SURFACE] = G_ACTS,
+    [MAXWELL3D_REPORT_SEMAPHORE_QUERY] = G_ACTS, [MAXWELL3D_FIRMWARE_CALL_4] = G_ACTS,
+    [MAXWELL3D_CONST_BUFFER_BUFFER ... MAXWELL3D_CONST_BUFFER_BUFFER_LAST] = G_ACTS,
+    [BIND_GROUP_CONFIG(0)] = G_ACTS, [BIND_GROUP_CONFIG(1)] = G_ACTS, [BIND_GROUP_CONFIG(2)] = G_ACTS,
+    [BIND_GROUP_CONFIG(3)] = G_ACTS, [BIND_GROUP_CONFIG(4)] = G_ACTS,
     /* the groups' plain registers */
-    [0x084] = R3D_SHADER, [0x582 ... 0x583] = R3D_SHADER, [0x800 ... 0x85F] = R3D_SHADER,
-    [0x458 ... 0x477] = R3D_VATTR,
-    [0x620 ... 0x63F] = R3D_VFORMAT, M3D_STREAM(0), M3D_STREAM(1), M3D_STREAM(2), M3D_STREAM(3), M3D_STREAM(4),
-    M3D_STREAM(5), M3D_STREAM(6), M3D_STREAM(7), M3D_STREAM(8), M3D_STREAM(9), M3D_STREAM(10), M3D_STREAM(11),
-    M3D_STREAM(12), M3D_STREAM(13), M3D_STREAM(14), M3D_STREAM(15), M3D_STREAM(16), M3D_STREAM(17), M3D_STREAM(18),
-    M3D_STREAM(19), M3D_STREAM(20), M3D_STREAM(21), M3D_STREAM(22), M3D_STREAM(23), M3D_STREAM(24), M3D_STREAM(25),
-    M3D_STREAM(26), M3D_STREAM(27), M3D_STREAM(28), M3D_STREAM(29), M3D_STREAM(30), M3D_STREAM(31),
-    [0x487] = R3D_RTFORMAT, [0x204] = R3D_RTFORMAT, [0x214] = R3D_RTFORMAT, [0x224] = R3D_RTFORMAT, [0x234] = R3D_RTFORMAT,
-    [0x244] = R3D_RTFORMAT, [0x254] = R3D_RTFORMAT, [0x264] = R3D_RTFORMAT, [0x274] = R3D_RTFORMAT,
-    [0x3E4] = R3D_BLEND, [0x4B9] = R3D_BLEND, [0x4D0 ... 0x4DF] = R3D_BLEND, [0x56E] = R3D_BLEND, [0x671 ... 0x672] = R3D_BLEND,
-    [0x680 ... 0x687] = R3D_BLEND, [0x780 ... 0x7BF] = R3D_BLEND,
-    [0x0C8] = R3D_PIPEMISC, [0x36B] = R3D_PIPEMISC, [0x373] = R3D_PIPEMISC, [0x490 ... 0x497] = R3D_PIPEMISC,
-    [0x544] = R3D_PIPEMISC, [0x5A1] = R3D_PIPEMISC, [0x64F] = R3D_PIPEMISC,
-    [0x1C0 ... 0x1CF] = R3D_XFB, [0xA00 ... 0xA7F] = R3D_XFB};
+    [MAXWELL3D_MANDATED_EARLY_Z] = R3D_SHADER, [MAXWELL3D_PROGRAM_REGION ... MAXWELL3D_PROGRAM_REGION + 1] = R3D_SHADER,
+    [MAXWELL3D_PIPELINES ... MAXWELL3D_PIPELINES + 0x5F] = R3D_SHADER,
+    [MAXWELL3D_VERTEX_ATTRIB_FORMAT ... MAXWELL3D_VERTEX_ATTRIB_FORMAT + 0x1F] = R3D_VATTR,
+    [MAXWELL3D_VERTEX_STREAM_INSTANCES ... MAXWELL3D_VERTEX_STREAM_INSTANCES + 0x1F] = R3D_VFORMAT,
+    M3D_STREAM(0), M3D_STREAM(1), M3D_STREAM(2), M3D_STREAM(3), M3D_STREAM(4), M3D_STREAM(5), M3D_STREAM(6),
+    M3D_STREAM(7), M3D_STREAM(8), M3D_STREAM(9), M3D_STREAM(10), M3D_STREAM(11), M3D_STREAM(12), M3D_STREAM(13),
+    M3D_STREAM(14), M3D_STREAM(15), M3D_STREAM(16), M3D_STREAM(17), M3D_STREAM(18), M3D_STREAM(19), M3D_STREAM(20),
+    M3D_STREAM(21), M3D_STREAM(22), M3D_STREAM(23), M3D_STREAM(24), M3D_STREAM(25), M3D_STREAM(26), M3D_STREAM(27),
+    M3D_STREAM(28), M3D_STREAM(29), M3D_STREAM(30), M3D_STREAM(31),
+    [MAXWELL3D_RT_CONTROL] = R3D_RTFORMAT, M3D_RT_FORMAT(0), M3D_RT_FORMAT(1), M3D_RT_FORMAT(2), M3D_RT_FORMAT(3),
+    M3D_RT_FORMAT(4), M3D_RT_FORMAT(5), M3D_RT_FORMAT(6), M3D_RT_FORMAT(7),
+    [MAXWELL3D_COLOR_MASK_COMMON] = R3D_BLEND, [MAXWELL3D_BLEND_PER_TARGET_ENABLED] = R3D_BLEND,
+    [MAXWELL3D_BLEND + 1 ... MAXWELL3D_BLEND + 0x10] = R3D_BLEND, [MAXWELL3D_FRAMEBUFFER_SRGB] = R3D_BLEND,
+    [MAXWELL3D_LOGIC_OP ... MAXWELL3D_LOGIC_OP + 1] = R3D_BLEND,
+    [MAXWELL3D_COLOR_MASK ... MAXWELL3D_COLOR_MASK + 7] = R3D_BLEND,
+    [MAXWELL3D_BLEND_PER_TARGET ... MAXWELL3D_BLEND_PER_TARGET + 0x3F] = R3D_BLEND,
+    [MAXWELL3D_TESSELLATION] = R3D_PIPEMISC, [MAXWELL3D_POLYGON_MODE_FRONT] = R3D_PIPEMISC,
+    [MAXWELL3D_PATCH_VERTICES] = R3D_PIPEMISC,
+    [MAXWELL3D_POST_VTG_SHADER_ATTRIB_SKIP_MASK ... MAXWELL3D_POST_VTG_SHADER_ATTRIB_SKIP_MASK + 7] = R3D_PIPEMISC,
+    [MAXWELL3D_USER_CLIP_ENABLE] = R3D_PIPEMISC, [MAXWELL3D_PROVOKING_VERTEX] = R3D_PIPEMISC,
+    [MAXWELL3D_VIEWPORT_CLIP_CONTROL] = R3D_PIPEMISC,
+    [MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS ... MAXWELL3D_TRANSFORM_FEEDBACK_CONTROLS + 0xF] = R3D_XFB,
+    [MAXWELL3D_STREAM_OUT_LAYOUT ... MAXWELL3D_STREAM_OUT_LAYOUT + 0x7F] = R3D_XFB};
 #undef M3D_STREAM
-/* inline indices packed in one word, 32 / bits of them, the low ones first. Out of line: its array, inlined, made
-   maxwell3d_method check a stack canary on every method */
+#undef M3D_RT_FORMAT
+/* inline indices packed in one word, 32 / bits of them, the low ones first (InlineIndex4x8, InlineIndex2x16,
+   draw_inline_index). Out of line: its array, inlined, made maxwell3d_method check a stack canary on every method */
 __attribute__((noinline)) static void inline_push_packed(GpuChannel* ch, u32 v, u32 bits) {
-    u32 idx[4], n = 32 / bits, i, mask = bits == 32 ? ~0u : (1u << bits) - 1;
+    u32 idx[32 / MAXWELL3D_INLINE_INDEX_BITS_4X8], n = 32 / bits, i, mask = bits == 32 ? ~0u : (1u << bits) - 1;
     for (i = 0; i < n; i++) idx[i] = (v >> (i * bits)) & mask;
     inline_push(ch, idx, n);
 }
@@ -390,138 +495,148 @@ __attribute__((noinline)) static void plain_flushed(GpuChannel* ch, u32 m, u32 v
     ch->r3d_dirty |= g_m3d_group[m];
     ch->r3d[m] = v;
 }
+/* the shadow RAM's part in a write of v to m: the value replayed, or tracked */
+static inline u32 shadow_ram(GpuChannel* ch, u32 m, u32 v) {
+    if (ch->shadow_mode == MAXWELL3D_SHADOW_RAM_REPLAY) return ch->r3d_shadow[m];
+    if (ch->shadow_mode <= MAXWELL3D_SHADOW_RAM_TRACK_WITH_FILTER) ch->r3d_shadow[m] = v;
+    return v;
+}
 /* the methods that act, the macros' and a plain register while constant buffer data is held */
 __attribute__((noinline)) static void method_acts(GpuChannel* ch, u32 m, u32 v, int last);
-/* A plain register (most method words) is stored without the switch, and a value as it was needs no store and changes
-   nothing a held draw or the renderer read. The rest goes out of line: with every call in this function, it saved and
-   restored five registers or more for each method word */
+/* A 3D engine method (Eden's Maxwell3D::CallMethod). A plain register (most method words) is stored without the
+   switch, and a value as it was needs no store and changes nothing a held draw or the renderer read. The rest goes
+   out of line: with every call in this function, it saved and restored five registers or more for each method word */
 void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
     u32* r = ch->r3d;
-    m &= 0xFFF;
-    if (m >= 0xE00 || (g_m3d_group[m] & G_ACTS) || ch->cb_n) {
+    m &= 0xFFF; /* the 3D engine's 0x1000 methods (GpuChannel.r3d) */
+    if (m >= MAXWELL3D_MACRO_REGISTERS_START || (g_m3d_group[m] & G_ACTS) || ch->cb_n) {
         method_acts(ch, m, v, last);
         return;
     }
-    if (m >= 0x80) {
-        if (ch->shadow_mode == 3)
-            v = ch->r3d_shadow[m];
-        else if (ch->shadow_mode <= 1)
-            ch->r3d_shadow[m] = v;
-    }
+    if (m >= MAXWELL3D_SHADOW_FIRST) v = shadow_ram(ch, m, v);
     if (r[m] != v) {
-        if (g_pend.ch) {
+        if (g_engines.deferred.ch) {
             plain_flushed(ch, m, v);
             return;
         }
         ch->r3d_dirty |= g_m3d_group[m];
         r[m] = v;
-    } else if (g_pend.ch && g_pend.ch != ch)
+    } else if (g_engines.deferred.ch && g_engines.deferred.ch != ch)
         plain_flushed(ch, m, v);
 }
 static void method_acts(GpuChannel* ch, u32 m, u32 v, int last) {
     u32* r = ch->r3d;
-    if (m < 0xE00 && !(g_m3d_group[m] & G_ACTS)) { /* a plain register after the held constant buffer data */
+    /* a plain register after the held constant buffer data */
+    if (m < MAXWELL3D_MACRO_REGISTERS_START && !(g_m3d_group[m] & G_ACTS)) {
         r3d_const_flush(ch);
         maxwell3d_method(ch, m, v, last);
         return;
     }
-    if (m >= 0xE00) {
+    if (m >= MAXWELL3D_MACRO_REGISTERS_START) {
         r3d_const_flush(ch);
         r[m] = v;
         macro_call(ch, m, v, last);
         return;
     }
-    if (m >= 0x8E4 && m <= 0x8F3) { /* constant buffer data: the held draw read the constants before it */
-        r3d_pending_flush();
+    if (m >= MAXWELL3D_CONST_BUFFER_BUFFER && m <= MAXWELL3D_CONST_BUFFER_BUFFER_LAST) {
+        r3d_pending_flush(); /* constant buffer data: the held draw read the constants before it */
         r[m] = v;
         r3d_const_upload(ch, v, last);
         return;
     }
     r3d_const_flush(ch);
-    if (shadowed(m)) {
-        if (ch->shadow_mode == 3)
-            v = ch->r3d_shadow[m]; /* replay */
-        else if (ch->shadow_mode <= 1)
-            ch->r3d_shadow[m] = v; /* track, with or without the filter */
-    }
-    if (g_pend.ch && (g_pend.ch != ch || !keeps_draw(r, m, v))) r3d_pending_flush();
+    if (shadowed(m)) v = shadow_ram(ch, m, v);
+    if (g_engines.deferred.ch && (g_engines.deferred.ch != ch || !keeps_draw(r, m, v))) r3d_pending_flush();
     if (r[m] != v) ch->r3d_dirty |= g_m3d_group[m] & ~G_ACTS;
     r[m] = v;
     switch (m) { /* a new case, or a new one in keeps_draw, needs G_ACTS in its g_m3d_group too */
-        case 0x44: /* WAIT_FOR_IDLE */
+        case MAXWELL3D_WAIT_FOR_IDLE:
             /* The idle wait and the texture cache invalidation below order GPU work, which method_barrier gives
                Vulkan. Neither is anything the game sees, so pending shader results don't land here: whatever reads
                guest memory lands the results over the bytes it reads (gmem_need, through gmem_ptr for textures and
                render targets), and a release lands them before the game can see it (release.c). Landing every
                result at each of them cost one game several vk_finish waits a frame */
-            barrier(4);
+            barrier(BARRIER_WAIT_FOR_IDLE);
             break;
-        case 0x45: mme_upload_ptr(ch, v); break; /* the macro code's upload address, beginning an upload batch */
-        case 0x46: mme_upload(ch, v); break;
-        case 0x47: ch->mme_start_ptr = v; break; /* the macro start table's upload index */
-        case 0x48: mme_bind(ch, v); break;
-        case 0x49: ch->shadow_mode = v & 3; break; /* SET_MME_SHADOW_RAM_CONTROL */
-        case 0x6C: i2m_launch(ch, r, 0x60); break;
-        case 0x6D: i2m_data(ch, v); break;
-        case 0xB2: /* SYNC_INFO: the syncpoint (low 16 bits) once the work before it is done, when bit 20 is set */
-            if (!(v & (1u << 20)))
+        case MAXWELL3D_LOAD_MME_INSTRUCTION_PTR: mme_upload_ptr(ch, v); break; /* begins an upload batch */
+        case MAXWELL3D_LOAD_MME_INSTRUCTION: mme_upload(ch, v); break;
+        case MAXWELL3D_LOAD_MME_START_ADDRESS_PTR: ch->mme_start_ptr = v; break;
+        case MAXWELL3D_LOAD_MME_START_ADDRESS: mme_bind(ch, v); break;
+        case MAXWELL3D_SHADOW_RAM_CONTROL: ch->shadow_mode = v & MAXWELL3D_SHADOW_RAM_CONTROL_MASK; break;
+        case MAXWELL3D_LAUNCH_DMA: i2m_launch(ch, r, MAXWELL3D_UPLOAD); break;
+        case MAXWELL3D_INLINE_DATA: i2m_data(ch, v); break;
+        case MAXWELL3D_SYNC_INFO: /* the syncpoint once the work before it is done, when the condition is ROP writes */
+            if (!sync_info_rop_writes_done(v))
                 LOG_LIMIT(4, "gpu: SyncInfo %08x without bit 20 doesn't increment\n", v);
             else if (g_renderer->stream_incr)
-                g_renderer->stream_incr(v & 0xFFFF);
+                g_renderer->stream_incr(sync_info_sync_point(v));
             break;
-        case 0x378: barrier(0); break; /* FRAGMENT_BARRIER */
-        case 0x3DD: barrier(2); break; /* INVALIDATE_TEXTURE_DATA_CACHE */
-        case 0x3DF: barrier(1); break; /* TILED_CACHE_BARRIER */
-        case 0x42B: r3d_draw_texture(ch); break;
-        case 0x4C1: inline_push_packed(ch, v, 8); break; /* four 8-bit indices */
-        case 0x485: /* VERTEX_ARRAY_INSTANCE_FIRST: instance 0 of first (bits 0-15), count (16-27), topology (28-31) */
-        case 0x486: /* _SUBSEQUENT: the next instance */
-            if (m == 0x486)
+        case MAXWELL3D_INVALIDATE_SHADER_CACHE:
+        case MAXWELL3D_INVALIDATE_SHADER_CACHE_NO_WFI:
+            if (invalidate_shader_cache_instruction(v)) barrier(BARRIER_SHADER_INSTRUCTIONS);
+            break;
+        case MAXWELL3D_FRAGMENT_BARRIER: barrier(BARRIER_TEXTURE); break;
+        case MAXWELL3D_INVALIDATE_TEXTURE_DATA_CACHE: barrier(BARRIER_DATA_CACHE); break;
+        case MAXWELL3D_TILED_CACHE_BARRIER: barrier(BARRIER_TILED); break;
+        case MAXWELL3D_DRAW_TEXTURE_SRC_Y0: r3d_draw_texture(ch); break;
+        case MAXWELL3D_INLINE_INDEX_4X8_INDEX0: inline_push_packed(ch, v, MAXWELL3D_INLINE_INDEX_BITS_4X8); break;
+        case MAXWELL3D_VERTEX_ARRAY_INSTANCE_FIRST: /* instance 0 of the packed vertex range */
+        case MAXWELL3D_VERTEX_ARRAY_INSTANCE_SUBSEQUENT: /* the next instance */
+            if (m == MAXWELL3D_VERTEX_ARRAY_INSTANCE_SUBSEQUENT)
                 ch->instance_count++;
             else
                 ch->instance_count = 0;
-            queue_draw(ch, DRAW_ARRAY_INSTANCED, 0, v >> 28, v & 0xFFFF, (v >> 16) & 0xFFF, 0, ch->instance_count);
+            queue_draw(ch, DRAW_ARRAY_INSTANCED, R3D_DRAW_VERTICES, packed_draw_topology(v), packed_draw_first(v),
+                       packed_draw_count(v), 0, ch->instance_count);
             break;
-        case 0x509: /* INVALIDATE_SAMPLER_CACHE_NO_WFI */
-        case 0x50A: /* INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI */ barrier(3); break;
-        case 0x545: /* the samples-passed counter counts while bit 0 is set */
-            if (g_renderer->samples_enable) g_renderer->samples_enable(ch, v & 1);
+        case MAXWELL3D_INVALIDATE_SAMPLER_CACHE_NO_WFI:
+        case MAXWELL3D_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI: barrier(BARRIER_DESCRIPTOR_CACHE); break;
+        case MAXWELL3D_ZPASS_PIXEL_COUNT_ENABLE: /* the samples-passed counter counts while it is enabled */
+            if (g_renderer->samples_enable) g_renderer->samples_enable(ch, zpass_pixel_count_enable(v));
             break;
-        case 0x54C: counter_reset(ch, v); break;
-        case 0x556:
-        case 0x651: render_enable_update(ch); break;
-        case 0x57A: inline_push_packed(ch, v, 32); break; /* one 32-bit index */
-        case 0x57C: inline_push_packed(ch, v, 16); break; /* two 16-bit indices */
-        /* SET_STREAM_OUT_BUFFER_LOAD_WRITE_POINTER: the buffer's capture starts over at its start offset, where
-           draws after an earlier one append to what it captured */
-        case 0xE4:
-        case 0xEC:
-        case 0xF4:
-        case 0xFC: ch->xfb_reload |= (u8)(1u << ((m - 0xE4) >> 3)); break;
-        case 0x585: draw_end(ch); break;
-        case 0x586: draw_begin(ch, v); break;
-        case 0x5F9: /* INDEX_BUFFER32/16/8_FIRST and _SUBSEQUENT: the index buffer's first and count in one word */
-        case 0x5FA:
-        case 0x5FB:
-        case 0x5FC:
-        case 0x5FD:
-        case 0x5FE:
-            if (m >= 0x5FC)
+        case MAXWELL3D_CLEAR_REPORT_VALUE: counter_reset(ch, v); break;
+        case MAXWELL3D_RENDER_ENABLE_MODE:
+        case MAXWELL3D_RENDER_ENABLE_OVERRIDE: render_enable_update(ch); break;
+        case MAXWELL3D_DRAW_INLINE_INDEX: inline_push_packed(ch, v, MAXWELL3D_INLINE_INDEX_BITS_32); break;
+        case MAXWELL3D_INLINE_INDEX_2X16_EVEN: inline_push_packed(ch, v, MAXWELL3D_INLINE_INDEX_BITS_2X16); break;
+        /* a transform feedback buffer's start_offset (SET_STREAM_OUT_BUFFER_LOAD_WRITE_POINTER): the buffer's capture
+           starts over at its start offset, where draws after an earlier one append to what it captured */
+        case XFB_START_OFFSET(0):
+        case XFB_START_OFFSET(1):
+        case XFB_START_OFFSET(2):
+        case XFB_START_OFFSET(3):
+            ch->xfb_reload |= (u8)(1u << ((m - XFB_START_OFFSET(0)) / MAXWELL3D_TRANSFORM_FEEDBACK_BUFFER_STRIDE));
+            break;
+        case MAXWELL3D_DRAW_END: draw_end(ch); break;
+        case MAXWELL3D_DRAW_BEGIN: draw_begin(ch, v); break;
+        /* INDEX_BUFFER32/16/8_FIRST and _SUBSEQUENT (Eden's DrawIndexSmall): the index buffer's first and count in
+           one word */
+        case MAXWELL3D_INDEX_BUFFER32_FIRST:
+        case MAXWELL3D_INDEX_BUFFER16_FIRST:
+        case MAXWELL3D_INDEX_BUFFER8_FIRST:
+        case MAXWELL3D_INDEX_BUFFER32_SUBSEQUENT:
+        case MAXWELL3D_INDEX_BUFFER16_SUBSEQUENT:
+        case MAXWELL3D_INDEX_BUFFER8_SUBSEQUENT:
+            if (m >= MAXWELL3D_INDEX_BUFFER32_SUBSEQUENT)
                 ch->instance_count++;
             else
                 ch->instance_count = 0;
-            queue_draw(ch, DRAW_IB32 + (m - 0x5F9) % 3, 1, v >> 28, v & 0xFFFF, (v >> 16) & 0xFFF, r[0x50D],
-                       ch->instance_count);
+            queue_draw(ch, DRAW_IB32 + (m - MAXWELL3D_INDEX_BUFFER32_FIRST) % 3, R3D_DRAW_INDEX_BUFFER,
+                       packed_draw_topology(v), packed_draw_first(v), packed_draw_count(v),
+                       r[MAXWELL3D_GLOBAL_BASE_VERTEX_INDEX], ch->instance_count);
             break;
-        case 0x674: r3d_clear(ch, v); break;
-        case 0x6C3: query_get(ch, r, 0x6C0, v); break;
-        case 0x8C4: r[0xD00] = 1; break; /* firmware call 4 signals its completion in shadow scratch 0 */
-        case 0x904:
-        case 0x90C:
-        case 0x914:
-        case 0x91C:
-        case 0x924: r3d_cb_bind(ch, (int)((m - 0x904) >> 3), v); break;
+        case MAXWELL3D_CLEAR_SURFACE: r3d_clear(ch, v); break;
+        case MAXWELL3D_REPORT_SEMAPHORE_QUERY: query_get(ch, r, MAXWELL3D_REPORT_SEMAPHORE, v); break;
+        /* firmware call 4 changes registers that don't matter here, and signals its completion in shadow scratch 0
+           (Eden's ProcessFirmwareCall4) */
+        case MAXWELL3D_FIRMWARE_CALL_4: r[MAXWELL3D_SHADOW_SCRATCH] = 1; break;
+        case BIND_GROUP_CONFIG(0):
+        case BIND_GROUP_CONFIG(1):
+        case BIND_GROUP_CONFIG(2):
+        case BIND_GROUP_CONFIG(3):
+        case BIND_GROUP_CONFIG(4):
+            r3d_cb_bind(ch, (int)((m - BIND_GROUP_CONFIG(0)) / MAXWELL3D_BIND_GROUP_STRIDE), v);
+            break;
         default: break;
     }
 }
-

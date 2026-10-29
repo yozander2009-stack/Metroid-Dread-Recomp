@@ -9,6 +9,7 @@
    step of its own, so such a stop can come between a branch or exit and its slot */
 #include "nx/gpu/maxwell/engines_int.h"
 #include "nx/runtime/options.h"
+#include "nx/runtime/platform/tracy.h"
 
 static u32 fetch_param(GpuChannel* ch) {
     GpuMme* m = &ch->mme;
@@ -217,8 +218,10 @@ void mme_out(GpuChannel* ch, MmeRec* rec, u32 m, u32 v) {
                               over the parameters the running macro is still reading is nothing the hardware does
                               (Eden would nest one) */
         ch->r3d[m] = v;
-    else
-        maxwell3d_method(ch, m, v, 1);
+    else /* constant buffer data stays held for the words after it (r3d_const_upload), and the next method of any
+            other kind writes it: a draw macro's base vertex and base instance went to guest memory as two writes,
+            each with its renderer checks and stamps, before the draw and two more after it */
+        maxwell3d_method(ch, m, v, !(m >= 0x8E4 && m <= 0x8F3));
 }
 u32 mme_reg(GpuChannel* ch, MmeRec* rec, u32 a) {
     if (rec && rec->total) rec->read_after_send = 1;
@@ -360,6 +363,7 @@ static void mme_verify_jit(GpuChannel* ch, u32 idx, u32 np) {
 }
 void mme_run(GpuChannel* ch, u32 idx, u32 np) {
     int k = -1;
+    SNX_ZONE_V(z, "mme macro", idx);
     idx &= 0x7F;
     if (mme_mode < 0) {
         mme_mode = (g_settings.native_macros ? MME_NATIVE : 0) | (g_settings.verify_macros ? MME_VERIFY : 0);

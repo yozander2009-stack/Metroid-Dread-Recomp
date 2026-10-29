@@ -5,13 +5,16 @@
    thread, and hands each program to the renderer, which translates and keeps it (gpu/vk/pipeline.c), through a
    ShipSink. What was read is kept by the sink as SHIP_FILE records (a file or segment, by its name, place, size and
    first bytes) and a SHIP_ALL record (every one, by the RomFS's table and the segments), so a later run reads only
-   what it hasn't */
+   what it hasn't. Those are of one build and driver, whose translations the sink keeps with them. A RomFS file the
+   walk finds no programs in is a SHIP_NONE record, by its name, place and size alone, which the sink keeps across
+   builds and drivers under the walk's own version (ship_walk_version): after an update, the walk reads again only
+   the files that hold programs, instead of every file (one game's 51,000 of them took 26 s, read one at a time) */
 #ifndef SNX_SHIPPED_PASS_H
 #define SNX_SHIPPED_PASS_H
 #include "common/cpu/aarch64/cpu.h"
 #include <stddef.h>
 
-enum { SHIP_FILE = 1, SHIP_ALL = 2 }; /* what a scan record says was read */
+enum { SHIP_FILE = 1, SHIP_ALL = 2, SHIP_NONE = 3 }; /* what a scan record says was read */
 /* what the sink did with a program */
 enum { SHIP_NEW, SHIP_KNOWN, SHIP_SKIPPED, SHIP_FAILED, SHIP_LACKED, SHIP_STOP };
 typedef struct {
@@ -34,6 +37,9 @@ typedef struct {
     u32 files, files_seen, programs, programs_done;
 } ShipProgress;
 
+/* what the walk finds in a file's bytes, as a version: the hash of its sources (shipped.c, shipped_pass.c and their
+   headers), which the build hands it. The key of the SHIP_NONE records, which a change of what it finds starts over */
+const char* ship_walk_version(void);
 /* the executables' writable segments copied, on the main thread before the game's first thread runs, so the walk
    reads them as they were loaded (the read-only ones it reads in place) */
 void ship_snapshot(void);

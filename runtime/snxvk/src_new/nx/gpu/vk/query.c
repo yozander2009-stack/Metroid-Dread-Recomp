@@ -66,6 +66,13 @@ typedef struct {
     u64 sum, sum_first, sum_end;
 } QCounter;
 static QCounter g_qc[QCH];
+/* the segments copied by each submission of the last QMARKS, for fold_done: where the copies end, and in which
+   submission (0: none) */
+#define QMARKS 64
+static struct {
+    u64 sub, copied;
+} g_qmark[QMARKS];
+static u32 g_qmark_at;
 
 static int pool_make(void) {
     VkQueryPoolCreateInfo qi = {
@@ -88,6 +95,7 @@ static int pool_make(void) {
         g_qpool = VK_NULL_HANDLE;
         return 0;
     }
+    vk_mem_track(g_qmem);
     g_qres = info.pMappedData;
     /* a query is reset before its first use, outside a rendering pass */
     vk_render_end();
@@ -131,6 +139,32 @@ static u32 msaa_samples(u32 mode) {
     return n[mode & 15];
 }
 
+/* A counter's live segments run from its oldest report not performed yet, or from its last report: a game that keeps
+   counting without reporting (one game draws its loading screens with the counter on, at thousands of passes a
+   second with the frame rate free) outgrew the ring, and every report after was made up until the next reset, which
+   that game makes rarely: its occlusion tests then flickered. The segments whose copies the GPU has run are added to
+   the sum of each counter no report waits on, as vk_query_value adds them, and its live segments start after them.
+   A counter with reports queued keeps its segments: a report sums its own range */
+static void fold_done(void) {
+    u64 submitted, done, upto = 0;
+    vk_submit_progress(&submitted, &done);
+    for (u32 i = 0; i < QMARKS; i++)
+        if (g_qmark[i].sub && g_qmark[i].sub <= done && g_qmark[i].copied > upto) upto = g_qmark[i].copied;
+    if (!upto) return;
+    vmaInvalidateAllocation(g_vk.vma, g_qmem, 0, VK_WHOLE_SIZE);
+    for (int i = 0; i < QCH; i++) {
+        QCounter* c = &g_qc[i];
+        if (!c->used || !c->started || c->bad || c->whead != c->wtail || upto <= c->reported) continue;
+        if (c->sum_first != c->first) { /* the epoch's first sum */
+            c->sum_first = c->sum_end = c->first;
+            c->sum = 0;
+        }
+        for (u64 s = c->sum_end; s < upto; s++)
+            if (g_qown[s % QN] == i + 1) c->sum += snx_le64(g_qres[s % QN]) * g_qmul[s % QN];
+        if (upto > c->sum_end) c->sum_end = upto;
+        c->reported = c->sum_end;
+    }
+}
 void vk_query_draw(VkCommandBuffer cb, u32 chan, u32 msaa_mode) {
     QCounter* c = counter(chan, 0);
     u32 mul = msaa_samples(msaa_mode);
@@ -142,6 +176,7 @@ void vk_query_draw(VkCommandBuffer cb, u32 chan, u32 msaa_mode) {
     }
     if (!c || !c->started || c->disabled || c->bad) return;
     /* the slot is still needed by a report, or its query not reset yet: this epoch counts no further */
+    if (g_q.next - live_oldest() >= QN) fold_done();
     if (g_q.next - live_oldest() >= QN || g_q.next - g_q.copied >= QN) {
         c->bad = 1;
         LOG_LIMIT(4, "vulkan: a samples-passed count spans more than %u passes, its reports are made up\n", QN);
@@ -177,6 +212,7 @@ void vk_query_flush(VkCommandBuffer cb) {
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     rec_CmdPipelineBarrier2(cb, &di);
+    g_qmark[g_qmark_at++ % QMARKS] = (typeof(g_qmark[0])){vk_submit_number(), g_q.copied};
 }
 
 /* a segment open now of this counter ends: what comes after is another epoch's, or isn't counted */
@@ -284,6 +320,7 @@ static int pred_init(void) {
                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (!VK_OK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &g_pbuf, &g_pmem, NULL))) return 0;
+    vk_mem_track(g_pmem);
     VkDescriptorSetLayoutBinding b[3];
     for (u32 i = 0; i < 3; i++)
         b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -483,3 +520,6 @@ int vk_query_pred_flush(void) {
     rec_CmdPipelineBarrier2(cb, &d);
     return 1;
 }
+
+/* a save state's load: the counters start over, their reports the made-up value until the game resets them */
+void vk_query_forget_all(void) { memset(g_qc, 0, sizeof g_qc); }

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
    Copyright 2026 the ScarletNX contributors */
 /* Compute shaders are decoded directly to SPIR-V. Unsupported encodings reject the whole program. */
-#include "nx/gpu/shader/spirv_emit.h"
+#include "common/utilities/spirv_emit.h"
 #include "nx/gpu/shader/translator.h"
 
 typedef struct {
@@ -262,7 +262,7 @@ static u32* compute_to_spirv(const u8* code, const u64* words, u32 max_bytes, Sh
     }
     spv_emit_compute_entry_str(&c->e, fn, "main", interfaces, ninterface);
     spv_emit_local_size(&c->e, fn, meta.cs_local[0], meta.cs_local[1], meta.cs_local[2]);
-    spv_emit_float_controls(&c->e, fn, flush && can_flush, can_preserve, 0);
+    spv_emit_float_controls(&c->e, fn, flush && can_flush == SH_FTZ_MODE, can_preserve, 0);
     spv_emit_function_void(&c->e, vt, fn, fnt);
     spv_emit_label(&c->e, label);
     for (u32 i = 0; i < 255; i++)

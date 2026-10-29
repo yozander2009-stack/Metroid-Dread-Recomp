@@ -33,13 +33,14 @@ layout(push_constant) uniform Params {
     uint bl_bias;   /* added to a block linear offset: where the layout's run 0 is in the bound range (wraps) */
     uint lin_bias;  /* where the first linear row is in the bound range */
     uint to_bl;     /* nonzero: linear rows to block linear */
+    uvec4 tail_mask; /* valid bytes of the last run, all bits set for whole runs */
 };
 
 /* binding 0 is the side read, binding 1 the side written: block linear first when deswizzling */
 layout(std430, binding = 0) readonly restrict buffer Src {
     uvec4 src[];
 };
-layout(std430, binding = 1) writeonly restrict buffer Dst {
+layout(std430, binding = 1) restrict buffer Dst {
     uvec4 dst[];
 };
 

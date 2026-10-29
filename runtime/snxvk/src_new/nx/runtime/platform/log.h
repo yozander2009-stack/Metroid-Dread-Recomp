@@ -38,6 +38,10 @@ void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
    per thread so the others keep writing the log during the dump */
 extern __thread FILE* tls_log_redirect;
 
+/* log_max in MiB once, after the log first went past it and was cut (the oldest lines after the run's start gone), for
+   the frontend to say over the game; 0 before that and after it was taken */
+int log_full_take(void);
+
 /* Called by the crash handler before its report: from now on lines bypass the log's lock and stdio buffering, which
    the crashed code may hold, and this thread's redirect is dropped */
 void log_crash_mode(void);

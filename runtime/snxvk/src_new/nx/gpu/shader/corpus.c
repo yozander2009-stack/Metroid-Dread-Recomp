@@ -3,6 +3,7 @@
 /* The shader corpus (shader_corpus): one file per translated program, <dir>/<key>_<stage>.snxs, holding a header,
    the ShaderInfo the translation started from and the program's code, for tools/snx_shaderc.c. */
 #include "nx/gpu/shader/shader.h"
+#include "common/utilities/common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,7 @@ int shader_corpus_save(const char* dir, const u8* code, u32 len, u32 max_bytes, 
     corpus_header(&h, len, max_bytes, stage);
     if (snprintf(path, sizeof path, "%s/%016llx_%d.snxs", dir, (unsigned long long)key, stage) >= (int)sizeof path)
         return 0;
+    snx_path_native(path);
     if (corpus_complete(path, &h)) return 1;
     f = fopen(path, "wb");
     if (!f) return 0;

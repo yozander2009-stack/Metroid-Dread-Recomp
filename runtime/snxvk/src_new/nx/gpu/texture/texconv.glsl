@@ -3,7 +3,7 @@
 /* The body of texconv.comp: texels of a format the host can't take as they are, converted on the GPU from linear rows
    (what blocklinear.comp made of a block linear level, or a pitch linear level's rows staged as they are) into rows
    that copy into the image. GLSL that is also C++ (tests/glsl/glsl.hpp): tests/glsl/texconv_glsl.cpp runs it against
-   the CPU's conversions (gpu/texture/etc2.c for ETC2 and EAC).
+   the CPU's conversions (tests/support/etc2.c for ETC2 and EAC, bcn.c for BCn).
 
    It also converts the frames vi presents from memory to RGBA8 (vk/renderer.c).
 
@@ -136,6 +136,330 @@ uint eac11(uint hi, uint lo, bool sn, uint i) {
     return uint(v < 0 ? -e : e) & 0xFFFFu;
 }
 
+/* ---- BC1 to BC7: a block's words little-endian, pixel (x, y) number y * 4 + x ---- */
+
+/* n bits (below 32) of the 128 bit block b from bit at on */
+uint bc_bits(uint b[4], uint at, uint n) {
+    uint w = at >> 5, s = at & 31u, v = b[w] >> s;
+    if (s != 0u && w < 3u) v |= b[w + 1u] << (32u - s);
+    return v & ((1u << n) - 1u);
+}
+/* an endpoint of bits bits (5 to 8) to 8 bits, its top bits repeated below it */
+int bc_expand(uint v, uint bits) { return int((v << (8u - bits)) | (v >> (2u * bits - 8u))); }
+
+/* pixel i of a BC1 color block (endpoints e, indices idx) as RGBA8. three: a block whose first endpoint isn't the
+   larger has three colors and a transparent black (BC1); BC2 and BC3 take every block as four colors */
+uint bc1_pixel(uint e, uint idx, bool three, uint i) {
+    uint e0 = e & 0xFFFFu, e1 = e >> 16, k = (idx >> (2u * i)) & 3u;
+    int r0 = bc_expand(e0 >> 11, 5u), g0 = bc_expand((e0 >> 5) & 63u, 6u), b0 = bc_expand(e0 & 31u, 5u);
+    int r1 = bc_expand(e1 >> 11, 5u), g1 = bc_expand((e1 >> 5) & 63u, 6u), b1 = bc_expand(e1 & 31u, 5u);
+    if (k == 0u) return tc_rgba(r0, g0, b0, 255u);
+    if (k == 1u) return tc_rgba(r1, g1, b1, 255u);
+    if (e0 > e1 || !three) {
+        int wa = k == 2u ? 2 : 1, wb = 3 - wa;
+        return tc_rgba((wa * r0 + wb * r1 + 1) / 3, (wa * g0 + wb * g1 + 1) / 3, (wa * b0 + wb * b1 + 1) / 3, 255u);
+    }
+    if (k == 3u) return 0u;
+    return tc_rgba((r0 + r1 + 1) / 2, (g0 + g1 + 1) / 2, (b0 + b1 + 1) / 2, 255u);
+}
+/* pixel i of a BC4 block hi:lo as 16 bit unorm or (sn) snorm: the interpolant's exact value (x / d of the endpoints,
+   sevenths or fifths) rounded to nearest */
+uint bc4_value(uint hi, uint lo, bool sn, uint i) {
+    int a0 = int(lo & 255u), a1 = int((lo >> 8) & 255u);
+    if (sn) {
+        a0 = max(a0 >= 128 ? a0 - 256 : a0, -127);
+        a1 = max(a1 >= 128 ? a1 - 256 : a1, -127);
+    }
+    uint k = tc_bits(hi, lo, 18u + 3u * i, 16u + 3u * i);
+    int x, d = 1;
+    if (k < 2u) {
+        x = k == 0u ? a0 : a1;
+    } else if (a0 > a1) {
+        x = int(8u - k) * a0 + int(k - 1u) * a1;
+        d = 7;
+    } else if (k < 6u) {
+        x = int(6u - k) * a0 + int(k - 1u) * a1;
+        d = 5;
+    } else {
+        x = k == 6u ? (sn ? -127 : 0) : (sn ? 127 : 255);
+    }
+    if (!sn) return uint((x * 257 + d / 2) / d);
+    int m = x < 0 ? -x : x, v = (m * 32767 + 127 * d / 2) / (127 * d);
+    return uint(x < 0 ? -v : v) & 0xFFFFu;
+}
+/* pixel i's 8 bit alpha of a BC3 alpha block hi:lo, rounded to nearest */
+uint bc3_alpha(uint hi, uint lo, uint i) {
+    int a0 = int(lo & 255u), a1 = int((lo >> 8) & 255u);
+    uint k = tc_bits(hi, lo, 18u + 3u * i, 16u + 3u * i);
+    if (k < 2u) return uint(k == 0u ? a0 : a1);
+    if (a0 > a1) return uint((int(8u - k) * a0 + int(k - 1u) * a1 + 3) / 7);
+    if (k < 6u) return uint((int(6u - k) * a0 + int(k - 1u) * a1 + 2) / 5);
+    return k == 6u ? 0u : 255u;
+}
+
+/* BPTC's tables (tests/support/bcn.c's, packed): the subset bit of each pixel of the two subset partitions, 16 bits each; the
+   subset of each pixel of the three subset ones, 2 bits each; the anchor pixel of subset 1 of the two subset
+   partitions and of subsets 1 (A) and 2 (B) of the three subset ones, a nibble each */
+const uint BC_PART2[32] = {
+    0x8888CCCCu, 0xECC8EEEEu, 0xFEECC880u, 0xEC80FEC8u, 0xFFECC800u, 0xE800FE80u, 0xFF00FFE8u, 0xF000FFF0u,
+    0x008EF710u, 0x08CE7100u, 0x7310008Cu, 0x8CCE3100u, 0x3110088Cu, 0x366C6666u, 0x0FF017E8u, 0x399C718Eu,
+    0xF0F0AAAAu, 0x33CC5A5Au, 0x55AA3C3Cu, 0xA55A9696u, 0x13C873CEu, 0x3BDC324Cu, 0xC33C6996u, 0x06609966u,
+    0x04E40272u, 0x27204E40u, 0x936CC936u, 0x639C39C6u, 0x9CC69336u, 0xE718817Eu, 0x0FCCCCF0u, 0xEE227744u
+};
+const uint BC_PART3[64] = {
+    0xAA685050u, 0x6A5A5040u, 0x5A5A4200u, 0x5450A0A8u, 0xA5A50000u, 0xA0A05050u, 0x5555A0A0u, 0x5A5A5050u,
+    0xAA550000u, 0xAA555500u, 0xAAAA5500u, 0x90909090u, 0x94949494u, 0xA4A4A4A4u, 0xA9A59450u, 0x2A0A4250u,
+    0xA5945040u, 0x0A425054u, 0xA5A5A500u, 0x55A0A0A0u, 0xA8A85454u, 0x6A6A4040u, 0xA4A45000u, 0x1A1A0500u,
+    0x0050A4A4u, 0xAAA59090u, 0x14696914u, 0x69691400u, 0xA08585A0u, 0xAA821414u, 0x50A4A450u, 0x6A5A0200u,
+    0xA9A58000u, 0x5090A0A8u, 0xA8A09050u, 0x24242424u, 0x00AA5500u, 0x24924924u, 0x24499224u, 0x50A50A50u,
+    0x500AA550u, 0xAAAA4444u, 0x66660000u, 0xA5A0A5A0u, 0x50A050A0u, 0x69286928u, 0x44AAAA44u, 0x66666600u,
+    0xAA444444u, 0x54A854A8u, 0x95809580u, 0x96969600u, 0xA85454A8u, 0x80959580u, 0xAA141414u, 0x96960000u,
+    0xAAAA1414u, 0xA05050A0u, 0xA0A5A5A0u, 0x96000000u, 0x40804080u, 0xA9A8A9A8u, 0xAAAAAA44u, 0x2A4A5254u
+};
+const uint BC_ANCHOR2[8] = {
+    0xFFFFFFFFu, 0xFFFFFFFFu, 0xF882282Fu, 0x22882282u, 0xFF8286FFu, 0x6FF22282u, 0x22FF8626u, 0xF22FFFFFu
+};
+const uint BC_ANCHOR3A[8] = {
+    0xFF38FF33u, 0x33566688u, 0xA633F833u, 0xFF586885u, 0xF8A653F8u, 0xFFFF5F3Fu, 0xA58555F3u, 0x33CFD8A5u
+};
+const uint BC_ANCHOR3B[8] = {
+    0x83FF388Fu, 0x8FFFFFFFu, 0x8F8F3F8Fu, 0x8AFFA6F3u, 0xA98AAF3Fu, 0x8663F8F6u, 0xFFFFFF3Fu, 0x8FF3FFFFu
+};
+const uint BC6_MODE[15] = {
+    0x00555560u, 0x136663E1u, 0x2A4455E2u, 0x3C4545E6u, 0x505445EAu,
+    0x645554EEu, 0x77556472u, 0x8A565476u, 0x9F65547Au, 0xB466633Eu,
+    0xCBAAA503u, 0xD19995C7u, 0xDA88864Bu, 0xE344484Fu, 0xEC000000u
+};
+const uint BC6_FIELD[118] = {
+    0x04480447u, 0x0900044Bu, 0x09020901u, 0x044A0403u, 0x04040307u, 0x030A000Bu, 0x011B0405u, 0x04060308u,
+    0x0409022Bu, 0x0557033Bu, 0x055A044Au, 0x000B0600u, 0x0448011Bu, 0x05580601u, 0x0447022Bu, 0x033B0602u,
+    0x044B055Bu, 0x03070503u, 0x030A0504u, 0x03080505u, 0x05090506u, 0x09010900u, 0x04030902u, 0x03070AA0u,
+    0x0AA10304u, 0x030A000Bu, 0x0AA20305u, 0x0308011Bu, 0x022B0406u, 0x033B0409u, 0x09010900u, 0x03030902u,
+    0x044A0AA0u, 0x04040307u, 0x030A0AA1u, 0x0AA20305u, 0x0308011Bu, 0x000B0306u, 0x0309022Bu, 0x033B0447u,
+    0x09010900u, 0x03030902u, 0x04480AA0u, 0x03040307u, 0x000B0AA1u, 0x0405030Au, 0x03080AA2u, 0x011B0306u,
+    0x0309022Bu, 0x033B044Bu, 0x04480800u, 0x04470801u, 0x044B0802u, 0x044A0403u, 0x04040307u, 0x030A000Bu,
+    0x011B0405u, 0x04060308u, 0x0409022Bu, 0x0700033Bu, 0x0448044Au, 0x022B0701u, 0x07020447u, 0x044B033Bu,
+    0x03070503u, 0x000B0404u, 0x0405030Au, 0x0308011Bu, 0x05090506u, 0x000B0700u, 0x07010448u, 0x04470557u,
+    0x055A0702u, 0x0403044Bu, 0x0307044Au, 0x030A0504u, 0x011B0405u, 0x04060308u, 0x0409022Bu, 0x0700033Bu,
+    0x0448011Bu, 0x05580701u, 0x07020447u, 0x044B055Bu, 0x044A0403u, 0x04040307u, 0x030A000Bu, 0x03080505u,
+    0x022B0406u, 0x033B0409u, 0x044A0500u, 0x011B000Bu, 0x05010448u, 0x05580557u, 0x0447022Bu, 0x055A0502u,
+    0x055B033Bu, 0x0503044Bu, 0x05040307u, 0x0505030Au, 0x05060308u, 0x09000509u, 0x09020901u, 0x09040903u,
+    0x09000905u, 0x09020901u, 0x0AA00803u, 0x0AA10804u, 0x0AA20805u, 0x09010900u, 0x07030902u, 0x07040AB0u,
+    0x07050AB1u, 0x09000AB2u, 0x09020901u, 0x0AF00303u, 0x0AF10304u, 0x0AF20305u
+};
+/* the interpolation weights of 2, 3 and 4 bit indices, a byte each: 2 bit ones in word 0, 3 bit in 1 and 2, 4 bit
+   in 3 to 6 */
+const uint BC_WEIGHT[7] = {0x402B1500u, 0x1B120900u, 0x40372E25u, 0x0D090400u,
+                           0x1E1A1511u, 0x2F2B2622u, 0x403C3733u};
+int bc_weight(uint bits, uint k) {
+    uint base = bits == 2u ? 0u : bits == 3u ? 1u : 3u;
+    return int((BC_WEIGHT[base + (k >> 2)] >> ((k & 3u) * 8u)) & 255u);
+}
+int bc_lerp(int a, int b, int w) { return (a * (64 - w) + b * w + 32) >> 6; }
+uint bc_subset(uint ns, uint p, uint i) {
+    if (ns == 1u) return 0u;
+    if (ns == 2u) return (BC_PART2[p >> 1] >> ((p & 1u) * 16u + i)) & 1u;
+    return (BC_PART3[p] >> (2u * i)) & 3u;
+}
+/* the anchor pixel of subset s (1 or 2) of partition p of ns subsets; subset 0's is pixel 0 */
+uint bc_anchor(uint ns, uint p, uint s) {
+    uint t = ns == 2u ? BC_ANCHOR2[p >> 3] : s == 1u ? BC_ANCHOR3A[p >> 3] : BC_ANCHOR3B[p >> 3];
+    return (t >> ((p & 7u) * 4u)) & 15u;
+}
+/* pixel i's index of bits bits, in indices from bit at on: an anchor's has one bit less, its top bit 0 */
+uint bc_index(uint b[4], uint ns, uint p, uint at, uint bits, uint i) {
+    uint a1 = ns >= 2u ? bc_anchor(ns, p, 1u) : 16u, a2 = ns == 3u ? bc_anchor(ns, p, 2u) : 16u;
+    uint n = at + i * bits - (i > 0u ? 1u : 0u) - (i > a1 ? 1u : 0u) - (i > a2 ? 1u : 0u);
+    bool anchor = i == 0u || i == a1 || i == a2;
+    return bc_bits(b, n, anchor ? bits - 1u : bits);
+}
+
+int bc_sext(uint v, uint bits) { return int(v << (32u - bits)) >> (32u - bits); }
+int bc6_unquantize(int v, uint epb, bool sf) {
+    if (!sf) {
+        if (epb >= 15u) return v;
+        if (v == 0) return 0;
+        if (v == (1 << epb) - 1) return 0xFFFF;
+        return ((v << 16) + 0x8000) >> epb;
+    }
+    if (epb >= 16u) return v;
+    int m = v < 0 ? -v : v, q;
+    if (m == 0)
+        q = 0;
+    else if (m >= (1 << (epb - 1u)) - 1)
+        q = 0x7FFF;
+    else
+        q = ((m << 15) + 0x4000) >> (epb - 1u);
+    return v < 0 ? -q : q;
+}
+/* an interpolated value to the bits of a half float: 31/64 of the unsigned range, 31/32 of the signed one's
+   magnitude */
+uint bc6_finish(int v, bool sf) {
+    if (!sf) return uint((v * 31) >> 6);
+    return v < 0 ? 0x8000u | uint((-v * 31) >> 5) : uint((v * 31) >> 5);
+}
+/* a BC6H block b into four rows of RGBA16F pixels from word o0, at column u of blocks, alpha 1.0. A reserved mode
+   is black. BC6_MODE holds each mode's code (bits 0-4), whether it has two regions (5), whether its endpoints after
+   the first are deltas (6), the endpoints' bits (7-11), the deltas' bits of R, G and B (12-23) and its first field
+   in BC6_FIELD (24-31; the entry after the last mode ends it). A field, 16 bits, is the endpoint and color it fills
+   (endpoint * 3 + color, bits 0-3), the bit its first bit goes to (4-7) and its last's (8-11): a first bit above
+   the last is a field read from its high bit down */
+void bc6_block(uint b[4], bool sf, uint o0, uint u) {
+    uint code = (b[0] & 3u) < 2u ? b[0] & 3u : b[0] & 31u, m = 0u;
+    while (m < 14u && ((BC6_MODE[m] & 31u) != code || (m < 2u) != (code < 2u))) m++;
+    int e[12];
+    for (uint k = 0u; k < 12u; k++) e[k] = 0;
+    uint ns = 1u, p = 0u, at = m < 2u ? 2u : 5u;
+    if (m < 14u) {
+        uint mw = BC6_MODE[m];
+        for (uint s = mw >> 24; s < (BC6_MODE[m + 1u] >> 24); s++) {
+            uint f = (BC6_FIELD[s >> 1] >> ((s & 1u) * 16u)) & 0xFFFFu, first = (f >> 4) & 15u, last = f >> 8;
+            uint n = (last >= first ? last - first : first - last) + 1u, v = bc_bits(b, at, n);
+            at += n;
+            if (last < first) v = bitfieldReverse(v) >> (32u - n);
+            e[f & 15u] |= int(v << min(first, last));
+        }
+        bool tr = (mw & 64u) != 0u;
+        uint epb = (mw >> 7) & 31u;
+        if ((mw & 32u) != 0u) {
+            ns = 2u;
+            p = bc_bits(b, at, 5u);
+            at += 5u;
+        }
+        for (uint c = 0u; c < 3u; c++) {
+            uint db = (mw >> (12u + 4u * c)) & 15u;
+            if (sf) e[c] = bc_sext(uint(e[c]), epb);
+            for (uint k = 1u; k < 2u * ns; k++) {
+                int v = e[3u * k + c];
+                if (sf || tr) v = bc_sext(uint(v), tr ? db : epb);
+                if (tr) {
+                    v = (e[c] + v) & ((1 << epb) - 1);
+                    if (sf) v = bc_sext(uint(v), epb);
+                }
+                e[3u * k + c] = v;
+            }
+            for (uint k = 0u; k < 2u * ns; k++) e[3u * k + c] = bc6_unquantize(e[3u * k + c], epb, sf);
+        }
+    }
+    uint ib = ns == 2u ? 3u : 4u;
+    for (uint i = 0u; i < 16u; i++) {
+        uint o = o0 + (i >> 2) * out_pitch + 8u * u + 2u * (i & 3u), rgb[3];
+        uint s = bc_subset(ns, p, i);
+        int w = m < 14u ? bc_weight(ib, bc_index(b, ns, p, at, ib, i)) : 0;
+        for (uint c = 0u; c < 3u; c++)
+            rgb[c] = m < 14u ? bc6_finish(bc_lerp(e[6u * s + c], e[6u * s + 3u + c], w), sf) : 0u;
+        dst[o] = rgb[0] | (rgb[1] << 16);
+        dst[o + 1u] = rgb[2] | 0x3C000000u; /* alpha 1.0 */
+    }
+}
+
+/* BC7's modes, a nibble each: subsets, partition bits, rotation bits, index selection bits, color bits, alpha bits,
+   index bits and the second indices' bits. Modes 0, 3, 6 and 7 have a p-bit an endpoint, mode 1 one a subset */
+const uint BC7_MODE[8] = {0x03040043u, 0x03060062u, 0x02050063u, 0x02070062u,
+                          0x32651201u, 0x22870201u, 0x04770001u, 0x02550062u};
+/* a BC7 block b into four rows of RGBA8 pixels from word o0, at column u of blocks. A block without a mode (its
+   first byte 0) is transparent black */
+void bc7_block(uint b[4], uint o0, uint u) {
+    if ((b[0] & 255u) == 0u) {
+        for (uint i = 0u; i < 16u; i++) dst[o0 + (i >> 2) * out_pitch + 4u * u + (i & 3u)] = 0u;
+        return;
+    }
+    uint mode = uint(findLSB(b[0] & 255u)), mw = BC7_MODE[mode];
+    uint ns = mw & 15u, pb = (mw >> 4) & 15u, rb = (mw >> 8) & 15u, sb = (mw >> 12) & 15u;
+    uint cb = (mw >> 16) & 15u, ab = (mw >> 20) & 15u, ib = (mw >> 24) & 15u, ib2 = mw >> 28;
+    uint at = mode + 1u, p = bc_bits(b, at, pb);
+    uint rot = bc_bits(b, at + pb, rb), isb = bc_bits(b, at + pb + rb, sb);
+    at += pb + rb + sb;
+    /* endpoint k's channel c in e[4k + c]: R of every endpoint, then G, B and A */
+    int e[24];
+    uint nend = 2u * ns;
+    for (uint c = 0u; c < 4u; c++) {
+        uint bits = c < 3u ? cb : ab;
+        for (uint k = 0u; k < nend; k++) {
+            e[4u * k + c] = bits != 0u ? int(bc_bits(b, at, bits)) : 255;
+            at += bits;
+        }
+    }
+    bool epbit = mode == 0u || mode == 3u || mode == 6u || mode == 7u, spbit = mode == 1u;
+    uint cprec = cb, aprec = ab;
+    if (epbit || spbit) {
+        for (uint k = 0u; k < nend; k++) {
+            int pbit = int(bc_bits(b, at + (epbit ? k : k >> 1), 1u));
+            for (uint c = 0u; c < 4u; c++)
+                if (c < 3u || ab != 0u) e[4u * k + c] = (e[4u * k + c] << 1) | pbit;
+        }
+        at += epbit ? nend : ns;
+        cprec++;
+        if (ab != 0u) aprec++;
+    }
+    for (uint k = 0u; k < nend; k++)
+        for (uint c = 0u; c < 4u; c++)
+            if (c < 3u || ab != 0u) e[4u * k + c] = bc_expand(uint(e[4u * k + c]), c < 3u ? cprec : aprec);
+    /* the second indices follow the first, whose anchors (one a subset) have a bit less */
+    uint at2 = at + 16u * ib - ns;
+    for (uint i = 0u; i < 16u; i++) {
+        uint s = bc_subset(ns, p, i), i1 = bc_index(b, ns, p, at, ib, i);
+        uint i2 = ib2 != 0u ? bc_index(b, 1u, 0u, at2, ib2, i) : i1;
+        /* modes 4 and 5: color from the first indices and alpha from the second, swapped by the index selection */
+        uint ci = isb != 0u ? i2 : i1, cbits = isb != 0u ? ib2 : ib;
+        uint ai = isb != 0u ? i1 : i2, abits = ib2 == 0u || isb != 0u ? ib : ib2;
+        int px[4];
+        for (uint c = 0u; c < 4u; c++)
+            px[c] = bc_lerp(e[8u * s + c], e[8u * s + 4u + c], c < 3u ? bc_weight(cbits, ci) : bc_weight(abits, ai));
+        if (rot != 0u) { /* the alpha channel's values swapped with red's, green's or blue's */
+            int t = px[3];
+            px[3] = px[rot - 1u];
+            px[rot - 1u] = t;
+        }
+        dst[o0 + (i >> 2) * out_pitch + 4u * u + (i & 3u)] = tc_rgba(px[0], px[1], px[2], uint(px[3]));
+    }
+}
+
+/* a BC block at word at of the input into four rows of pixels from word o0 of the output, at column u of blocks */
+void bc_block(uint at, uint o0, uint u) {
+    bool two = mode != TC_BC1 && mode != TC_BC4 && mode != TC_BC4_SNORM;
+    uint b[4];
+    b[0] = src[at];
+    b[1] = src[at + 1u];
+    b[2] = 0u;
+    b[3] = 0u;
+    if (two) {
+        b[2] = src[at + 2u];
+        b[3] = src[at + 3u];
+    }
+    if (mode == TC_BC6H_UF || mode == TC_BC6H_SF) {
+        bc6_block(b, mode == TC_BC6H_SF, o0, u);
+        return;
+    }
+    if (mode == TC_BC7) {
+        bc7_block(b, o0, u);
+        return;
+    }
+    bool sn = mode == TC_BC4_SNORM || mode == TC_BC5_SNORM;
+    for (uint y = 0u; y < 4u; y++) {
+        uint o = o0 + y * out_pitch;
+        if (mode == TC_BC4 || mode == TC_BC4_SNORM) { /* two 16 bit texels a word */
+            dst[o + 2u * u] = bc4_value(b[1], b[0], sn, 4u * y) | (bc4_value(b[1], b[0], sn, 4u * y + 1u) << 16);
+            dst[o + 2u * u + 1u] =
+                bc4_value(b[1], b[0], sn, 4u * y + 2u) | (bc4_value(b[1], b[0], sn, 4u * y + 3u) << 16);
+            continue;
+        }
+        for (uint x = 0u; x < 4u; x++) {
+            uint i = y * 4u + x, c;
+            if (mode >= TC_BC5) {
+                c = bc4_value(b[1], b[0], sn, i) | (bc4_value(b[3], b[2], sn, i) << 16);
+            } else if (mode == TC_BC1) {
+                c = bc1_pixel(b[0], b[1], true, i);
+            } else {
+                uint a = mode == TC_BC2 ? (((i < 8u ? b[0] : b[1]) >> (4u * (i & 7u))) & 15u) * 17u
+                                        : bc3_alpha(b[1], b[0], i);
+                c = (bc1_pixel(b[2], b[3], false, i) & 0xFFFFFFu) | (a << 24);
+            }
+            dst[o + 4u * u + x] = c;
+        }
+    }
+}
+
 /* the float nearest z / (2^24 - 1), the bits the CPU's (float)z / 16777215.0f gives. In binary the quotient is z's
    24 bits repeated after the point: from z's top bit p on, the significand is z << (23 - p), and the bits after it
    are the zeros above p in the next copy, then that copy's bit p, a 1, with more ones after it (z repeats): the
@@ -177,6 +501,46 @@ uint tc_16to32(uint v) {
 
 /* byte b of the input buffer (byte addressed) */
 uint tc_src_byte(uint b) { return (src[b >> 2] >> (8u * (b & 3u))) & 0xFFu; }
+
+/* the bits of the float a half is (tests/support/half.c's half_to_float). A subnormal's top bit p becomes the
+   implicit one: m * 2^-24 is 1.f * 2^(p - 24) */
+uint tc_half_float(uint h) {
+    uint sign = (h & 0x8000u) << 16, e = (h >> 10) & 31u, m = h & 0x3FFu;
+    if (e == 31u) return sign | 0x7F800000u | (m << 13);
+    if (e != 0u) return sign | ((e + 112u) << 23) | (m << 13);
+    if (m == 0u) return sign;
+    uint p = uint(findMSB(m));
+    return sign | ((p + 103u) << 23) | ((m << (23u - p)) & 0x7FFFFFu);
+}
+/* the half nearest the float x (its bits), ties to even, too large for one an infinity, a NaN kept quiet (half.c's
+   float_to_half). Integer arithmetic: packHalf2x16's rounding is the device's */
+uint tc_float_half(uint x) {
+    uint sign = (x >> 16) & 0x8000u, e = (x >> 23) & 0xFFu, m = x & 0x7FFFFFu, h, rem, tie;
+    if (e == 0xFFu) return sign | 0x7C00u | (m != 0u ? 0x200u | (m >> 13) : 0u);
+    if (e >= 143u) return sign | 0x7C00u; /* 2^16 and up */
+    if (e <= 112u) {                       /* a subnormal half, or zero below half the smallest */
+        if (e < 102u) return sign;
+        uint s = 126u - e; /* 14 to 24 */
+        m |= 0x800000u;
+        h = m >> s;
+        rem = m & ((1u << s) - 1u);
+        tie = 1u << (s - 1u);
+    } else {
+        h = ((e - 112u) << 10) | (m >> 13);
+        rem = m & 0x1FFFu;
+        tie = 0x1000u;
+    }
+    if (rem > tie || (rem == tie && (h & 1u) != 0u)) h++; /* a carry into the exponent rounds up to it, or infinity */
+    return sign | h;
+}
+/* TC_BLIT_FLOAT: the bits of component k of the source pixel at byte p as a float */
+uint tc_blit_component(uint p, uint k) {
+    uint sn = remap & 15u, sb = (remap >> 4) & 15u;
+    if (k >= sn || (k == 3u && (remap & 0x10000u) != 0u)) return k == 3u ? 0x3F800000u : 0u;
+    uint at = p + k * sb, v = tc_src_byte(at) | (tc_src_byte(at + 1u) << 8);
+    if (sb == 2u) return tc_half_float(v);
+    return v | (tc_src_byte(at + 2u) << 16) | (tc_src_byte(at + 3u) << 24);
+}
 /* TC_DMA_REMAP: byte ob of a line out, with the line in from byte in_line on and the byte now there in old */
 uint tc_remap_byte(uint ob, uint in_line, uint old) {
     uint cs = remap & 15u, ns = (remap >> 4) & 15u, nd = (remap >> 8) & 15u, eo = cs * nd;
@@ -203,6 +567,23 @@ void main() {
         dst[at] = r;
         return;
     }
+    if (mode == TC_BLIT_FLOAT) {
+        uint line = gl_GlobalInvocationID.y, at = out_bias + line * out_pitch + u, w = dst[at];
+        uint sp = (remap & 15u) * ((remap >> 4) & 15u), db = (remap >> 12) & 15u, dp = ((remap >> 8) & 15u) * db;
+        uint row = in_bias + src[const_b + line] * in_pitch;
+        /* the word's components (a pixel's are 2 or 4 bytes each, and pixels start on them) */
+        for (uint ob = 4u * u; ob < 4u * u + 4u && ob < line_out; ob += db) {
+            uint i = ob / dp, v = tc_blit_component(row + src[const_a + i] * sp, (ob - i * dp) / db);
+            if (db == 4u) {
+                w = v;
+            } else {
+                uint sh = 8u * (ob & 3u);
+                w = (w & ~(0xFFFFu << sh)) | (tc_float_half(v) << sh);
+            }
+        }
+        dst[at] = w;
+        return;
+    }
     if (mode == TC_DMA_REMAP) {
         uint line = gl_GlobalInvocationID.y, at = out_bias + line * out_pitch + u, w = dst[at], r = 0u;
         for (uint b = 0u; b < 4u; b++) {
@@ -213,7 +594,7 @@ void main() {
         dst[at] = r;
         return;
     }
-    /* the row of units (texels, or blocks for ETC2) of all the dispatch's slices */
+    /* the row of units (texels, or blocks for ETC2, EAC and BCn) of all the dispatch's slices */
     uint row = gl_GlobalInvocationID.z * rows + gl_GlobalInvocationID.y;
     uint in_at = in_bias + row * in_pitch, out_at = out_bias + row * out_pitch;
     if (mode == TC_NV12_UV) {
@@ -221,6 +602,9 @@ void main() {
         dst[out_at + 2u * u] = (u4 & 0xFFu) | ((v4 & 0xFFu) << 8) | ((u4 & 0xFF00u) << 8) | ((v4 & 0xFF00u) << 16);
         dst[out_at + 2u * u + 1u] =
             ((u4 >> 16) & 0xFFu) | ((v4 >> 8) & 0xFF00u) | ((u4 >> 8) & 0xFF0000u) | (v4 & 0xFF000000u);
+    } else if (mode >= TC_BC1) {
+        bool small = mode == TC_BC1 || mode == TC_BC4 || mode == TC_BC4_SNORM; /* 8 byte blocks */
+        bc_block(in_at + u * (small ? 2u : 4u), out_bias + row * 4u * out_pitch, u);
     } else if (mode >= TC_VI_RGBX8888) {
         uint p = src[in_at + u];
         dst[out_at + u] = mode == TC_VI_RGBX8888 ? p | 0xFF000000u

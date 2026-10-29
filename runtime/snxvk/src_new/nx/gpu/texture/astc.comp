@@ -9,7 +9,7 @@
    block-linear order and stores floats into an image; here texture.c has already deswizzled them into rows of
    blocks, and the texels go out as packed RGBA8 words (R in the low byte) in rows of width words, which
    vk/astc.c copies into a UNORM or SRGB image. The byte conversions are integer arithmetic so that the CPU
-   reference (astc.c) produces the same bytes.
+   reference (tests/support/astc.c) produces the same bytes.
 
    A dispatch decodes a strip: height rows of texels of one slice, or (z > 1) whole slices one after another,
    each in the input and the output. The decoder itself is astc_decode.glsl, which the tests also run on the CPU
