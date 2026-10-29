@@ -1160,7 +1160,18 @@ static void linear_drop(Surf* s) {
     if (i < g_nlinear) g_linear[i] = g_linear[--g_nlinear];
     s->in_linear = 0;
 }
+int own_traps(void);
 void vk_rt_publish_linear(void) {
+    /* SWR: without memory traps (our runtime: own_init says none) a publish can't own the span, and the fallback writes
+       the target's whole span over guest memory at once, the bytes between its rows as the GPU copy has them: CPU data
+       there would be overwritten. Metroid Dread never needed it (the earlier renderer had no such write-back), so only
+       with traps, or SWR_VK_PUBLISH_LINEAR=1 (tests). Precaution: the acid-enemy crash was da6776e's clamp (render.c) */
+    static int force = -1;
+    if (force < 0) force = getenv("SWR_VK_PUBLISH_LINEAR") != NULL;
+    if (!force && !own_traps()) {
+        while (g_nlinear) g_linear[--g_nlinear]->in_linear = 0;
+        return;
+    }
     /* publishing can submit and land, which leaves the list alone: it is taken whole first */
     while (g_nlinear) {
         Surf* s = g_linear[--g_nlinear];

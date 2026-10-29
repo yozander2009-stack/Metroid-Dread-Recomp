@@ -138,24 +138,14 @@ extern void snxv_swr_r_save(int at_exit);
 #else
 typedef struct {   /* mirror of their Renderer (gpu/renderer.h, ScarletNX main b5f4f14f2bfc), same order */
   const char* name; int (*start)(void); void (*mem_may_have_changed)(void);
-#ifdef SWR_SNXVK_V2
-  void* stream_run;   /* main 112db409 */
-#endif
   void* clear; void* draw; void* method_barrier; void* draw_texture; void* blit; void* vic_compose;
   void* nvdec_write; void* nvdec_hw_device; void* dma_copy; void* blit_mem;
   void (*rt_flush)(u64); void (*rt_reload)(u64); void* dispatch; void* cs_mem_need; void* mem_pending; void* gfx_mem_need;
   void* before_syncwait; void* stream_incr; void* release_write; void* release_need; void* release_read; void* release_value;
   void* render_predicate; void* render_predicate_drop;
   void* samples_reset; void* samples_enable; void* samples_report; void* stream_end; void* release_retire; void* report_stall;
-#ifdef SWR_SNXVK_V2
-  void* idle; void* reset; void* flush_targets; void* save_targets; void* load_targets;
-#endif
   void (*present_buffer)(u64 cpu_addr, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4], u32 transform);
-  u64 (*screenshot)(const char* path);
-#ifdef SWR_SNXVK_V2
-  void* thumbnail;
-#endif
-  void (*refresh)(void); void (*save)(int at_exit); int (*release_window)(void);
+  u64 (*screenshot)(const char* path); void (*refresh)(void); void (*save)(int at_exit); int (*release_window)(void);
   void* prepare;
 } SnxRenderer;
 extern const SnxRenderer snxv_vk_renderer;

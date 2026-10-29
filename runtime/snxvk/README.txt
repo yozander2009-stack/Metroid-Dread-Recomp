@@ -21,7 +21,14 @@ Local changes to upstream (marked "SWR" in the code):
                         guest address; vk_rt_prefiltered (glow passes read an averaged copy); ShTex.use
   gpu/vk/pipeline.c     pipeline recipes (pipeline_recipes.bin) for the shipped-shader pass
   gpu/shader/shipped.c, gpu/shipped_pass.c: Metroid Dread's MSHD shader containers
-  gpu/vk/swr_settings.c, gpu/maxwell/mme_jit_stub.c: our settings and no LLVM macro JIT (the interpreter runs every macro)
+  gpu/vk/swr_settings.c, gpu/maxwell/mme_jit_stub.c: our settings and no LLVM macro JIT (the interpreter runs every macro);
+                        swr_settings.c also gives snxvk_glue.c the renderer's entries (swr_r_*), so the glue never
+                        mirrors upstream's Renderer struct
+  gpu/vk/render.c       SWR_VK_VCLAMP, default 0: vertex streams are copied to their limit, not to the last vertex a
+                        draw reads (upstream da6776e). Metroid Dread's indexed draws read past their highest index, and
+                        the clamp crashed it at the acid enemy (bisected 2026-10-29)
+  gpu/vk/surface.c      pitch-linear targets aren't written back at each release without memory traps (we have none)
+  gpu/gpu.c, vk/owned.c SWR_VK_GW / SWR_VK_GW_WATCH: logs GPU writes into guest memory (diagnostic, inert by default)
 
 Build: set GLSLANG=<glslang.exe 16.6.0> and run python\python.exe work-profiler\build_snxvk2.py
 (SWR_NO_DLSS=1: runtime\snxvk\libsnxvk_new_nodlss.a, the public build), then the normal --build-runtime links it and

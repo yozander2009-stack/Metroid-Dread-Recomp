@@ -193,7 +193,11 @@ static void own_land(const OwnRange* r, u8* const* dst, u32 n) {
         gpu_wait_note(NULL, 0);
         if (!ok || !VK_OK(vmaInvalidateAllocation(g_vk.vma, g_owned.mem, 0, total)))
             fatal("vulkan: could not complete ownership readback");
-        for (j = 0; j < np; j++) memcpy(pc[j].dst, g_owned.ptr + pc[j].at, pc[j].size);
+        for (j = 0; j < np; j++) {
+            void swr_gw_note(u64 gva, u64 cpu, u64 n); /* SWR diagnostic (gpu.c) */
+            swr_gw_note(0, (u64)(pc[j].dst - g_mem), pc[j].size);
+            memcpy(pc[j].dst, g_owned.ptr + pc[j].at, pc[j].size);
+        }
     }
     vk_unlock();
 }

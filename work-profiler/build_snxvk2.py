@@ -34,6 +34,12 @@ if NEW:   # ScarletNX main 112db409: spirv_emit and the Vulkan device helpers mo
     SRC = [f for f in SRC if f not in ('gpu/shader/spirv_emit.c', 'gpu/texture/etc2.c')]
     SRC += ['gpu/shader/structure.c', 'gpu/vk/ftz_probe.c', 'gpu/vk/xxh3.c', '../common/utilities/spirv_emit.c',
             '../common/gpu/vk/vk_common.c', '../common/gpu/vk/ring.c', '../common/gpu/vk/swapchain.c']
+if os.environ.get('SWR_SNX_ANY'):   # bisecting upstream: whichever of these files that version has
+    _all = SRC + ['gpu/shader/spirv_emit.c', 'gpu/texture/etc2.c', 'gpu/shader/structure.c', 'gpu/vk/ftz_probe.c',
+                  'gpu/vk/xxh3.c', '../common/utilities/spirv_emit.c', '../common/gpu/vk/vk_common.c',
+                  '../common/gpu/vk/ring.c', '../common/gpu/vk/swapchain.c']
+    SRC = [f for i, f in enumerate(_all) if f not in _all[:i] and os.path.isfile(os.path.join(NX, f))]
+    NEW = 'SNX_SHIP_WALK' in open(os.path.join(NX, 'gpu', 'shipped_pass.c'), encoding='utf-8', errors='replace').read()
 REDIRECT = {'g_opt_vsync': 'snxvk_opt_vsync'}
 GEN = os.path.join(OUT, 'shaderdec')
 INC = ['-I' + S, '-I' + NX, '-I' + GEN, '-I' + DEPS['volk'], '-I' + os.path.join(DEPS['vma'], 'include'),
@@ -77,7 +83,7 @@ SPV = [('gpu/texture/astc.comp', 'astc_spv', 'nx/gpu/texture/astc_spv.h', []),
        ('gpu/video/vic.comp', 'vic_spv', 'nx/gpu/video/vic_spv.h', []),
        ('gpu/video/vic.comp', 'vic_unaligned_spv', 'nx/gpu/video/vic_spv.h', ['VIC_UNALIGNED']),
        ('gpu/vk/query_predicate.comp', 'query_predicate_spv', 'nx/gpu/vk/query_predicate_spv.h', [])]
-if NEW: SPV.append(('gpu/vk/ftz_probe.comp', 'ftz_probe_spv', 'nx/gpu/vk/ftz_probe_spv.h', []))
+if os.path.isfile(os.path.join(NX, 'gpu', 'vk', 'ftz_probe.comp')): SPV.append(('gpu/vk/ftz_probe.comp', 'ftz_probe_spv', 'nx/gpu/vk/ftz_probe_spv.h', []))
 
 
 def spirv():   # cmake/glsl.cmake + spirv_source.cmake: the SPIR-V words in a C array beside its header

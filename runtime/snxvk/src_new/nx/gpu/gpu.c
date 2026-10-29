@@ -60,6 +60,36 @@ void (*g_gpu_mapping_end)(void);
 /* the runs of guest memory behind [gva, gva + size), copied in or out: 1 when every page was mapped. An unmapped
    page, or one the guest freed after mapping it here (gmmu_run), reads as zero and takes no write. What the GPU holds
    of a run lands first (memory/own.c): the caller may hold the renderer's lock, and a trap can't be answered then */
+/* SWR diagnostic: SWR_VK_GW=1 logs the first GPU write into each 64 KiB of guest memory, SWR_VK_GW_WATCH=lo-hi (hex)
+   every write into [lo, hi) */
+void swr_gw_note(u64 gva, u64 cpu, u64 n);
+void swr_gw_note(u64 gva, u64 cpu, u64 n) {
+    static int on = -1;
+    static u64 lo, hi;
+    static u8 seen[1u << 20];
+    static int nlog;
+    if (on < 0) {
+        const char* w = getenv("SWR_VK_GW_WATCH");
+        on = getenv("SWR_VK_GW") != NULL || w;
+        if (w) {
+            lo = strtoull(w, NULL, 16);
+            const char* d = strchr(w, '-');
+            hi = d ? strtoull(d + 1, NULL, 16) : lo + 1;
+        }
+    }
+    if (!on) return;
+    u64 b = cpu >> 16;
+    if (b < (1u << 20) && !seen[b]) {
+        seen[b] = 1;
+        LOG("gw: first GPU write in %llx: gva %llx cpu %llx +%llx\n", (unsigned long long)(b << 16),
+            (unsigned long long)gva, (unsigned long long)cpu, (unsigned long long)n);
+    }
+    if (cpu < hi && cpu + n > lo && nlog < 5000) {
+        nlog++;
+        LOG("gw: WATCH write gva %llx cpu %llx +%llx\n", (unsigned long long)gva, (unsigned long long)cpu,
+            (unsigned long long)n);
+    }
+}
 static int copy_runs(u64 gva, u8* in, const u8* out, u64 size) {
     int all = 1;
     while (size) {
@@ -74,8 +104,10 @@ static int copy_runs(u64 gva, u8* in, const u8* out, u64 size) {
         if (__atomic_load_n(&g_own_any, __ATOMIC_ACQUIRE)) own_acquire(cpu, n);
         if (in)
             memcpy(in, GP(cpu), (size_t)n);
-        else
+        else {
+            swr_gw_note(gva, cpu, n);
             memcpy(GP(cpu), out, (size_t)n);
+        }
     next:
         if (in)
             in += n;

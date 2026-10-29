@@ -2382,6 +2382,7 @@ static int copy_restrided(u64 gva, u64 len, u32 gstride, u32 stride, VkBuffer* b
    memory, or under results the GPU hasn't landed. A stream's limit is often the end of a ring the game streams
    vertices through, so its range from the draw's start to the limit was megabytes for a few hundred vertices: one
    game copied 100 to 360 MB a frame that way */
+static int g_swr_vclamp = -1; /* SWR: SWR_VK_VCLAMP (render_draw) */
 static u64 draw_last_vertex(GpuChannel* ch, int indexed, u32 first, u32 count, u32 base_vertex) {
     const u32* r = ch->r3d;
     u64 top = 0;
@@ -2407,7 +2408,7 @@ static u64 draw_last_vertex(GpuChannel* ch, int indexed, u32 first, u32 count, u
         u64 gw = gpu_mem_generation();
         const u8* p = gmem_ptr(a, n * isz);
         if (!p) return ~0ull;
-        if (memo[slot].a == a && memo[slot].n == n && memo[slot].isz == isz && memo[slot].ri == ri &&
+        if (g_swr_vclamp != 3 && memo[slot].a == a && memo[slot].n == n && memo[slot].isz == isz && memo[slot].ri == ri &&
             memo[slot].skip == skip && !gpu_mem_dirty_since(memo[slot].gw, a, n * isz) &&
             vk_written_since(p, n * isz, memo[slot].ws) == 0)
             top = memo[slot].top;
@@ -2642,8 +2643,20 @@ retry:
     } vq[33];
     u32 nvq = 0;
     /* each stream up to the last vertex or instance the draw reads, rather than to its limit */
-    u64 last_vertex = k->nbind ? draw_last_vertex(ch, indexed, first, count, base_vertex) : ~0ull;
-    u64 last_instance = (u64)base_instance + instances - 1;
+    /* SWR: SWR_VK_VCLAMP 0 = each stream to its limit (as before upstream da6776e), 1 = up to the last vertex for
+       non-indexed draws only, 2 = upstream (indexed too), 3 = 2 without the highest-index memo. Metroid Dread crashed in
+       its buffer manager (F_8173AE4, F_8166D70, main thread) at the acid enemy with 2 (3/3, bisected to da6776e) and 3
+       (2/2), as an OpenGL indexed clamp did: its draws read past the highest index, so the clamp isn't safe for it.
+       0 passed 3/3, 1 2/2 */
+    if (g_swr_vclamp < 0) {
+        const char* e = getenv("SWR_VK_VCLAMP");
+        g_swr_vclamp = e && *e ? atoi(e) : 0;
+    }
+    int vclamp = g_swr_vclamp; /* 3: as 2, the highest index read again at every draw (no memo) */
+    u64 last_vertex = k->nbind && (vclamp >= 2 || (vclamp == 1 && !indexed))
+                          ? draw_last_vertex(ch, indexed, first, count, base_vertex)
+                          : ~0ull;
+    u64 last_instance = vclamp ? (u64)base_instance + instances - 1 : ~0ull;
     for (u32 v = 0; v < k->nbind; v++) {
         if (pl->key[v] == ~0u || pl->key[v] == ~1u) {
             /* the constants: staging that fails skips the draw (it once drew without the attributes) */

@@ -2,6 +2,7 @@
    shaderdec/ folder), set by snxvk_glue.c before the renderer starts. Paths this build stubs stay off: the macro JIT
    (no LLVM), FFmpeg video decode, and the shipped-shader pass (its loader and RomFS readers aren't ours). */
 #include "snx_settings.h"
+#include <stdlib.h>
 void swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, int recording_thread) {
     g_settings.resolution_scale = resolution;
     g_settings.shadows = shadows;
@@ -11,8 +12,23 @@ void swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, 
     g_settings.prepare_shaders = 0;
     g_settings.compiled_macros = 0;
     g_settings.vulkan_video_decode = 0;
+    /* diagnostics (tests): GPU time per rendering pass, and what is copied between guest memory and buffers */
+    g_settings.gpu_profile = getenv("SWR_VK_GPU_PROFILE") != NULL;
+    g_settings.buffer_copy_stats = getenv("SWR_VK_BUFFER_STATS") != NULL;
 }
 int swr_settings_recording_thread(void) { return g_settings.vulkan_recording_thread; }
 /* [Graphics] prebuild_shaders: the shipped-shader pass over the RomFS's system/shd (snxvk_glue.c romfs_files), in the
    background (1, not 2: no count first, no screen), whose shaders the pipeline recipes are made from (pipeline.c) */
 void swr_settings_prepare(int on) { g_settings.prepare_shaders = on ? 1 : 0; }
+/* the renderer's entries snxvk_glue.c calls, through the real Renderer (gpu/renderer.h): the glue then doesn't mirror
+   the struct, whose fields move between upstream versions (SWR_SNXVK_V2) */
+#include "nx/gpu/renderer.h"
+extern const Renderer vk_renderer;
+int swr_r_start(void) { return vk_renderer.start(); }
+void swr_r_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4], u32 transform) {
+    vk_renderer.present_buffer(a, w, h, pitch, layout, bhl, fmt, crop, transform);
+}
+u64 swr_r_screenshot(const char* path) { return vk_renderer.screenshot ? vk_renderer.screenshot(path) : 0; }
+void swr_r_save(int at_exit) {
+    if (vk_renderer.save) vk_renderer.save(at_exit);
+}

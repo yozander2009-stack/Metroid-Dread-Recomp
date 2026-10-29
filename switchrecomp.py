@@ -313,9 +313,10 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if release: cmd += ['-DSWR_RELEASE']
     if os.environ.get('SWR_RUNTIME_DEFS'): cmd += os.environ['SWR_RUNTIME_DEFS'].split()   # e.g. -DSWR_NO_SKIPCUT for a test build
     if snxvk: cmd += ['-DSWR_HAVE_SNXVK', snxvk]
-    if snxvk:   # libsnxvk_<tag>[_nodlss].a is built from src_<tag>: ScarletNX main 112db409 or later there -> snxvk_glue.c's V2
+    if snxvk:   # libsnxvk_<tag>[_nodlss].a is built from src_<tag>: its renderer entries through swr_settings.c's accessors -> snxvk_glue.c's V2
         tag = os.path.basename(snxvk)[len('libsnxvk_'):].split('.')[0].replace('_nodlss', '')
-        if os.path.isfile(os.path.join(RT, 'snxvk', 'src_' + tag, 'nx', 'gpu', 'shader', 'structure.c')): cmd += ['-DSWR_SNXVK_V2']
+        acc = os.path.join(RT, 'snxvk', 'src_' + tag, 'nx', 'gpu', 'vk', 'swr_settings.c')
+        if os.path.isfile(acc) and 'swr_r_start' in open(acc, encoding='utf-8', errors='replace').read(): cmd += ['-DSWR_SNXVK_V2']
     if frontend: cmd += ['-DSWR_HAVE_FRONTEND', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui'), imgui]
     if overlay: cmd += ['-DSWR_HAVE_OVERLAY', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui')]
     if overlay and lx_frontend: cmd += ['-DSWR_HAVE_FRONTEND']
