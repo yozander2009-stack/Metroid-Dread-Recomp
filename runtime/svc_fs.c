@@ -109,6 +109,16 @@ static void romfs_apply_mod(const char* root, const char* name){
    1 Xbox and everything else, Steam Deck included; 2 DualShock 4; 3 DualSense; 4 Switch controllers; 0 none) */
 static const char* const ICON_PACK[]={"Switch to XBOX Layout","Switch to PS4 Layout","Switch to PS5 Layout"};
 static int icon_pack(const char* name){ for(int i=0;i<3;i++) if(!strcmp(name,ICON_PACK[i])) return 1; return 0; }
+/* The Brazilian Portuguese fan translation by JumpmanClub Brasil (GitHub issue #15): it replaces the English text, the
+   Game Over pictures and the font atlas (accented letters), so it applies only with language 9 (Portuguese; the game
+   is given English, svc_core.c game_lang), and after the icon packs, whose atlas would drop the accents otherwise */
+static const char* const PT_PACK="Portuguese (Brazil) - JumpmanClub Brasil";
+static int lang_pack(const char* name){ return !strcmp(name,PT_PACK); }
+static void lang_pack_apply(const char* root){
+  extern int g_opt_lang; if(g_opt_lang!=9 && g_opt_lang!=17) return;
+  char p[1400]; snprintf(p,sizeof p,"%s/%s/romfs",root,PT_PACK);
+  if(!plat_is_dir(p)){ LOG("language: Portuguese, but the translation is not installed: English text\n"); return; }
+  LOG("language: Portuguese (Brazil), fan translation by JumpmanClub Brasil\n"); romfs_apply_mod(root,PT_PACK); }
 static void icon_pack_apply(const char* root){
   extern char g_opt_button_icons[]; extern int backend_pad_family(void);
   const char* want=g_opt_button_icons; int fam=-1;
@@ -128,15 +138,15 @@ static void romfs_apply_mods(void){
   FILE* f=fopen(lo,"r");
   if(f){ char line[600];
     while(fgets(line,sizeof line,f)){ char* s=line; while(*s==' '||*s=='\t') s++; size_t n=strlen(s); while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' ')) s[--n]=0;
-      if(!*s || *s=='#' || *s=='-' || icon_pack(s)) continue; romfs_apply_mod(root,s); }
-    fclose(f); icon_pack_apply(root); return; }
+      if(!*s || *s=='#' || *s=='-' || icon_pack(s) || lang_pack(s)) continue; romfs_apply_mod(root,s); }
+    fclose(f); icon_pack_apply(root); lang_pack_apply(root); return; }
   PDir d; if(plat_dir_open(&d,root)) return;
   char** names=NULL; int n=0, cap=0;
   while(plat_dir_next(&d)) if(d.is_dir && strcmp(d.name,".") && strcmp(d.name,"..")){ if(n==cap){ cap=cap?cap*2:16; names=realloc(names,sizeof(char*)*cap); } names[n++]=strdup(d.name); }
   plat_dir_close(&d);
   qsort(names,n,sizeof(char*),cmpname);
-  for(int i=0;i<n;i++){ if(!icon_pack(names[i])) romfs_apply_mod(root,names[i]); free(names[i]); }
-  free(names); icon_pack_apply(root); }
+  for(int i=0;i<n;i++){ if(!icon_pack(names[i]) && !lang_pack(names[i])) romfs_apply_mod(root,names[i]); free(names[i]); }
+  free(names); icon_pack_apply(root); lang_pack_apply(root); }
 
 static void romfs_build(const char* dir){
   add_dir("",0); dn[0].parent=0; g_romdir_len=strlen(dir);

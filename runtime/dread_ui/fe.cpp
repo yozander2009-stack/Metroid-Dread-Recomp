@@ -393,6 +393,20 @@ static void page_display() {
         if (get("aspect") != "16:9" && !getb("docked")) { set("docked", "1"); flash("Docked mode switched on: the picture shape only applies there"); }
     }
     section("LANGUAGE"); draw_opt("language");
+    if (get("language") == "9") {   // the fan translation, installed by the player (svc_fs.c applies it)
+        std::string err;
+        if (pt_pack_installed()) row_text("Portuguese text", "Installed: the JumpmanClub Brasil fan translation", C_OK);
+        else row_text("Portuguese text", "Not installed yet: the game shows English until you add it", C_WARN);
+        if (row_button("##ptweb", "Download the translation from JumpmanClub Brasil's website", "OPEN"))
+            ShellExecuteW(nullptr, L"open", wide(PT_PACK_URL).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (row_button("##ptzip", "Add the downloaded .zip", "CHOOSE")) { std::string z = pick_file(g_hwnd, "Choose the translation (.zip)", L"Zip archive", L"*.zip");
+            if (!z.empty()) { flash("Installing..."); if (pt_pack_import(z, &err)) flash("Portuguese translation installed"); else flash(err); } }
+        if (row_button("##ptdir", "Add the extracted folder", "CHOOSE")) { std::string d = pick_folder(g_hwnd, "Choose the extracted translation folder");
+            if (!d.empty()) { if (pt_pack_import(d, &err)) flash("Portuguese translation installed"); else flash(err); } }
+        help_text("Metroid Dread has no Portuguese of its own: this is the fan translation by JumpmanClub Brasil (MrVtR, CaninosVermelhos, "
+                  "Davi Prado, hhgo cb, EsaanAlencar). It applies at the next game start. With it on, button symbols inside text "
+                  "stay Switch-style: the translation and the icon packs change the same font texture.");
+    }
 }
 
 static void page_graphics() {
@@ -529,6 +543,7 @@ static void page_mods() {
         Mod& m = g_mods[i]; bool en = m.enabled;
         bool icons = false; for (int k = 0; k < 3; k++) if (m.name == ICON_PACKS[k].name) icons = true;
         if (icons) { row_text(m.name.c_str(), "Button icons: chosen under Controls", C_DIM); continue; }
+        if (m.name == PT_PACK_NAME) { row_text(m.name.c_str(), "Portuguese text: applies with Display > Language > Portuguese", C_DIM); continue; }
         std::string label = fmt("%s   (%d files, %.1f MB)", m.name.c_str(), m.files, m.bytes / 1048576.0);
         if (row_bool(fmt("##mod%d", i).c_str(), label.c_str(), &en)) { m.enabled = en; ch = true; }
         if (ImGui::IsItemFocused()) g_mod_sel = i;
@@ -585,6 +600,7 @@ static void page_about() {
         {"Krydar, Nova77, xSeRosiSx", "Button-icon mods: Switch to XBOX Layout (Krydar), Switch to PS4 Layout (Nova77), Switch to PS5 Layout (xSeRosiSx), downloaded from gamebanana.com when you choose them."},
         {"Xelu's FREE Controller Prompts", "The PlayStation button art in those icon mods."},
         {"Smashicons - Flaticon", "The program icon: Metroid icon created by Smashicons, flaticon.com/free-icons/metroid (Flaticon licence)."},
+        {"JumpmanClub Brasil", "Brazilian Portuguese fan translation (jumpmanclubbrasil.com.br), which you add under Display > Language: MrVtR (Vitor Ribeiro), translator, romhacker and proofreader; CaninosVermelhos (Philipe Rodrigues), Davi Prado and hhgo cb, translators; EsaanAlencar, proofreader."},
         {"theboy181", "60 FPS cutscenes, 21:9 ultrawide and other Dread patches (github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081."},
         {"Dear ImGui by Omar Cornut", "This interface (MIT)."},
         {"SDL2 (Sam Lantinga and contributors)", "Controller support (zlib licence)."},
@@ -736,6 +752,12 @@ static void test_tick() {
         if (f) { fprintf(f, "report msg=%s url=%s\n", g_flash.c_str(), g_report_url.c_str()); fclose(f); }
         g_quit = true;
     }
+    if (getenv("SWR_FE_PT_IMPORT") && g_frame_no == 30) {   // installs the Portuguese translation from that path, writes the result, quits
+        std::string err; bool ok = pt_pack_import(getenv("SWR_FE_PT_IMPORT"), &err);
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "pt_import ok=%d installed=%d err=%s\n", ok, pt_pack_installed(), err.c_str()); fclose(f); }
+        g_quit = true;
+    }
     if (getenv("SWR_FE_UNDO")) {   // presses UNDO once, writes what it said to the result file, then quits
         static int done; if (!done) { done = 1; std::string m; bool rb = false, rs = false; bool ok = update_rollback(&m, &rb, &rs);
             const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
@@ -795,8 +817,8 @@ extern "C" int fe_run(void* hwnd) {
     g_old = find_old_installs();
     if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
     g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
-    // Metroid Dread has no Portuguese (9, pt-BR 17): the game is given English then (svc_core.c game_lang), and the menu shows that
-    { std::string l = g_ini.get("language", ""); if (l == "9" || l == "17") { set("language", "1"); g_ini.save(); g_ini_dirty = false; } }
+    // pt-BR (17) is the menu's Portuguese (9): the fan translation applies with either (svc_fs.c), the list shows 9
+    { std::string l = g_ini.get("language", ""); if (l == "17") { set("language", "9"); g_ini.save(); g_ini_dirty = false; } }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
     GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;

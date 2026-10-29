@@ -34,7 +34,24 @@ long long file_size(const std::string& p) {
     WIN32_FILE_ATTRIBUTE_DATA d; if (!GetFileAttributesExW(wide(p).c_str(), GetFileExInfoStandard, &d)) return -1;
     return ((long long)d.nFileSizeHigh << 32) | d.nFileSizeLow;
 }
-bool make_dirs(const std::string& p) { int r = SHCreateDirectoryExW(nullptr, wide(p).c_str(), nullptr); return r == ERROR_SUCCESS || r == ERROR_ALREADY_EXISTS || r == ERROR_FILE_EXISTS; }
+/* a drive path past the classic 260-character limit, with the \\?\ prefix that lifts it (mods nest deep: the Portuguese
+   translation's Yuzu layout is 11 folders down, and a download folder adds its own); other paths as they are */
+static std::wstring lp(const std::string& s) {
+    std::wstring w = wide(s);
+    if (w.size() < 240 || w.size() < 3 || w[1] != L':') return w;
+    for (auto& c : w) if (c == L'/') c = L'\\';
+    return L"\\\\?\\" + w;
+}
+bool make_dirs(const std::string& p) {
+    if (p.size() < 240) { int r = SHCreateDirectoryExW(nullptr, wide(p).c_str(), nullptr); return r == ERROR_SUCCESS || r == ERROR_ALREADY_EXISTS || r == ERROR_FILE_EXISTS; }
+    /* SHCreateDirectoryExW takes no long paths: one level at a time */
+    for (size_t i = 3; i <= p.size(); i++)
+        if (i == p.size() || p[i] == '\\' || p[i] == '/') {
+            std::wstring w = lp(p.substr(0, i));
+            if (!CreateDirectoryW(w.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+        }
+    return true;
+}
 std::string read_text(const std::string& p) {
     FILE* f = _wfopen(wide(p).c_str(), L"rb"); if (!f) return {};
     std::string s; char b[65536]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); return s;
@@ -114,7 +131,7 @@ bool recycle(const std::string& p) {
 }
 
 template <class F> static void walk(const std::string& root, const std::string& rel, F&& f) {
-    WIN32_FIND_DATAW d; HANDLE h = FindFirstFileW(wide(join(join(root, rel), "*")).c_str(), &d); if (h == INVALID_HANDLE_VALUE) return;
+    WIN32_FIND_DATAW d; HANDLE h = FindFirstFileW(lp(join(join(root, rel), "*")).c_str(), &d); if (h == INVALID_HANDLE_VALUE) return;
     do { std::string n = utf8(d.cFileName); if (n == "." || n == "..") continue;
          std::string r = rel.empty() ? n : rel + "\\" + n;
          if (d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;   // never follow links
@@ -133,7 +150,7 @@ bool copy_tree(const std::string& src, const std::string& dst, std::string* err,
         if (!ok) return; std::string d = join(dst, r);
         if (dir) { if (!make_dirs(d)) { ok = false; if (err) *err = "cannot create " + d; } return; }
         if (!overwrite && file_exists(d)) return;
-        if (!CopyFileW(wide(join(src, r)).c_str(), wide(d).c_str(), FALSE)) { ok = false; if (err) *err = "cannot copy " + r; }
+        if (!CopyFileW(lp(join(src, r)).c_str(), lp(d).c_str(), FALSE)) { ok = false; if (err) *err = "cannot copy " + r; }
     });
     return ok;
 }
@@ -393,7 +410,12 @@ bool mod_import_folder(const std::string& src, const std::string& name, std::str
     if (!copy_tree(rf, dst, err, true)) return false;
     auto m = mods_list(); mods_write(m); return true;
 }
+static bool zip_into(const std::string& zip, const std::string& name, std::string* err);
 bool mod_import_zip(const std::string& zip, std::string* err) {
+    std::string name = zip.substr(zip.find_last_of("\\/") + 1); name = name.substr(0, name.find_last_of('.'));
+    return zip_into(zip, name, err);
+}
+static bool zip_into(const std::string& zip, const std::string& name, std::string* err) {
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
     std::string dir = join(utf8(tmp), "dreadmod_" + now_stamp()); make_dirs(dir);
     wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
@@ -402,7 +424,6 @@ bool mod_import_zip(const std::string& zip, std::string* err) {
     if (!CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) { if (err) *err = "tar.exe could not start"; return false; }
     WaitForSingleObject(pi.hProcess, INFINITE); DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     bool ok = code == 0;
-    std::string name = zip.substr(zip.find_last_of("\\/") + 1); name = name.substr(0, name.find_last_of('.'));
     if (!ok) { if (err) *err = "The zip could not be extracted."; }
     else ok = mod_import_folder(dir, name, err);
     recycle(dir);
@@ -432,6 +453,18 @@ bool icon_pack_get(int i, std::string* err) {
     if (code != 0 && err) *err = "The download could not be extracted.";
     recycle(dir);
     return ok;
+}
+// Brazilian Portuguese fan translation by JumpmanClub Brasil (GitHub issue #15); its name must match svc_fs.c PT_PACK.
+// Not shipped with the game (its textures and font are edits of the game's own files): players add their download
+const char* const PT_PACK_NAME = "Portuguese (Brazil) - JumpmanClub Brasil";
+const char* const PT_PACK_URL = "https://www.jumpmanclubbrasil.com.br/post/metroid-dread";
+bool pt_pack_installed() { return file_exists(join(join(join(mods_dir(), PT_PACK_NAME), "romfs"), "system\\localization\\us_english.txt")); }
+bool pt_pack_import(const std::string& src, std::string* err) {
+    std::string low = src; for (auto& ch : low) ch = (char)tolower((unsigned char)ch);
+    bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
+    if (!(zip ? zip_into(src, PT_PACK_NAME, err) : mod_import_folder(src, PT_PACK_NAME, err))) return false;
+    if (!pt_pack_installed()) { if (err) *err = "That isn't the Metroid Dread translation: no system/localization/us_english.txt inside."; recycle(join(mods_dir(), PT_PACK_NAME)); return false; }
+    return true;
 }
 bool mod_remove(const std::string& name) {
     bool ok = recycle(join(mods_dir(), name));   // to the Recycle Bin, not deleted

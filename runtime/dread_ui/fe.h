@@ -87,6 +87,11 @@ std::vector<Mod> mods_list();
 void mods_write(const std::vector<Mod>& m);
 bool mod_import_folder(const std::string& src, const std::string& name, std::string* err);
 bool mod_import_zip(const std::string& zip, std::string* err);
+// the Brazilian Portuguese fan translation (JumpmanClub Brasil): installed as the mod svc_fs.c applies with language 9
+extern const char* const PT_PACK_NAME;
+extern const char* const PT_PACK_URL;
+bool pt_pack_installed();
+bool pt_pack_import(const std::string& folder_or_zip, std::string* err);   // the download as it comes (Yuzu layout is fine)
 bool mod_remove(const std::string& name);
 // button-icon packs (Controls > Button icons): fixed folder names the runtime picks from (svc_fs.c)
 struct IconPack { const char* name; const char* label; const char* author; const char* url; };
