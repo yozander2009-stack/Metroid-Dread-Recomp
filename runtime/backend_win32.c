@@ -213,15 +213,30 @@ static const char* HELP=
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
   "F11 / Alt+Enter = fullscreen   Esc = quit";
 
+/* keyboard_map (main.c): 24 entries, buttons 0..15 then the stick keys 40..47 (turned into axes later), each up to
+   two Windows key codes joined by '+', 0 = none. Esc, Tab and the F keys are handled before this table. */
+extern char g_opt_kb_map[256];
+static const char KB_DEFAULT[]="88+32,90,67,86,0,0,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
 static u64 keymap(WPARAM k){
-  switch(k){ case 'X': case VK_SPACE: return 1ull<<0; case 'Z': return 1ull<<1; case 'C': return 1ull<<2; case 'V': return 1ull<<3;
-    case 'Q': return 1ull<<6; case 'E': return 1ull<<7; case '1': return 1ull<<8; case '3': return 1ull<<9;
-    case VK_RETURN: return 1ull<<10; case VK_BACK: return 1ull<<11;
-    case VK_LEFT: return 1ull<<12; case VK_UP: return 1ull<<13; case VK_RIGHT: return 1ull<<14; case VK_DOWN: return 1ull<<15;
-    /* stick keys, turned into axes later */
-    case 'A': return 1ull<<40; case 'W': return 1ull<<41; case 'D': return 1ull<<42; case 'S': return 1ull<<43;
-    case 'J': return 1ull<<44; case 'I': return 1ull<<45; case 'L': return 1ull<<46; case 'K': return 1ull<<47; }
-  return 0; }
+  static u64 t[256]; static char built[256]; static int ready;
+  if(!ready || strcmp(built,g_opt_kb_map)){
+    u64 n[256]; memset(n,0,sizeof n); int ok=1;
+    for(int pass=0;pass<2;pass++){
+      const char* p= pass? KB_DEFAULT : g_opt_kb_map; if(!pass && !*p) continue;
+      memset(n,0,sizeof n); ok=1;
+      for(int i=0;i<24 && ok;i++){
+        int bit= i<16? i : 40+(i-16);
+        for(;;){ char* e; long v=strtol(p,&e,10); if(e==p || v<0 || v>255){ ok=0; break; }
+          if(v) n[v]|=1ull<<bit; p=e; if(*p=='+'){ p++; continue; } break; }
+        if(ok && i<23){ if(*p!=',') ok=0; else p++; }
+      }
+      if(ok && *p) ok=0;
+      if(ok) break;
+      if(!pass){ static int said; if(!said){ said=1; LOG("input: keyboard_map is not valid, using the default keys\n"); } }
+    }
+    memcpy(t,n,sizeof t); snprintf(built,sizeof built,"%s",g_opt_kb_map); ready=1;
+  }
+  return t[k&255]; }
 
 extern int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result);   /* dread_ui/fe.cpp */
 extern int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l);   /* dread_ui/ov.cpp: 1 = the menu took it */
@@ -547,6 +562,8 @@ void video_poll(void){
     u64 el=(plat_ns()-g_start)/1000000ull; const char* p=g_script;
     while(*p){ u64 t=strtoull(p,(char**)&p,10); if(*p!=':') break; p++; u64 m=strtoull(p,(char**)&p,16); if(el>=t && el<t+300){ b|=m; if(m&(1ull<<16))lx=-32767; if(m&(1ull<<18))lx=32767; if(m&(1ull<<17))ly=32767; if(m&(1ull<<19))ly=-32767; if(m&(1ull<<20))rx=-32767; if(m&(1ull<<22))rx=32767; if(m&(1ull<<21))ry=32767; if(m&(1ull<<23))ry=-32767; } if(*p==',') p++; } }
   test_input_apply(&b,&lx,&ly,&rx,&ry);
+  { extern u64 swr_menu_buttons(u64); b=swr_menu_buttons(b); }   /* menu_buttons=swap (main.c), after the test replay like a player's own presses */
+  { extern volatile u64 g_cheat_keys; g_cheat_keys=b; }   /* cheats.c keypress conditions */
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* dread_ui/ov.cpp: 1 = the menu has the controller */
     if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; } }

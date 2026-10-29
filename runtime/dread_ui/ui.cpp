@@ -482,7 +482,7 @@ static std::vector<Opt> build_options() {
     // Display
     B("docked", "Display", "Display", "Docked (TV) mode", LIVE_RESTART, "1", "Docked: the game renders 1600\xC3\x97" "900. Handheld: 1280\xC3\x97" "720.");
     B("fullscreen", "Display", "Display", "Fullscreen", LIVE_YES, "1", "F11 or Alt+Enter also switches it.");
-    C("aspect", "Display", "Display", "Picture shape", LIVE_RESTART, "16:9", {{"16:9", "16:9"}, {"21:9", "21:9 ultrawide"}, {"16:10", "16:10"}},
+    C("aspect", "Display", "Display", "Picture shape", LIVE_RESTART, "16:9", {{"16:9", "16:9"}, {"21:9", "21:9 ultrawide"}, {"32:9", "32:9 super-ultrawide"}, {"16:10", "16:10"}},
       "21:9 is theboy181's patch (commissioned by Nikorasu081); 16:10 uses the same spot for 1440\xC3\x97" "900 (Steam Deck, 1920\xC3\x97" "1200). "
       "Both need Docked mode and may cut off a little in videos and some menus.");
     C("language", "Display", "Display", "Language", LIVE_RESTART, "1", {{"0", "Japanese"}, {"1", "English (US)"}, {"2", "French"}, {"3", "German"},
@@ -530,6 +530,10 @@ static std::vector<Opt> build_options() {
     C("button_icons", "Input", "Controls", "Button icons", LIVE_RESTART, "auto",
       {{"auto", "Automatic"}, {"switch", "Switch (original)"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}},
       "Automatic: from the controller connected when the game starts. Xbox controllers and the Steam Deck get Xbox icons, DualShock 4 PS4 icons, DualSense PS5 icons, Switch controllers the originals.");
+    C("audio_channels", "Audio", "Audio", "Speakers", LIVE_RESTART, "stereo", {{"stereo", "Stereo"}, {"5.1", "5.1 surround"}},
+      "5.1: the game's own surround mix (front, centre, subwoofer, rear) goes to your 5.1 speakers or receiver. On stereo speakers Windows mixes it down.");
+    C("menu_buttons", "Input", "Controls", "Confirm / back in menus", LIVE_YES, "game", {{"game", "As in the game (A right, B bottom)"}, {"swap", "Swapped (confirm on the bottom button)"}},
+      "Swapped: in the game's menus (pause, map, options, dialogs, title) A and B change places, so the bottom button confirms like on Xbox and PlayStation. Gameplay buttons stay the same.");
     C("controller_api", "Input", "Controls", "Controller support", LIVE_RESTART, "auto", {{"auto", "Automatic"}, {"sdl", "SDL2"}, {"xinput", "XInput"}},
       "Automatic: SDL2 (Switch Pro, Joy-Con, DualShock 4, DualSense, 8BitDo, Xbox) when SDL2.dll is next to the game, else XInput.");
     I("controller_index", "Input", "Controls", "Player 1 controller", LIVE_YES, "0", 0, 8, 1, "0 = any connected controller.", false);

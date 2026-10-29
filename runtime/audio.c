@@ -16,6 +16,7 @@
 #include <dlfcn.h>   /* SDL2 audio, loaded at run time */
 #endif
 #define AF 240
+int g_opt_audio_51;   /* [Audio] audio_channels=5.1 (main.c): aoutput6 below, Windows */
 #define AC 6
 #define AM 64
 #define AR 1024
@@ -153,6 +154,53 @@ static int wasapi_write(const i16* pcm){
   if(SUCCEEDED(hr)){ memcpy(d,pcm,AF*4); hr=g_wrender->lpVtbl->ReleaseBuffer(g_wrender,AF,0); }
   if(FAILED(hr)){ WARN("audio: WASAPI output lost (%08lx), trying again in a few seconds\n",(unsigned long)hr); wasapi_close(); return -1; }
   return 1; }
+/* audio_channels=5.1 (GitHub issue #28): the game mixes into a six-channel device sink (FL FR C LFE RL RR) whatever
+   the output; the stereo path plays FL/FR only. This sends all six to the default device through a second WASAPI shared
+   client (WAVEFORMATEXTENSIBLE, KSAUDIO_SPEAKER_5POINT1, AUTOCONVERTPCM: Windows downmixes for a stereo device).
+   Same chunking and 100 ms cap as the stereo WASAPI path. Returns 0 when it can't play (not 5.1, it would not open):
+   the caller then uses the stereo output. Tried again every 3 s after a failure. */
+static IAudioClient* g_w6client; static IAudioRenderClient* g_w6render; static UINT32 g_w6frames;
+static void wasapi6_close(void){
+  if(g_w6client) g_w6client->lpVtbl->Stop(g_w6client);
+  if(g_w6render){ g_w6render->lpVtbl->Release(g_w6render); g_w6render=NULL; }
+  if(g_w6client){ g_w6client->lpVtbl->Release(g_w6client); g_w6client=NULL; } }
+static int wasapi6_open(void){
+  IMMDeviceEnumerator* en=NULL; IMMDevice* dev=NULL; HRESULT hr;
+  CoInitializeEx(NULL,COINIT_MULTITHREADED);
+  hr=CoCreateInstance(&swr_CLSID_MMDeviceEnumerator,NULL,CLSCTX_ALL,&swr_IID_IMMDeviceEnumerator,(void**)&en);
+  if(FAILED(hr)) return 0;
+  hr=en->lpVtbl->GetDefaultAudioEndpoint(en,eRender,eConsole,&dev); en->lpVtbl->Release(en);
+  if(FAILED(hr)) return 0;
+  hr=dev->lpVtbl->Activate(dev,&swr_IID_IAudioClient,CLSCTX_ALL,NULL,(void**)&g_w6client); dev->lpVtbl->Release(dev);
+  if(FAILED(hr)){ g_w6client=NULL; return 0; }
+  static const GUID pcm_sub={0x00000001,0x0000,0x0010,{0x80,0x00,0x00,0xAA,0x00,0x38,0x9B,0x71}};   /* KSDATAFORMAT_SUBTYPE_PCM */
+  WAVEFORMATEXTENSIBLE f; memset(&f,0,sizeof f);
+  f.Format.wFormatTag=WAVE_FORMAT_EXTENSIBLE; f.Format.nChannels=6; f.Format.nSamplesPerSec=48000; f.Format.wBitsPerSample=16;
+  f.Format.nBlockAlign=12; f.Format.nAvgBytesPerSec=48000*12; f.Format.cbSize=22;
+  f.Samples.wValidBitsPerSample=16; f.dwChannelMask=0x3F /* FL FR FC LFE BL BR */; f.SubFormat=pcm_sub;
+  hr=g_w6client->lpVtbl->Initialize(g_w6client,AUDCLNT_SHAREMODE_SHARED,0x80000000u|0x08000000u,1000000,0,(WAVEFORMATEX*)&f,NULL);
+  if(SUCCEEDED(hr)) hr=g_w6client->lpVtbl->GetBufferSize(g_w6client,&g_w6frames);
+  if(SUCCEEDED(hr)) hr=g_w6client->lpVtbl->GetService(g_w6client,&swr_IID_IAudioRenderClient,(void**)&g_w6render);
+  if(SUCCEEDED(hr)) hr=g_w6client->lpVtbl->Start(g_w6client);
+  if(FAILED(hr)){ WARN("audio: 5.1 output could not start (%08lx): stereo instead\n",(unsigned long)hr); wasapi6_close(); return 0; }
+  LOG("audio: 5.1 output opened through WASAPI, six channels PCM16 at 48000 Hz (%u frames buffered at most)\n",(unsigned)g_w6frames);
+  return 1; }
+static int aoutput6(const i16* pcm6){
+  static int failed; static u64 retry_ns, writes, dropped; static SRWLOCK lock=SRWLOCK_INIT;
+  if(!g_opt_audio_51 || getenv("SWR_MUTE_AUDIO")) return 0;
+  AcquireSRWLockExclusive(&lock);
+  if(!g_w6client && (!failed || plat_ns()-retry_ns>3000000000ull)){ retry_ns=plat_ns(); failed= !wasapi6_open(); }
+  int ok=0;
+  if(g_w6client){
+    UINT32 pad=0; BYTE* d=NULL; HRESULT hr=g_w6client->lpVtbl->GetCurrentPadding(g_w6client,&pad);
+    if(SUCCEEDED(hr) && g_w6frames-pad<AF){ dropped++; ok=1; }   /* full: this chunk is dropped, as on the stereo path */
+    else{
+      if(SUCCEEDED(hr)) hr=g_w6render->lpVtbl->GetBuffer(g_w6render,AF,&d);
+      if(SUCCEEDED(hr)){ memcpy(d,pcm6,AF*12); hr=g_w6render->lpVtbl->ReleaseBuffer(g_w6render,AF,0); }
+      if(FAILED(hr)){ WARN("audio: 5.1 output lost (%08lx), trying again in a few seconds\n",(unsigned long)hr); wasapi6_close(); failed=1; }
+      else{ writes++; ok=1; if(writes%2000==0) LOG("audio: %llu 5.1 chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped); } } }
+  ReleaseSRWLockExclusive(&lock);
+  return ok; }
 #endif
 /* the output devices the old waveOut interface sees, in the log when it couldn't open one */
 #ifdef _WIN32
@@ -388,6 +436,14 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
     {static int checked;static FILE*csv;if(!checked){checked=1;const char*e=getenv("SWR_AUDIO_MIX_CSV");if(e&&*e){csv=fopen(e,"w");if(csv)fprintf(csv,"ns,tick,active,sink_count,input,source,rms,peak\n");}}
       if(csv&&r->ticks%40==0){for(u32 ch=0;ch<r->sink_count;ch++){u32 source=r->sink_inputs[ch];if(source>=24)continue;double sum=0;float peak=0;for(int n=0;n<AF;n++){float value=r->samples[(size_t)source*AF+n]*final_volume;sum+=(double)value*value;if(fabsf(value)>peak)peak=fabsf(value);}fprintf(csv,"%llu,%llu,%u,%u,%u,%u,%.8f,%.8f\n",(unsigned long long)plat_ns(),(unsigned long long)r->ticks,active,r->sink_count,ch,source,sqrt(sum/AF),peak);}fflush(csv);}}
     for(int n=0;n<AF;n++)for(int ch=0;ch<2;ch++){float sample=astereo_sample(r,n,ch,final_volume);if(!isfinite(sample))sample=0;float absolute=fabsf(sample);if(absolute>peak)peak=absolute;if(sample>0.9999695f)sample=0.9999695f;if(sample< -1)sample= -1;pcm[n*2+ch]=(i16)lrintf(sample*32768);}
-    aoutput(pcm);acapture(pcm);if(r->ticks%1000==0)LOG("audio: %u active voices, final mix volume %.3f, peak %.4f, sink channels %u\n",active,final_volume,peak,r->sink_count);
+    {int sent6=0;
+#if defined(_WIN32) && !defined(__TINYC__)
+      if(g_opt_audio_51&&r->sink_count==6){i16 pcm6[AF*6];   /* audio_channels=5.1: the six sink channels as they are */
+        for(int n=0;n<AF;n++)for(int ch=0;ch<6;ch++){u32 source=r->sink_inputs[ch];float sample=source<24?r->samples[(size_t)source*AF+n]*final_volume:0;
+          if(!isfinite(sample))sample=0;if(sample>0.9999695f)sample=0.9999695f;if(sample< -1)sample= -1;pcm6[n*6+ch]=(i16)lrintf(sample*32768);}
+        sent6=aoutput6(pcm6);}
+#endif
+      if(!sent6)aoutput(pcm);}
+    acapture(pcm);if(r->ticks%1000==0)LOG("audio: %u active voices, final mix volume %.3f, peak %.4f, sink channels %u\n",active,final_volume,peak,r->sink_count);
   }r->ticks++;
 }

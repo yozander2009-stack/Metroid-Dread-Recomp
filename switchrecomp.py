@@ -30,7 +30,7 @@ import nxloader, codegen, metroid_perf
 
 RT = os.path.join(HERE, 'runtime')
 RUNTIME_SRC = ['plat', 'mem', 'kernel', 'ipc', 'svc_core', 'svc_hid', 'svc_fs', 'svc_vi', 'nvdrv', 'gpu', 'gpu_engines',
-               'gpu_3d', 'loader', 'main', 'audio', 'svc_launcher']
+               'gpu_3d', 'loader', 'main', 'audio', 'svc_launcher', 'cheats']
 ABI = 1
 # portable compilers next to us: tcc\, the GCC package (gcc\), w64devkit
 CC_DIRS = [os.path.join(HERE, *d) for d in (('tcc',), ('tools', 'tcc'), ('gcc', 'bin'), ('gcc', 'Library', 'bin'),

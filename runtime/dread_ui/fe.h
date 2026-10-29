@@ -93,6 +93,13 @@ extern const char* const PT_PACK_URL;
 bool pt_pack_installed();
 bool pt_pack_import(const std::string& folder_or_zip, std::string* err);   // the download as it comes (Yuzu layout is fine)
 bool mod_remove(const std::string& name);
+// cheats (runtime cheats.c): <data>/cheats/*.txt in Atmosphere format; which run is cheats/enabled.txt
+struct CheatEntry { std::string name, file; bool on, master; };
+std::string cheats_dir();
+std::string game_build_id();   // exefs/main's build id, 16 hex digits (Atmosphere's cheat file name)
+std::vector<CheatEntry> cheats_list();
+void cheats_write(const std::vector<CheatEntry>& c);
+bool cheat_import(const std::string& txt, std::string* err);
 // button-icon packs (Controls > Button icons): fixed folder names the runtime picks from (svc_fs.c)
 struct IconPack { const char* name; const char* label; const char* author; const char* url; };
 extern const IconPack ICON_PACKS[3];

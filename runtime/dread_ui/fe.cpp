@@ -436,16 +436,73 @@ static void page_gameplay() {
 #endif
    
     section("LOADING AND RIDES"); draw_opt("fast_loading"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
+    section("CHEATS");
+    help_text(fmt("Atmosphere cheat files (.txt) for version 2.1.0 (build id %s). Cheats that change values (energy, missiles, items) work; "
+                  "ones that patch the game's code can't, because the code is recompiled. You can also switch them in the in-game menu (F1).", game_build_id().c_str()).c_str());
+    { static std::vector<CheatEntry> ch; if (g_focus_first || ch.empty()) ch = cheats_list(); bool changed = false;
+      if (ch.empty()) row_text("Cheats", "None yet: add a cheat file below.", C_DIM);
+      for (size_t i = 0; i < ch.size(); i++) {
+          if (ch[i].master) { row_text(ch[i].name.c_str(), "Always on (master code)", C_DIM); continue; }
+          bool on = ch[i].on; if (row_bool(fmt("##ch%d", (int)i).c_str(), ch[i].name.c_str(), &on)) { ch[i].on = on; changed = true; } }
+      if (changed) { cheats_write(ch); flash("Cheats saved"); }
+      if (row_button("##chadd", "Add a cheat file (.txt)", "CHOOSE")) {
+          std::string f = pick_file(g_hwnd, "Choose a cheat file", L"Cheats", L"*.txt");
+          if (!f.empty()) { std::string err; if (cheat_import(f, &err)) { ch = cheats_list(); flash("Cheat file added"); } else flash(err); } }
+      if (row_button("##chdir", "Cheats folder", "OPEN")) { make_dirs(cheats_dir()); open_in_explorer(cheats_dir()); } }
 }
 
 static void page_audio() {
     page_title("AUDIO", "");
     section("OUTPUT"); draw_opt("volume");
+    section("SPEAKERS"); draw_opt("audio_channels");
     section("COMPATIBILITY"); draw_opt("audio_surround_downmix");
 }
 
 static const char* const GAME_BUTTONS[17] = {"A", "B", "X", "Y", "Left stick click", "Right stick click", "L", "R", "ZL", "ZR", "+ (pause)", "- (map)",
     "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Disabled"};
+// keyboard_map (main.c, backend_win32.c keymap): 24 actions, each up to two Windows key codes
+static const char KB_DEFAULT[] = "88+32,90,67,86,0,0,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
+static const char* const KB_ACTIONS[24] = {"A", "B (jump)", "X", "Y (shoot)", "Left stick click", "Right stick click", "L (free aim)", "R (missiles)", "ZL", "ZR",
+    "+ (pause)", "- (map)", "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Move left", "Move up", "Move right", "Move down",
+    "Right stick left", "Right stick up", "Right stick right", "Right stick down"};
+static int g_kb_capture = -1;   // the action waiting for a key press, -1 = none
+static void kb_parse(const std::string& m, int k[24][2]) {
+    for (int pass = 0; pass < 2; pass++) {
+        const char* p = pass ? KB_DEFAULT : m.c_str(); if (!pass && !*p) continue;
+        bool ok = true; memset(k, 0, sizeof(int) * 48);
+        for (int i = 0; i < 24 && ok; i++) {
+            for (int j = 0;; j++) { char* e; long v = strtol(p, &e, 10); if (e == p || v < 0 || v > 255 || j > 1) { ok = false; break; }
+                k[i][j] = (int)v; p = e; if (*p == '+') { p++; continue; } break; }
+            if (ok && i < 23) { if (*p != ',') ok = false; else p++; }
+        }
+        if (ok && !*p) return;
+    }
+}
+static std::string kb_string(int k[24][2]) {
+    std::string v; for (int i = 0; i < 24; i++) { if (i) v += ","; v += std::to_string(k[i][0]); if (k[i][1]) v += "+" + std::to_string(k[i][1]); }
+    return v;
+}
+static std::string key_name(int vk) {
+    switch (vk) { case 0: return "-"; case VK_SPACE: return "Space"; case VK_RETURN: return "Enter"; case VK_BACK: return "Backspace";
+        case VK_LEFT: return "Left arrow"; case VK_RIGHT: return "Right arrow"; case VK_UP: return "Up arrow"; case VK_DOWN: return "Down arrow";
+        case VK_SHIFT: return "Shift"; case VK_CONTROL: return "Ctrl"; case VK_MENU: return "Alt"; }
+    UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC); LONG lp = (LONG)(sc << 16);
+    if (vk == VK_INSERT || vk == VK_DELETE || vk == VK_HOME || vk == VK_END || vk == VK_PRIOR || vk == VK_NEXT || vk == VK_DIVIDE) lp |= 1 << 24;
+    char b[64]; if (sc && GetKeyNameTextA(lp, b, sizeof b) > 0) return b;
+    return fmt("Key %d", vk);
+}
+static bool kb_reserved(int vk) { return vk == VK_ESCAPE || vk == VK_TAB || (vk >= VK_F1 && vk <= VK_F24) || vk == VK_LWIN || vk == VK_RWIN; }
+static void kb_assign(int vk) {
+    int k[24][2]; kb_parse(get("keyboard_map"), k); std::string moved;
+    for (int i = 0; i < 24; i++) for (int j = 0; j < 2; j++) if (i != g_kb_capture && k[i][j] == vk) {   // a key does one thing
+        k[i][j] = 0; if (j == 0) { k[i][0] = k[i][1]; k[i][1] = 0; } moved = KB_ACTIONS[i]; }
+    k[g_kb_capture][0] = vk; k[g_kb_capture][1] = 0;
+    std::string v = kb_string(k); set("keyboard_map", v == KB_DEFAULT ? "" : v);
+    flash(moved.empty() ? fmt("%s = %s", KB_ACTIONS[g_kb_capture], key_name(vk).c_str())
+                        : fmt("%s = %s (taken from %s)", KB_ACTIONS[g_kb_capture], key_name(vk).c_str(), moved.c_str()));
+    g_kb_capture = -1;
+}
+
 static void page_controls() {
     page_title("CONTROLS", "Pair Bluetooth controllers in Windows Settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
                "DualSense, 8BitDo and Xbox controllers over USB or Bluetooth.");
@@ -502,6 +559,7 @@ static void page_controls() {
     if (row_button("##rt", "Test rumble", "PULSE")) { pads_rumble(atoi(get("rumble").c_str())); SetTimer(g_hwnd, 77, 300, nullptr); }
     draw_opt("menu_shortcut");
     section("GAME BUTTONS");
+    draw_opt("menu_buttons");
     help_text("Physical position on your controller \xE2\x86\x92 the button Metroid Dread receives. Applies in the game right away. Keyboard and sticks are unchanged.");
     {
         std::string m = get("controller_map"); int map[16]; for (int i = 0; i < 16; i++) map[i] = i;
@@ -524,9 +582,16 @@ static void page_controls() {
               else { memcpy(g_nav.bind, b, sizeof b); flash("Two actions share a button: pick a different one (not saved until each action has its own)"); } }
     if (row_button("##nr", "Reset menu buttons", "RESET")) { for (int i = 0; i < NAV_COUNT; i++) g_nav.bind[i] = NAV_DEFAULT[i]; set("launcher_bindings", bindings_to_string(g_nav.bind)); flash("Menu buttons reset"); }
     help_text("Locked out? Hold + and - together for 3 seconds on any screen, or use the keyboard (arrows, Enter, Esc) or the mouse.");
-    section("KEYBOARD (BUILT IN)");
-    const char* kb[][2] = {{"D-pad", "Arrow keys"}, {"Left stick", "W A S D"}, {"Right stick", "I J K L"}, {"A", "X or Space"}, {"B (jump)", "Z"}, {"X", "C"}, {"Y", "V"},
-                           {"L / R", "Q / E"}, {"ZL / ZR", "1 / 3"}, {"+ (pause) / - (map)", "Enter / Backspace"}, {"Menu", "F1"}, {"Screenshot", "F3 (F8 full resolution)"},
+    section("KEYBOARD");
+    help_text("Press SET, then the key. A key does one thing: giving it to another action takes it from the old one. Esc cancels. Esc, Tab and the F keys keep their jobs.");
+    { int k[24][2]; kb_parse(get("keyboard_map"), k);
+      for (int i = 0; i < 24; i++) {
+          std::string keys = g_kb_capture == i ? "press a key..." : key_name(k[i][0]) + (k[i][1] ? " or " + key_name(k[i][1]) : "");
+          if (row_button(fmt("##kb%d", i).c_str(), fmt("%s:  %s", KB_ACTIONS[i], keys.c_str()).c_str(), g_kb_capture == i ? "CANCEL" : "SET"))
+              g_kb_capture = g_kb_capture == i ? -1 : i;
+      }
+      if (row_button("##kbr", "Default keys (WASD, X/Space, Z, C, V, arrows)", "RESET")) { set("keyboard_map", ""); g_kb_capture = -1; flash("Keyboard reset to the default keys"); } }
+    const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8 full resolution)"},
                            {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"}, {"Fast forward", "Tab"}, {"Quit", "Esc"},
                            {"Free aim (L)", "Hold right mouse button, move the mouse"}, {"Shoot (Y)", "Left mouse button"}, {"Missiles (R)", "Middle mouse button"}};
     for (auto& r : kb) row_text(r[0], r[1]);
@@ -798,6 +863,14 @@ extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const c
 }
 
 extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result) {
+    if (g_kb_capture >= 0 && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) && !(l & (1LL << 30))) {   // Controls > Keyboard: SET waits for a key
+        int vk = (int)w;
+        if (vk == VK_ESCAPE) { g_kb_capture = -1; flash("Not changed"); }
+        else if (kb_reserved(vk)) flash(fmt("%s is reserved: pick another key", key_name(vk).c_str()));
+        else if (vk > 0 && vk < 256) kb_assign(vk);
+        *result = 0; return 1;
+    }
+    if (g_kb_capture >= 0 && (m == WM_KEYUP || m == WM_SYSKEYUP || m == WM_CHAR || m == WM_SYSCHAR)) { *result = 0; return 1; }
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler((HWND)h, m, (WPARAM)w, (LPARAM)l)) { *result = 1; return 1; }
     switch (m) {
     case WM_SIZE: if (w != SIZE_MINIMIZED) g_resize = true; *result = 0; return 1;

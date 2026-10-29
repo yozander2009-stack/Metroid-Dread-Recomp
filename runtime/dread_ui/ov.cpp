@@ -25,6 +25,7 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
+extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); void cheats_set(int, int); }   // runtime cheats.c
 
 extern "C" {
 void settings_queue(const char* k, const char* v);
@@ -116,16 +117,19 @@ void tab_content(int t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
     case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
-    case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
+    case 2: if (cheats_count() > 0) { section("CHEATS");
+                for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue;
+                    bool on = cheats_is_on(i) != 0; if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on)) cheats_set(i, on ? 1 : 0); } }
+            section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
 #ifndef SWR_NO_SKIPCUT
         opt_row("skip_cutscenes");
 #endif
        
             section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
-    case 3: section("OUTPUT"); opt_row("volume"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
-    case 4: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_sensitivity");
+    case 3: section("OUTPUT"); opt_row("volume"); section("SPEAKERS"); opt_row("audio_channels"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
+    case 4: section("MENUS"); opt_row("menu_buttons"); section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
-            help_text("Button mapping and menu buttons are on the Play screen's Controls page."); break;
+            help_text("Controller buttons, keyboard keys and menu navigation are set on the Play screen's Controls page."); break;
     default: {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},

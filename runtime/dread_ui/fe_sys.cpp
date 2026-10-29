@@ -373,6 +373,50 @@ bool make_report(const std::string& info, std::string* out, std::string* err) {
 
 // ---------------------------------------------------------------- mods
 std::string mods_dir() { return join(P.data, "mods"); }
+std::string cheats_dir() { return join(P.data, "cheats"); }
+std::string game_build_id() {
+    FILE* f = _wfopen(wide(join(P.data, "exefs\\main")).c_str(), L"rb"); if (!f) return "";
+    unsigned char b[0x48]; size_t n = fread(b, 1, sizeof b, f); fclose(f); if (n < 0x48 || memcmp(b, "NSO0", 4)) return "";
+    char s[17]; for (int i = 0; i < 8; i++) snprintf(s + i * 2, 3, "%02X", b[0x40 + i]); return s;
+}
+static bool is_bid_file(const std::string& n) {
+    if (n.size() != 20) return false; for (int i = 0; i < 16; i++) if (!isxdigit((unsigned char)n[i])) return false;
+    return _stricmp(n.c_str() + 16, ".txt") == 0;
+}
+std::vector<CheatEntry> cheats_list() {
+    std::vector<CheatEntry> out; std::string d = cheats_dir(), bid = game_build_id(); if (!dir_exists(d)) return out;
+    std::vector<std::string> files;
+    WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(wide(join(d, "*.txt")).c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) { do { std::string n = utf8(fd.cFileName); if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && _stricmp(n.c_str(), "enabled.txt")) files.push_back(n); } while (FindNextFileW(h, &fd)); FindClose(h); }
+    std::sort(files.begin(), files.end());   // the runtime reads them in directory order: same as sorted on NTFS
+    std::string en = read_text(join(d, "enabled.txt"));
+    std::vector<std::string> on; { size_t i = 0; while (i < en.size()) { size_t e = en.find('\n', i); if (e == std::string::npos) e = en.size(); std::string l = en.substr(i, e - i); i = e + 1;
+        while (!l.empty() && (l.back() == '\r')) l.pop_back(); if (!l.empty()) on.push_back(l); } }
+    for (auto& fn : files) {
+        if (is_bid_file(fn) && !bid.empty() && _strnicmp(fn.c_str(), bid.c_str(), 16)) continue;   // another version of the game
+        std::string t = read_text(join(d, fn)); size_t i = 0;
+        while (i < t.size()) { size_t e = t.find('\n', i); if (e == std::string::npos) e = t.size(); std::string l = t.substr(i, e - i); i = e + 1;
+            size_t a = l.find_first_not_of(" \t\xEF\xBB\xBF"); if (a == std::string::npos) continue;
+            char o = l[a], c = o == '[' ? ']' : o == '{' ? '}' : 0; if (!c) continue; size_t z = l.find(c, a + 1); if (z == std::string::npos) continue;
+            std::string name = l.substr(a + 1, z - a - 1); if (name.size() > 95) name.resize(95);
+            bool master = o == '{'; out.push_back({name, fn, master || std::find(on.begin(), on.end(), name) != on.end(), master}); }
+    }
+    return out;
+}
+void cheats_write(const std::vector<CheatEntry>& c) {
+    std::string s; for (auto& e : c) if (e.on && !e.master) s += e.name + "\r\n";
+    make_dirs(cheats_dir()); write_text(join(cheats_dir(), "enabled.txt"), s);
+}
+bool cheat_import(const std::string& txt, std::string* err) {
+    std::string name = txt.substr(txt.find_last_of("\\/") + 1);
+    if (name.size() < 5 || _stricmp(name.c_str() + name.size() - 4, ".txt")) { *err = "Pick a cheat .txt file"; return false; }
+    if (!_stricmp(name.c_str(), "enabled.txt")) { *err = "That name is used by the game: rename the file first"; return false; }
+    std::string bid = game_build_id();
+    if (is_bid_file(name) && !bid.empty() && _strnicmp(name.c_str(), bid.c_str(), 16)) { *err = "These cheats are for another version of the game (yours is " + bid + ", version 2.1.0)"; return false; }
+    make_dirs(cheats_dir());
+    if (!CopyFileW(wide(txt).c_str(), wide(join(cheats_dir(), name)).c_str(), FALSE)) { *err = "Could not copy the file"; return false; }
+    return true;
+}
 std::vector<Mod> mods_list() {
     std::vector<Mod> out; std::string d = mods_dir(); if (!dir_exists(d)) return out;
     std::vector<std::string> present;

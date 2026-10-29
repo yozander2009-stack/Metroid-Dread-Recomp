@@ -314,6 +314,8 @@ void video_poll(void){
   if(g_press && el>=g_press_at && el<g_press_at+g_press_len) b|=g_press;
   if(g_script[0]){ const char* p=g_script; while(*p){ u64 t=strtoull(p,(char**)&p,10); if(*p!=':') break; p++; u64 m=strtoull(p,(char**)&p,16); if(el>=t && el<t+g_press_len) b|=m; if(*p==',') p++; } }
   test_input_apply(&b,&lx,&ly,&rx,&ry);
+  { extern u64 swr_menu_buttons(u64); b=swr_menu_buttons(b); }   /* menu_buttons=swap (main.c), after the test replay like a player's own presses */
+  { extern volatile u64 g_cheat_keys; g_cheat_keys=b; }   /* cheats.c keypress conditions */
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; }   /* the menu has the controller (and the game neutral input) */
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */

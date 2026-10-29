@@ -88,6 +88,7 @@ int fps_overlay_rects(int W,int H,int (*r)[5],int max){
 }
 int g_opt_audio_eos_sample_count=1;   /* always on (cinematic clock ~2x and cut music without it); SWR_AUDIO_OLD_EOS=1 = off, tests only */
 char g_opt_pad_map[128]="";   /* physical-position button remapping, empty = identity */
+char g_opt_kb_map[256]="";    /* keyboard keys per game button (backend_win32.c keymap), empty = default */
 int g_opt_ctrl_api=0, g_opt_ctrl_index=0, g_opt_deadzone=7000;
 char g_opt_button_icons[16]="auto";
 int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backend_win32.c mouse_apply) */
@@ -302,6 +303,8 @@ static void env_switch(const char* name, int on);
 static void ini_apply(const char* k, const char* v){
     if(!strcmp(k,"docked")) g_opt_docked=atoi(v);
     else if(!strcmp(k,"controller_map")){ snprintf(g_opt_pad_map,sizeof g_opt_pad_map,"%s",v); }
+    else if(!strcmp(k,"menu_buttons")){ extern int g_opt_menu_swap; g_opt_menu_swap= !strcmp(v,"swap"); }
+    else if(!strcmp(k,"keyboard_map")){ snprintf(g_opt_kb_map,sizeof g_opt_kb_map,"%s",v); }
     else if(!strcmp(k,"mouse_aim")) g_opt_mouse_aim=atoi(v)!=0;
     else if(!strcmp(k,"mouse_sensitivity")){ g_opt_mouse_sens=atoi(v); if(g_opt_mouse_sens<10) g_opt_mouse_sens=10; if(g_opt_mouse_sens>1000) g_opt_mouse_sens=1000; }
     else if(!strcmp(k,"mouse_buttons")){ snprintf(g_opt_mouse_buttons,sizeof g_opt_mouse_buttons,"%s",v); extern void mouse_map_reset(void); mouse_map_reset(); }
@@ -321,6 +324,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"video_block_copy")) g_opt_video_block_copy=atoi(v)!=0;
     else if(!strcmp(k,"audio_eos_sample_count")) {}   /* always on since v0.3.1: old .ini values (often 0) are ignored */
     else if(!strcmp(k,"audio_surround_downmix")) g_opt_audio_surround_downmix=atoi(v)!=0;
+    else if(!strcmp(k,"audio_channels")){ extern int g_opt_audio_51; g_opt_audio_51= !strcmp(v,"5.1"); }
     else if(!strcmp(k,"resolution")){ g_opt_resf=(float)atof(v); if(g_opt_resf<0.25f) g_opt_resf=0.25f; if(g_opt_resf>4) g_opt_resf=4; }
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
@@ -346,7 +350,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"anisotropy")){ g_opt_aniso=atoi(v); if(g_opt_aniso<0) g_opt_aniso=0; if(g_opt_aniso>16) g_opt_aniso=16; }
     else if(!strcmp(k,"ultrawide")){ extern int g_opt_ultrawide; if(!aspect_given) g_opt_ultrawide=atoi(v); }   /* loader.c: theboy181's 21:9 patch */
     else if(!strcmp(k,"aspect") && *v){ extern int g_opt_ultrawide;   /* aspect=16:9|21:9|16:10; overrides ultrawide= in any order */
-      aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : 0; }
+      aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : !strcmp(v,"32:9")? 4 : 0; }
     else if(!strcmp(k,"dlss")){ extern int snxvk_dlss_mode; snxvk_dlss_mode=atoi(v); }   /* native Vulkan: snxvk dlss.c; OpenGL: dlss_gl.c + gpu_gl.c dlg_* */
     else if(!strcmp(k,"texture_threads")){ g_opt_tex_threads=atoi(v); if(g_opt_tex_threads<0) g_opt_tex_threads=0; if(g_opt_tex_threads>16) g_opt_tex_threads=16; }
     else if(!strcmp(k,"fast_forward")) g_opt_ff=atoi(v);
@@ -370,7 +374,7 @@ typedef struct { const char* title; const IniOpt* o; } IniSec;
 static const IniOpt INI_DISPLAY[]={
   {"docked","0","1 = TV mode (1920x1080 / 1600x900 games), 0 = handheld mode (1280x720)"},
   {"fullscreen","1","1 = start in fullscreen (F11 or Alt+Enter toggles it in game)"},
-  {"aspect","","Picture shape (docked mode): 16:9, 21:9 (= ultrawide=1) or 16:10 (1440x900 base, fills a Steam Deck\n;   1280x800 or a 1920x1200 screen). Empty = use ultrawide=; when set it overrides ultrawide="},
+  {"aspect","","Picture shape (docked mode): 16:9, 21:9 (= ultrawide=1), 32:9 (2560x720 base, super-ultrawide) or\n;   16:10 (1440x900 base, fills a Steam Deck 1280x800 or a 1920x1200 screen). Empty = use ultrawide=; when set it overrides ultrawide="},
   {"ultrawide","0","1 = 21:9 picture for ultrawide monitors (theboy181's 21:9 patch for Dread v2.1.0,\n;   github.com/theboy181/switch-ptchtxt-mods; minor cut-offs in videos and some menus). 0 = 16:9"},
   {"language","1","Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"},
   {NULL,NULL,NULL}};
@@ -397,6 +401,7 @@ static const IniOpt INI_GRAPHICS[]={
 #endif
   {NULL,NULL,NULL}};
 static const IniOpt INI_PERF[]={
+  {"audio_channels","stereo","stereo, or 5.1: the game's six-channel mix (front, centre, LFE, rear) to a 5.1 speaker set\n;   (Windows; a stereo device gets Windows' own downmix)"},
   {"audio_surround_downmix","0","1 = include all six audio channels in stereo output (experimental)"},
   {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
   {"video_async_retire","0","1 = retire obsolete video pictures on a bounded worker (experimental; restart required)"},
@@ -426,6 +431,8 @@ static const IniOpt INI_FG[]={
   {NULL,NULL,NULL}};
 static const IniOpt INI_INPUT[]={
   {"controller_map","","16 comma-separated button destinations (0..15, -1 disabled); empty = default. Keyboard and sticks unchanged."},
+  {"menu_buttons","game","game = the buttons as the game has them; swap = A and B exchanged while a menu is open\n;   (pause, map, options, dialogs, Game Over, title and file select): confirm on the bottom button like on Xbox and\n;   PlayStation, gameplay unchanged"},
+  {"keyboard_map","","keyboard keys for A B X Y L3 R3 L R ZL ZR + - D-pad left up right down, then left stick left up right\n;   down and right stick left up right down: 24 comma-separated Windows key codes, two keys joined by + (88+32),\n;   0 = none. Empty = default (the Play screen's Controls page sets it)"},
   {"mouse_aim","1","1 = mouse free aim: hold the right mouse button (the game's L, free aim) and move the mouse to aim\n;   in any direction; left click shoots (Y), middle click arms missiles (R). The cursor hides over the game"},
   {"mouse_sensitivity","100","mouse free aim: how far the mouse moves for a full turn of the aim, in percent (10-1000)"},
   {"mouse_buttons","y,l,r,-,-","mouse buttons left, right, middle, back, forward as Switch buttons: a b x y l r zl zr plus\n;   minus lstick rstick, - for none. The one set to l aims with the mouse while held"},
@@ -777,7 +784,37 @@ static void frametimer_trace(void){
   LOG("frametimer: obj %llx frames %u dt %.5f min_ms %lld fps %.2f dur %.5f clamp %u\n",(unsigned long long)t,*(volatile u32*)GP(t+44),dt,
       (long long)*(volatile i64*)GP(t+56),fps,dur,(unsigned)*(volatile u8*)GP(t+72)); }
 
-static void frametimer_poll(void){ frametimer_trace(); }
+/* Diagnostic (menu-state search): SWR_TRACE_MENU=FRAME,FRAME,...:PREFIX writes the first 64 KB of the game object
+   ([[GOT 0x9CBF088]]) to PREFIX-fN.bin at those frames, and logs the time scale (+1700) whenever it changes */
+static void menu_trace(void){
+  static const char* s=(const char*)1; if(s==(const char*)1) s=getenv("SWR_TRACE_MENU"); if(!s) return;
+  extern int g_frames; u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
+  if(!o || o>=(1ull<<40)) return;
+  { static u32 prev=0xFFFFFFFFu; u32 v=*(volatile u32*)GP(o+1700); if(v!=prev){ float f; memcpy(&f,&v,4); prev=v; LOG("menu trace: frame %d time scale %.3f\n",g_frames,f); } }
+  { static int prev=-1; int sc= *(volatile u64*)GP(o+0x220)!=0, pz=*(volatile u8*)GP(o+0x231c); int v=sc*2+pz;
+    if(v!=prev){ prev=v; LOG("menu trace: frame %d scenario %d paused %d\n",g_frames,sc,pz); } }
+  const char* pre=strchr(s,':'); if(!pre) return;
+  for(const char* p=s; p<pre;){ char* e; long f=strtol(p,&e,10); if(e==p) break;
+    if(f==g_frames){ static int done_f=-1; if(done_f!=g_frames){ done_f=g_frames; char path[600]; snprintf(path,sizeof path,"%s-f%ld.bin",pre+1,f);
+        FILE* fp=fopen(path,"wb"); if(fp){ fwrite((const void*)GP(o),1,65536,fp); fclose(fp); } } }
+    p= *e==','? e+1 : e; } }
+
+static void frametimer_poll(void){ extern void cheats_tick(void); frametimer_trace(); menu_trace(); cheats_tick(); }
+
+/* menu_buttons=swap (#13): A and B exchanged while the game shows a menu, so confirm is on the bottom button and
+   back on the right one there, while jump stays where it is. In a menu = no scenario loaded yet (title, file select:
+   game object [[GOT 0x9CBF088]] +0x220 is 0) or the game is paused (+0x231C = 1: pause menu, map, options, dialogs,
+   Game Over), MEASURED over the regression route (menu2). The swap only changes while neither A nor B is held, so a
+   press never turns into the other button halfway. Called by the backends before the test replay. */
+int g_opt_menu_swap;
+u64 swr_menu_buttons(u64 b){
+  static int active;
+  if(!g_opt_menu_swap){ active=0; return b; }
+  if(!(b&3)){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
+    int menu= !o || o>=(1ull<<40) || *(volatile u64*)GP(o+0x220)==0 || *(volatile u8*)GP(o+0x231c)!=0;
+    if(menu!=active){ active=menu; static int said; if(said<4){ said++; LOG("input: menu buttons %s\n",menu? "swapped (menu)" : "as in the game"); } } }
+  if(active) b=(b&~3ull)|((b&1)<<1)|((b>>1)&1);
+  return b; }
 
 void services_init(void){
   extern void svc_core_init(void), svc_hid_init(void), svc_fs_init(void), svc_vi_init(void), svc_pl_init(void), svc_launcher_init(void);
@@ -825,6 +862,7 @@ int swr_main(int argc, char** argv){
   if(g_mod->init) g_mod->init(&g_rtapi);
   load_hints();
   if(loader_load()) fatal("Could not load the game executables from %sexefs/",g_datadir);
+  { extern void cheats_init(void); cheats_init(); }   /* cheats.c: <game>_data/cheats/*.txt */
   { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
     extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
     if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; } fclose(f); }
