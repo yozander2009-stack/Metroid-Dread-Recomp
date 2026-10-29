@@ -7,36 +7,61 @@
 
    With it on, our nvdrv hands GPFIFO submissions to snxv_gpu_submit instead of our gpu.c, the vi present goes to the
    Vulkan renderer, mapping and memory changes are reported to its caches, and guest memory is reserved with
-   MEM_WRITE_WATCH (its caches see CPU writes through GetWriteWatch). Our own GPU front end then simply gets no work. */
+   MEM_WRITE_WATCH (its caches see CPU writes through GetWriteWatch). Our own GPU front end then simply gets no work.
+   macOS (MoltenVK, backend_sdl.c) has no write watch: the renderer's caches compare contents instead (buffer.c). */
 #include "rt.h"
 #include "gpu.h"
 
+#if defined(__APPLE__)
+int g_snxvk_want=1; /* macOS has no OpenGL 4.3: native Vulkan (MoltenVK) always, whatever the .ini says */
+#else
 int g_snxvk_want;   /* renderer=vulkan_native in the .ini (backend_ini) */
+#endif
 int g_snxvk_on;     /* the Vulkan renderer started: submissions and presents go to it */
 int snxvk_dlss_mode;   /* ini dlss: 0 off, 1 DLAA, 2 quality, 3 balanced, 4 performance (native Vulkan only) */
 
-#if defined(SWR_HAVE_SNXVK) && defined(_WIN32)
+#if defined(SWR_HAVE_SNXVK)
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <errno.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#if defined(__x86_64__) || defined(__i386__)
+#define cpu_relax() __builtin_ia32_pause()
+#else
+#define cpu_relax() __asm__ __volatile__("yield")
+#endif
 
 /* ---- what the ScarletNX objects call that our runtime doesn't have under that name */
 char g_cachedir[1024];
 int g_opt_headless;
 int snxvk_opt_vsync=1;      /* their g_opt_vsync: FIFO presentation (ours means "force vsync" for GL) */
 
+#if defined(_WIN32)
 int pm_trylock(PMutex* m){ return TryAcquireSRWLockExclusive(&m->l)? 1 : 0; }
+#define fseek64 _fseeki64
+#define ftell64 _ftelli64
+#else
+int pm_trylock(PMutex* m){ return pthread_mutex_trylock(&m->l)==0; }
+#define fseek64 fseeko
+#define ftell64 ftello
+#endif
 
-typedef struct { const u8* data; u64 size; int borrowed; } PFileMap;
+typedef struct { const u8* data; u64 size; int borrowed; int heap; } PFileMap;
 int plat_file_map(PFileMap* m, const char* path){
   memset(m,0,sizeof *m); FILE* f=fopen(path,"rb"); if(!f) return -1;
-  _fseeki64(f,0,SEEK_END); i64 n=_ftelli64(f); _fseeki64(f,0,SEEK_SET);
+  fseek64(f,0,SEEK_END); i64 n=ftell64(f); fseek64(f,0,SEEK_SET);
   if(n<0){ fclose(f); return -1; }
   if(n){ u8* p=malloc((size_t)n); if(!p || fread(p,1,(size_t)n,f)!=(size_t)n){ free(p); fclose(f); return -1; } m->data=p; m->size=(u64)n; }
   fclose(f); return 0; }
 void plat_file_unmap(PFileMap* m){ if(!m->borrowed) free((void*)m->data); memset(m,0,sizeof *m); }
+#if defined(_WIN32)
 int plat_replace_file(const char* tmp, const char* dst){ return MoveFileExA(tmp,dst,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)? 0 : -1; }
 
 extern int g_ww_ok;
@@ -48,6 +73,11 @@ int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)){
     for(ULONG_PTR i=0;i<n;i++) cb((u8*)a[i],gran);
     if(n<1024) return 0; }
   return 1; }
+#else
+int plat_replace_file(const char* tmp, const char* dst){ if(!rename(tmp,dst)) return 0; remove(tmp); return -1; }
+/* no write watch: -1 makes the renderer's caches compare contents (buffer.c vk_written_since) */
+int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)){ (void)p; (void)size; (void)cb; return -1; }
+#endif
 
 
 /* no on-screen controls or menu overlay here: an empty list, and a 1x1 clear atlas so the renderer's upload is valid */
@@ -94,17 +124,37 @@ int vic_gpu_aligned(const void* j){ (void)j; return 0; }   /* their VIC path: ou
 void vic_gpu_params(const void* j, void* p, const u32 in_base[16], u32 oc_base){ (void)j; (void)p; (void)in_base; (void)oc_base; }
 void* vk_nvdec_hw_device(void){ return NULL; }
 int vk_nvdec_write(const void* p){ (void)p; return 0; }
+#if defined(_WIN32)
 int plat_cpus(int* ids, int max){ int n=(int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); if(n>max) n=max; for(int i=0;i<n;i++) ids[i]=i; return n; }
 const char* plat_dl_error(void){ static char b[64]; snprintf(b,sizeof b,"error %lu",(unsigned long)GetLastError()); return b; }
 int plat_setenv(const char* name, const char* value){ char b[600]; snprintf(b,sizeof b,"%s=%s",name,value? value : ""); SetEnvironmentVariableA(name,value); return _putenv(b); }
 u32 plat_tid(void){ return (u32)GetCurrentThreadId(); }
+#else
+int plat_cpus(int* ids, int max){ (void)ids; (void)max; return 0; }   /* the system places the threads */
+const char* plat_dl_error(void){ const char* e=dlerror(); return e? e : "unknown error"; }
+int plat_setenv(const char* name, const char* value){ return value? setenv(name,value,1) : unsetenv(name); }
+#if defined(__APPLE__)
+u32 plat_tid(void){ u64 t=0; pthread_threadid_np(NULL,&t); return (u32)t; }
+#else
+#include <sys/syscall.h>
+u32 plat_tid(void){ return (u32)syscall(SYS_gettid); }
+#endif
+#endif
 const char* snx_build_commit(void){ return "b5f4f14f2bfc"; }
 const char* snx_build_info(void){ return "ScarletNX renderer b5f4f14f2bfc in the SwitchRecomp runtime"; }
+#if defined(_WIN32)
 char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s.exe",g_exedir,g_exename); return _strdup(b); }
+#else
+char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s",g_exedir,g_exename); return strdup(b); }
+#endif
 char* snx_format(const char* fmt, ...){ va_list a; va_start(a,fmt); int n=vsnprintf(NULL,0,fmt,a); va_end(a); if(n<0) return NULL;
   char* p=malloc((size_t)n+1); if(!p) return NULL; va_start(a,fmt); vsnprintf(p,(size_t)n+1,fmt,a); va_end(a); return p; }
+#if defined(_WIN32)
 char* snx_os_error(char* out, size_t size){ DWORD e=GetLastError(); if(!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,e,0,out,(DWORD)size,NULL)) snprintf(out,size,"error %lu",(unsigned long)e);
   size_t n=strlen(out); while(n && (out[n-1]=='\r'||out[n-1]=='\n'||out[n-1]=='.')) out[--n]=0; return out; }
+#else
+char* snx_os_error(char* out, size_t size){ snprintf(out,size,"%s",strerror(errno)); return out; }
+#endif
 /* ---- the ScarletNX side, renamed */
 typedef struct {   /* mirror of their Renderer (gpu/renderer.h, ScarletNX main b5f4f14f2bfc), same order */
   const char* name; int (*start)(void); void (*mem_may_have_changed)(void);
@@ -135,8 +185,16 @@ void snxvk_ini(const char* v){
   static int set_ww;   /* SWR_WW set here: a later renderer= line that isn't vulkan_native takes it back (the OpenGL
                           path with write tracking on spent ~85% of its thread in GetWriteWatch: 19 FPS) */
   g_snxvk_want= !strcmp(v,"vulkan_native");
+#if defined(__APPLE__)
+  g_snxvk_want=1;   /* macOS has no OpenGL 4.3: native Vulkan (MoltenVK) is the only renderer */
+#endif
+#if defined(_WIN32)
   if(g_snxvk_want){ if(!getenv("SWR_WW")){ _putenv("SWR_WW=1"); set_ww=1; } }
-  else if(set_ww){ _putenv("SWR_WW="); set_ww=0; } }
+  else if(set_ww){ _putenv("SWR_WW="); set_ww=0; }
+#else
+  (void)set_ww;
+#endif
+}
 
 void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 
@@ -144,7 +202,9 @@ void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 int snxvk_start(void){
   if(!g_snxvk_want) return 0;
   extern int g_ww_ok;
+#if defined(_WIN32)
   if(!g_ww_ok){ WARN("vulkan_native: guest memory has no write tracking: using OpenGL\n"); return 0; }
+#endif
   snprintf(g_cachedir,sizeof g_cachedir,"%svulkan_native/",g_exedir); plat_mkdir(g_cachedir);
   { extern int g_opt_vsync; snxvk_opt_vsync=g_opt_vsync; }
   { /* our .ini into their g_settings (swr_settings.c). Their recording thread records the frame's commands; DLSS and
@@ -159,7 +219,7 @@ int snxvk_start(void){
     { extern void snxv_swr_settings_prepare(int); extern int g_opt_prebuild;
       int prep= g_opt_prebuild && !getenv("SWR_VK_NO_PREPARE"); snxv_swr_settings_prepare(prep);
       if(prep) LOG("vulkan_native: the game's shaders are translated in the background, then the pipeline recipes made\n"); } }   /* FIFO only with forced_vsync=1, like the GL path: otherwise mailbox, paced by snxvk_present (FIFO at 144/240 FPS on a 239 Hz screen lost frames to vblank waits) */
-  if(!snxv_vk_renderer.start()){ WARN("vulkan_native: Vulkan 1.3 renderer could not start (see above): using OpenGL\n");
+  if(!snxv_vk_renderer.start()){ WARN("vulkan_native: Vulkan 1.3 renderer could not start (see above)%s\n",video_has_gl()? ": using OpenGL" : "");
     /* the guest memory was set up with write tracking for Vulkan; OpenGL would scan it on every submit (measured 19 FPS,
        GPU thread 98% busy) - it runs without, as when OpenGL is chosen */
     g_ww_ok=0; return 0; }
@@ -173,9 +233,9 @@ void snxvk_kick(void){ if(g_snxvk_on) snxv_gpu_kick(); }
 void snxvk_channel_close(u32 id){ if(g_snxvk_on){ snxv_gpu_release_retire(id); snxv_gpu_channel_close(id); } }
 /* GPU page table changes, for caches of what gmmu_translate returns (maxwell3d.c phys_dirty_since): gen moves at the
    start and end of every change, busy is nonzero while one runs */
-volatile LONG64 snxvk_gmmu_gen; volatile LONG snxvk_gmmu_busy;
-void snxvk_map_begin(u64 gva, u64 size){ InterlockedIncrement(&snxvk_gmmu_busy); InterlockedIncrement64(&snxvk_gmmu_gen); if(g_snxvk_on && snxv_g_gpu_mapping_begin) snxv_g_gpu_mapping_begin(gva,size,0); }
-void snxvk_map_end(u64 gva, u64 size){ InterlockedIncrement64(&snxvk_gmmu_gen); InterlockedDecrement(&snxvk_gmmu_busy); if(!g_snxvk_on) return; snxv_gpu_mem_written(gva,size); if(snxv_g_gpu_mapping_end) snxv_g_gpu_mapping_end(); }
+volatile long long snxvk_gmmu_gen; volatile int snxvk_gmmu_busy;
+void snxvk_map_begin(u64 gva, u64 size){ __atomic_add_fetch(&snxvk_gmmu_busy,1,__ATOMIC_SEQ_CST); __atomic_add_fetch(&snxvk_gmmu_gen,1,__ATOMIC_SEQ_CST); if(g_snxvk_on && snxv_g_gpu_mapping_begin) snxv_g_gpu_mapping_begin(gva,size,0); }
+void snxvk_map_end(u64 gva, u64 size){ __atomic_add_fetch(&snxvk_gmmu_gen,1,__ATOMIC_SEQ_CST); __atomic_sub_fetch(&snxvk_gmmu_busy,1,__ATOMIC_SEQ_CST); if(!g_snxvk_on) return; snxv_gpu_mem_written(gva,size); if(snxv_g_gpu_mapping_end) snxv_g_gpu_mapping_end(); }
 void snxvk_cpu_map_begin(u64 addr, u64 size){ if(g_snxvk_on && snxv_g_gpu_mapping_begin) snxv_g_gpu_mapping_begin(addr,size,1); }
 void snxvk_cpu_map_end(u64 addr, u64 size, int changed){ if(!g_snxvk_on) return; if(snxv_g_gpu_mapping_end) snxv_g_gpu_mapping_end(); if(changed) snxv_gpu_mem_changed(addr,size); }
 /* frame pacing, as our GL presentation thread does it (glq.c e_swap): the present waits for its deadline, so images
@@ -185,9 +245,10 @@ void snxvk_cpu_map_end(u64 addr, u64 size, int changed){ if(!g_snxvk_on) return;
 static void wait_deadline(u64 deadline){
   u64 now=plat_ns(); if(now>=deadline) return;
   if(deadline-now>500000ull) plat_sleep_ns((i64)(deadline-now-500000ull));
-  while(plat_ns()<deadline) __builtin_ia32_pause(); }
+  while(plat_ns()<deadline) cpu_relax(); }
 /* HDR output (snxvk hdr.c): the peak brightness the window's display reports through DXGI (Windows 10 1803+), in
-   nits; 0 if unknown. dxgi.dll is loaded here, so the EXE doesn't import it */
+   nits; 0 if unknown. dxgi.dll is loaded here, so the EXE doesn't import it. Elsewhere the window backend answers */
+#if defined(_WIN32)
 #if !defined(__TINYC__)
 #define COBJMACROS
 #include <dxgi1_6.h>
@@ -213,6 +274,7 @@ int backend_hdr_peak_nits(void){
   cached=(int)(best+0.5f);
 #endif
   return cached; }
+#endif
 int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=60 && g_opt_fps<=240)); }
 void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
   static const i32 crop[4]={0,0,0,0};

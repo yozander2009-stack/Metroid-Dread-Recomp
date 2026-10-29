@@ -20,6 +20,9 @@ extern char** environ;
 #if defined(_WIN32)
 #define CODE_SUFFIX "_code.dll"
 #define EXE_SUFFIX ".exe"
+#elif defined(__APPLE__)
+#define CODE_SUFFIX "_code.dylib"
+#define EXE_SUFFIX ""
 #else
 #define CODE_SUFFIX "_code.so"
 #define EXE_SUFFIX ""

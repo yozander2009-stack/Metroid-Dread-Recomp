@@ -5,6 +5,8 @@ games/
 *_build/
 *_data/
 *_code.dll
+*.dylib
+.DS_Store
 *.o
 *.a
 !runtime/vp9/win/libvpx.a

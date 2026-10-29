@@ -2,7 +2,8 @@
 
 Checks the player's own game files (v2.1.0 only), assembles the RomFS (base + update layered, then every file checked
 against the 2.1.0 manifest), translates the ExeFS to C with SwitchRecomp, applies the verified Dread patches, compiles
-with the bundled GCC and links Metroid Dread_code.dll next to the EXE.
+with the bundled GCC and links Metroid Dread_code.dll next to the EXE. On macOS (macos/build.sh runs it) the compiler
+is Apple clang and the result Metroid Dread_code.dylib.
 
 Output protocol on stdout (one line each): '@@P <percent> <stage>|<detail>' progress, '@@E <message>' failure,
 '@@D' done; everything else is log. Every stage leaves a marker so a stopped or failed setup continues where it was.
@@ -13,6 +14,8 @@ import argparse, hashlib, json, os, shutil, struct, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if not os.path.isfile(os.path.join(HERE, 'switchrecomp.py')):
+    HERE = os.path.dirname(HERE)   # run from the repository's dread/ folder (macos/build.sh), not the release's recompiler/
 sys.path.insert(0, HERE)
 TITLE_ID = 0x010093801237C000
 BUILD_ID = '646761F643AFEBB379EDD5E6A5151AF2CEF93DC1'
@@ -20,6 +23,8 @@ VERSION = '2.1.0'
 PATCHES = os.path.join(HERE, 'dread', 'dread_v210_patches.json')
 MANIFEST = os.path.join(HERE, 'dread', 'romfs_v210.manifest')
 SETUP_FORMAT = 1
+MAC = sys.platform == 'darwin'
+CC_NAME = 'clang' if MAC else 'GCC'
 
 
 def P(pct, stage, detail=''):
@@ -154,7 +159,16 @@ def load_manifest():
 
 
 def same_volume(a, b):
-    return os.path.splitdrive(os.path.abspath(a))[0].lower() == os.path.splitdrive(os.path.abspath(b))[0].lower()
+    if os.name == 'nt':
+        return os.path.splitdrive(os.path.abspath(a))[0].lower() == os.path.splitdrive(os.path.abspath(b))[0].lower()
+    # POSIX: the same device; b may not exist yet, so its nearest existing parent
+    b = os.path.abspath(b)
+    while not os.path.exists(b) and os.path.dirname(b) != b:
+        b = os.path.dirname(b)
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
 
 
 def assemble_romfs(base_romfs, upd_romfs, dst, pct0, pct1):
@@ -292,7 +306,8 @@ def main():
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
     out, name = os.path.abspath(a.out), a.name
-    data = os.path.join(out, name + '_data'); build = os.path.join(out, name + '_build'); dll = os.path.join(out, name + '_code.dll')
+    data = os.path.join(out, name + '_data'); build = os.path.join(out, name + '_build')
+    dll = os.path.join(out, name + ('_code.dylib' if MAC else '_code.dll'))
     log('Metroid Dread setup (format %d) - SwitchRecomp by MZ Labs; use only your own copy of the game.' % SETUP_FORMAT)
     log('Game folder: %s' % a.base)
     if a.update:
@@ -375,16 +390,21 @@ def main():
                 log('Regenerated: %d of %d files unchanged (their compiled objects are reused)' % (kept, len(files)))
             with open(gen_marker, 'w') as f:
                 f.write(gen_key)
-        P(31, 'Compiling with GCC', '0 of %d files' % len(files))
+        P(31, 'Compiling with ' + CC_NAME, '0 of %d files' % len(files))
 
-        cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
-        cc = cc if os.path.isfile(cc) else None
-        if not cc:
-            raise Fail('The bundled GCC is missing (recompiler\\gcc). Extract the release again.')
+        if MAC:
+            cc = shutil.which('clang')   # Apple clang from the Xcode command line tools
+            if not cc:
+                raise Fail('clang is missing: install the Xcode command line tools (xcode-select --install).')
+        else:
+            cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
+            cc = cc if os.path.isfile(cc) else None
+            if not cc:
+                raise Fail('The bundled GCC is missing (recompiler\\gcc). Extract the release again.')
         objs = compile_all(files, cc, build, a.jobs, 31, 96)
-        P(96, 'Linking', name + '_code.dll')
+        P(96, 'Linking', os.path.basename(dll))
         switchrecomp.check_writable(dll)
-        switchrecomp.link_module(objs, cc, dll, True, log)
+        switchrecomp.link_module(objs, cc, dll, not MAC, log)
         if not os.path.isfile(dll) or os.path.getsize(dll) < 50 * 2**20:
             raise Fail('Linking produced no usable game code.')
         with open(os.path.join(data, 'setup.ok'), 'w') as f:
@@ -401,7 +421,7 @@ def main():
             msg = str(e.code)
             log(msg)
             first = msg.strip().splitlines()[0] if msg.strip() else 'unknown error'
-            print('@@E ' + ('GCC stopped: %s (full message in the log)' % first[:300]), flush=True)
+            print('@@E ' + ('%s stopped: %s (full message in the log)' % (CC_NAME, first[:300])), flush=True)
             sys.exit(3)
         raise
     except Exception as e:
@@ -413,6 +433,8 @@ def compile_all(files, cc, build, jobs, p0, p1):
     """switchrecomp.compile_all with a progress line per file (same flags and object names, so objects are reused)"""
     import switchrecomp
     flags = ['-O2', '-fno-strict-aliasing', '-fwrapv', '-w', '-I', switchrecomp.RT, '-foptimize-sibling-calls', '-fno-semantic-interposition']
+    if MAC:   # as switchrecomp.compile_all for macOS: position-independent, only swr_module exported, the Windows calls mapped
+        flags += ['-fPIC', '-fvisibility=hidden', switchrecomp.MAC_MIN, '-include', 'posix_compat.h']
     with open(os.path.join(switchrecomp.RT, 'cpu.h'), 'rb') as f1, open(os.path.join(switchrecomp.RT, 'cpu_helpers.c'), 'rb') as f2:
         key = '|'.join([cc] + flags) + '|' + f1.read().decode('latin1') + '|' + f2.read().decode('latin1')
     sig = hashlib.sha1(key.encode('utf-8', 'replace')).hexdigest()[:10]
@@ -441,7 +463,7 @@ def compile_all(files, cc, build, jobs, p0, p1):
         with lock:
             st['n'] += 1; st['bytes'] += sizes[src]
             n = st['n']
-            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling with GCC',
+            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling with ' + CC_NAME,
               '%d of %d files%s' % (n, len(files), (', %d reused from before' % st['reused']) if st['reused'] else ''))
             log('  compiled %s (%d/%d, %.0f s)' % (os.path.basename(src), n, len(files), time.time() - t0))
         return obj

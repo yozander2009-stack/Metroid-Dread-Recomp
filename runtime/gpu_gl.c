@@ -1380,8 +1380,10 @@ static int sk_font_cpu(void){
   if(!fnt || !mt || fn<0x60+96*14 || memcmp(fnt,"MFNT",4) || an<16 || memcmp(mt,"MTXT",4)) goto out;
   memcpy(g_sk_gl,fnt+0x60,sizeof g_sk_gl);
   { void* z=plat_dl_open(
-#ifdef _WIN32
+#if defined(_WIN32)
       "zlib1.dll"
+#elif defined(__APPLE__)
+      "libz.1.dylib"
 #else
       "libz.so.1"
 #endif

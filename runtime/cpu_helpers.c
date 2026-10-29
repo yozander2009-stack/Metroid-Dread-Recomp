@@ -233,7 +233,8 @@ void swr_fence(void){ __asm__ __volatile__("mfence" : : : "memory"); }
 #endif
 #else
 u32 swr_cas128(u64* p, u64 o0, u64 o1, u64 n0, u64 n1){
-#if defined(__x86_64__) && defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16)
+#if (defined(__x86_64__) && defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16)) || (defined(__aarch64__) && defined(__clang__))
+  /* x86-64 cmpxchg16b; arm64 hosts (clang: casp or an ldaxp/stlxp loop, inline) */
   unsigned __int128 o=((unsigned __int128)o1<<64)|o0, n=((unsigned __int128)n1<<64)|n0;
   return __sync_bool_compare_and_swap((unsigned __int128*)p,o,n);
 #else

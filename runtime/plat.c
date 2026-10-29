@@ -465,6 +465,11 @@ void plat_thread_diag_start(void){}
 #include <signal.h>
 #include <sched.h>
 #include <errno.h>
+#include <limits.h>
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#include <pthread/qos.h>
+#endif
 
 void pm_init(PMutex* m){ pthread_mutex_init(&m->l,NULL); }
 
@@ -472,7 +477,12 @@ void pm_lock(PMutex* m){ pthread_mutex_lock(&m->l); }
 
 void pm_unlock(PMutex* m){ pthread_mutex_unlock(&m->l); }
 
+#if defined(__APPLE__)
+/* no pthread_condattr_setclock: timed waits are relative instead (pthread_cond_timedwait_relative_np) */
+void pc_init(PCond* c){ pthread_cond_init(&c->c,NULL); }
+#else
 void pc_init(PCond* c){ pthread_condattr_t a; pthread_condattr_init(&a); pthread_condattr_setclock(&a,CLOCK_MONOTONIC); pthread_cond_init(&c->c,&a); }
+#endif
 
 void pc_signal(PCond* c){ pthread_cond_signal(&c->c); }
 
@@ -480,15 +490,27 @@ void pc_broadcast(PCond* c){ pthread_cond_broadcast(&c->c); }
 
 int pc_wait(PCond* c, PMutex* m, i64 ns){
   if(ns<0){ pthread_cond_wait(&c->c,&m->l); return 0; }
+#if defined(__APPLE__)
+  { struct timespec rel={(time_t)(ns/1000000000),(long)(ns%1000000000)}; return pthread_cond_timedwait_relative_np(&c->c,&m->l,&rel)==ETIMEDOUT; }
+#endif
   struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); u64 t=(u64)ts.tv_sec*1000000000ull+ts.tv_nsec+(u64)ns;
   ts.tv_sec=t/1000000000ull; ts.tv_nsec=t%1000000000ull;
   return pthread_cond_timedwait(&c->c,&m->l,&ts)==ETIMEDOUT; }
 typedef struct { PThreadFn fn; void* arg; } TArg;
 
-static void* tstart(void* p){ TArg a=*(TArg*)p; free(p); a.fn(a.arg); return NULL; }
+static void* tstart(void* p){ TArg a=*(TArg*)p; free(p);
+#if defined(__APPLE__)
+  /* Apple silicon: the game's, GPU and audio threads belong on the performance cores; at the default class macOS
+     also puts them on the efficiency cores */
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+#endif
+  a.fn(a.arg); return NULL; }
 
 int plat_thread(PThreadFn fn, void* arg, size_t stack){
-  TArg* a=malloc(sizeof *a); a->fn=fn; a->arg=arg; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at,stack);
+  TArg* a=malloc(sizeof *a); a->fn=fn; a->arg=arg; pthread_attr_t at; pthread_attr_init(&at);
+  /* a size that isn't a whole number of pages (16K on Apple silicon) is refused, and the thread silently gets the
+     system's default stack instead (512K on macOS) */
+  if(stack){ long pg=sysconf(_SC_PAGESIZE); if(pg>0) stack=(stack+(size_t)pg-1)&~((size_t)pg-1); if(stack<PTHREAD_STACK_MIN) stack=PTHREAD_STACK_MIN; pthread_attr_setstacksize(&at,stack); }
   pthread_attr_setdetachstate(&at,PTHREAD_CREATE_DETACHED); pthread_t t; int r=pthread_create(&t,&at,tstart,a); pthread_attr_destroy(&at); return r? -1 : 0; }
 
 void plat_thread_exit(void){ pthread_exit(NULL); }
@@ -497,9 +519,15 @@ void plat_sleep_ns(i64 ns){ if(ns<=0){ sched_yield(); return; } struct timespec 
 
 void plat_yield(void){ sched_yield(); }
 
+#if defined(__APPLE__)
+void plat_thread_low_priority(void){ pthread_set_qos_class_self_np(QOS_CLASS_UTILITY,0); }
+
+void plat_thread_high_priority(void){ pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0); }
+#else
 void plat_thread_low_priority(void){ }
 
 void plat_thread_high_priority(void){ }
+#endif
 
 u64 plat_thread_cpu_ns(void){ struct timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 
@@ -516,11 +544,47 @@ int g_ww_ok;
 
 int plat_ww_collect(u8* base, u64 size, void (*cb)(u64)){ (void)base; (void)size; (void)cb; return -1; }
 
-u8* plat_vm_reserve(u64 size){ void* p=mmap(NULL,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0); return p==MAP_FAILED? NULL : (u8*)p; }
+/* The guest maps in 4K pages. A host with bigger pages (16K on Apple silicon) commits every host page that holds a
+   committed 4K page, and keeps a bit per 4K page of the reservation (mem.c calls these under its lock): a host page
+   is only given back once none of its 4K pages is committed; until then a decommitted 4K page is zeroed in place, as
+   it would read after a fresh commit */
+static u8* g_vm_base; static u64 g_vm_size, g_vm_page=4096; static u8* g_vm_bits;
+static int vm_bit(u64 pg){ return (g_vm_bits[pg>>3]>>(pg&7))&1; }
+static void vm_bits_set(u64 o, u64 n, int on){ for(u64 pg=o>>12, e=(o+n)>>12; pg<e; pg++){ if(on) g_vm_bits[pg>>3]|=(u8)(1u<<(pg&7)); else g_vm_bits[pg>>3]&=(u8)~(1u<<(pg&7)); } }
+/* fresh, inaccessible pages: the memory goes back to the system and reads as zero when committed again. macOS's
+   MADV_DONTNEED keeps the old contents, so it maps new pages over the range there */
+static void vm_release(u8* p, u64 size){
+#if defined(__APPLE__)
+  if(mmap(p,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED){ memset(p,0,size); }
+#else
+  madvise(p,size,MADV_DONTNEED); mprotect(p,size,PROT_NONE);
+#endif
+}
 
-int plat_vm_commit(u8* p, u64 size){ return mprotect(p,size,PROT_READ|PROT_WRITE); }
+u8* plat_vm_reserve(u64 size){ void* p=mmap(NULL,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0); if(p==MAP_FAILED) return NULL;
+  long pg=sysconf(_SC_PAGESIZE);
+  if(pg>4096 && !g_vm_base){ g_vm_bits=calloc((size_t)(size>>15)+1,1);
+    if(g_vm_bits){ g_vm_base=(u8*)p; g_vm_size=size; g_vm_page=(u64)pg; LOG("memory: host pages of %ld KB, guest pages of 4 KB tracked\n",pg>>10); } }
+  return (u8*)p; }
 
-void plat_vm_decommit(u8* p, u64 size){ madvise(p,size,MADV_DONTNEED); mprotect(p,size,PROT_NONE); }
+static int vm_tracked(u8* p, u64 size){ return g_vm_bits && p>=g_vm_base && p+size<=g_vm_base+g_vm_size; }
+
+int plat_vm_commit(u8* p, u64 size){
+  if(!vm_tracked(p,size)) return mprotect(p,size,PROT_READ|PROT_WRITE);
+  u64 o=(u64)(p-g_vm_base), a=o&~(g_vm_page-1), e=(o+size+g_vm_page-1)&~(g_vm_page-1);
+  if(mprotect(g_vm_base+a,e-a,PROT_READ|PROT_WRITE)) return -1;
+  vm_bits_set(o,size,1); return 0; }
+
+void plat_vm_decommit(u8* p, u64 size){
+  if(!size) return;
+  if(!vm_tracked(p,size)){ vm_release(p,size); return; }
+  u64 o=(u64)(p-g_vm_base), end=o+size;
+  vm_bits_set(o,size,0);
+  for(u64 a=o&~(g_vm_page-1); a<end; a+=g_vm_page){
+    u64 lo= a>o? a : o, hi= a+g_vm_page<end? a+g_vm_page : end;
+    int used=0; for(u64 pg=a>>12; pg<(a+g_vm_page)>>12 && !used; pg++) used=vm_bit(pg);
+    if(!used) vm_release(g_vm_base+a,g_vm_page);   /* no committed 4K page left in it */
+    else memset(g_vm_base+lo,0,hi-lo); } }   /* still committed around it: only these 4K pages are dropped */
 
 void* plat_dl_open(const char* path){ return dlopen(path,RTLD_NOW|RTLD_LOCAL); }
 
@@ -555,7 +619,11 @@ void plat_battery(int* pct, int* chg){ *pct=100; *chg=1;
 static void sighandler(int sig, siginfo_t* si, void* uc_){
   extern void crash_report(void* host_pc, void* fault_addr, int sig);
   void* pc=NULL;
-#if defined(__x86_64__)
+#if defined(__APPLE__) && defined(__aarch64__)
+  ucontext_t* uc=(ucontext_t*)uc_; pc=(void*)(uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+#elif defined(__APPLE__) && defined(__x86_64__)
+  ucontext_t* uc=(ucontext_t*)uc_; pc=(void*)(uintptr_t)uc->uc_mcontext->__ss.__rip;
+#elif defined(__x86_64__)
   #include <ucontext.h>
   ucontext_t* uc=(ucontext_t*)uc_; pc=(void*)uc->uc_mcontext.gregs[REG_RIP];
 #elif defined(__aarch64__)
@@ -574,6 +642,17 @@ extern char** environ;
 
 static void reap(void* p){ int st; waitpid((pid_t)(size_t)p,&st,0); }
 
+#if defined(__APPLE__)
+/* macOS: a dialog through osascript (any thread, unlike an AppKit alert, which only the main thread may show) */
+void plat_message(const char* text, int error, int wait){
+  char esc[4600]; size_t n=0;
+  for(const char* s=text; *s && n<sizeof esc-3; s++){ if(*s=='"' || *s=='\\') esc[n++]='\\'; esc[n++]=*s; }
+  esc[n]=0;
+  char script[5000]; snprintf(script,sizeof script,"display dialog \"%s\" with title \"Metroid Dread\" buttons {\"OK\"} default button 1 with icon %s",esc,error? "stop" : "note");
+  char* a[]={"osascript","-e",script,NULL}; pid_t pid;
+  if(posix_spawnp(&pid,a[0],NULL,NULL,a,environ)) return;
+  if(wait) reap((void*)(size_t)pid); else plat_thread(reap,(void*)(size_t)pid,1<<16); }
+#else
 void plat_message(const char* text, int error, int wait){
   if(!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY")) return;
   char* z[]={"zenity",error? "--error" : "--info","--no-markup","--no-wrap","--title=SwitchRecomp","--text",(char*)text,NULL};
@@ -581,6 +660,7 @@ void plat_message(const char* text, int error, int wait){
   pid_t pid;
   if(posix_spawnp(&pid,z[0],NULL,NULL,z,environ) && posix_spawnp(&pid,k[0],NULL,NULL,k,environ)) return;
   if(wait) reap((void*)(size_t)pid); else plat_thread(reap,(void*)(size_t)pid,1<<16); }
+#endif
 #endif
 
 void plat_install_crash_handler(void){

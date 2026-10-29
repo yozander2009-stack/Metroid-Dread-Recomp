@@ -11,6 +11,7 @@ const SwrModule* g_mod;
 GuestFn* g_disp;
 GuestFn swr_interp_entry;
 char g_datadir[1024], g_exename[256], g_exedir[1024];
+char g_bindir[1024];   /* where the game code and its libraries are: g_exedir, except inside a macOS .app (app_dirs) */
 volatile int g_quit;
 int g_frames;
 int g_opt_video_async_retire=0,g_opt_video_avx2=0,g_opt_video_block_copy=0;
@@ -647,6 +648,8 @@ static int load_code(void){
   snprintf(p,sizeof p,"%s%s_code.dll",g_exedir,g_exename);
 #elif defined(__ANDROID__)
   snprintf(p,sizeof p,"lib%s_code.so",g_exename);   /* lives in the apk's lib dir */
+#elif defined(__APPLE__)
+  snprintf(p,sizeof p,"%s%s_code.dylib",g_bindir,g_exename);
 #else
   snprintf(p,sizeof p,"%s%s_code.so",g_exedir,g_exename);
 #endif
@@ -784,16 +787,54 @@ void services_init(void){
   svc_core_init(); svc_hid_init(); svc_fs_init(); svc_vi_init(); nv_init(); svc_pl_init(); svc_launcher_init();
 }
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <limits.h>
+#endif
 static void split_path(const char* argv0){
   char p[1024]; strncpy(p,argv0?argv0:"",1023); p[1023]=0;
+#if defined(__APPLE__)
+  { /* the real path: started from Finder, a symlink or PATH, argv[0] says little, and a relative dlopen path makes
+       dyld search its library folders before ours */
+    char e[PATH_MAX], r[PATH_MAX]; uint32_t n=sizeof e;
+    if(!_NSGetExecutablePath(e,&n) && realpath(e,r)){ strncpy(p,r,1023); p[1023]=0; } }
+#endif
   char* s1=strrchr(p,'/'), *s2=strrchr(p,'\\'), *s=s1>s2? s1 : s2;
   const char* base= s? s+1 : p;
   strncpy(g_exename,base,255); char* dot=strrchr(g_exename,'.'); if(dot && (!strcmp(dot,".exe")||!strcmp(dot,".EXE"))) *dot=0;
   if(s){ s[1]=0; strncpy(g_exedir,p,1023); } else g_exedir[0]=0;
+  strncpy(g_bindir,g_exedir,1023);
 }
+
+#if defined(__APPLE__)
+#include <sys/stat.h>
+/* A macOS .app (macos/build.sh app): the program, game code and libraries are in Contents/MacOS, the game's exefs and
+   romfs in Contents/Resources/NAME_data, all read-only. What the game writes (settings, log, saves, caches,
+   screenshots) goes to ~/Library/Application Support/NAME, which becomes the game folder: g_exedir points there, its
+   NAME_data/exefs and romfs are links into the app (made again at every start, so the app can be moved), and it is the
+   working folder. Writing into the app would break its signature. Outside an .app nothing changes */
+static void app_dirs(void){
+  const char* m=strstr(g_exedir,".app/Contents/MacOS/"); const char* home=getenv("HOME");
+  if(!m || m[20] || !home || !*home) return;
+  char res[1200], user[1200], data[1300], link[1400], dst[1400], cur[1400];
+  snprintf(res,sizeof res,"%.*s.app/Contents/Resources/%s_data",(int)(m-g_exedir),g_exedir,g_exename);
+  snprintf(user,sizeof user,"%s/Library/Application Support/%s",home,g_exename);
+  mkdir(user,0755);
+  snprintf(data,sizeof data,"%s/%s_data",user,g_exename); mkdir(data,0755);
+  static const char* const L[]={"exefs","romfs"};
+  for(int i=0;i<2;i++){
+    snprintf(link,sizeof link,"%s/%s",data,L[i]); snprintf(dst,sizeof dst,"%s/%s",res,L[i]);
+    ssize_t n=readlink(link,cur,sizeof cur-1); if(n>=0) cur[n]=0;
+    if(n<0 || strcmp(cur,dst)){ unlink(link); symlink(dst,link); } }   /* a real folder there is left alone */
+  snprintf(g_exedir,sizeof g_exedir,"%s/",user);
+  if(chdir(user)) {} }
+#endif
 
 int swr_main(int argc, char** argv){
   split_path(argv[0]);
+#if defined(__APPLE__)
+  app_dirs();
+#endif
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   pm_init(&g_setq_lock); g_setq_init=1;
@@ -932,6 +973,9 @@ static u8* font_fallback(u64* size){
   const char* wd=getenv("WINDIR"); if(!wd) wd="C:\\Windows";
   snprintf(w1,sizeof w1,"%s\\Fonts\\arial.ttf",wd); snprintf(w2,sizeof w2,"%s\\Fonts\\segoeui.ttf",wd); snprintf(w3,sizeof w3,"%s\\Fonts\\tahoma.ttf",wd);
   cands[n++]=w1; cands[n++]=w2; cands[n++]=w3;
+#elif defined(__APPLE__)
+  (void)w1; (void)w2; (void)w3;
+  cands[n++]="/System/Library/Fonts/Supplemental/Arial.ttf"; cands[n++]="/Library/Fonts/Arial.ttf"; cands[n++]="/System/Library/Fonts/Supplemental/Verdana.ttf";
 #else
   (void)w1; (void)w2; (void)w3;
   cands[n++]="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"; cands[n++]="/usr/share/fonts/TTF/DejaVuSans.ttf"; cands[n++]="/usr/share/fonts/truetype/freefont/FreeSans.ttf";

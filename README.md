@@ -28,6 +28,7 @@ the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 o
 | `dread/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
 | `third_party/imgui-1.92.5/` | Dear ImGui (MIT) |
 | `linux/` | scripts for the Linux / Steam Deck build |
+| `macos/` | the macOS build (Apple silicon, native Vulkan through MoltenVK): see [macos/README.md](macos/README.md) |
 
 ## Setting up the game (players)
 
@@ -79,6 +80,17 @@ python\python.exe dread\make_release.py release <empty folder> --version X.Y.Z -
 
 The release step also needs `redist\zlib1.dll` (zlib 1.3.1, x64) and `redist\SDL2.dll` (SDL 2.x x64 release), the two
 DLLs the game ships beside it. They are not in this repository.
+
+## Build and play on macOS
+
+Early: tested on one Mac so far. With the Xcode command line tools and `brew install sdl2 molten-vk glslang libvpx`:
+
+```
+macos/build.sh                              # the runtime
+macos/build.sh game "/path/to/your dump"    # setup: checks your files, translates and compiles the game into games/
+```
+
+Then start `games/Play Metroid Dread.command`. Details, controls and what differs from Windows: [macos/README.md](macos/README.md).
 
 ## What is in this repository
 

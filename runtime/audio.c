@@ -195,7 +195,7 @@ static void aoutput(const i16*pcm){
   }
   ReleaseSRWLockExclusive(&lock);
 #elif !defined(__ANDROID__)
-  /* Linux / Steam Deck: SDL2's queued audio (PipeWire, PulseAudio or ALSA, whichever the system has), loaded at run
+  /* Linux / Steam Deck and macOS: SDL2's queued audio (PipeWire, PulseAudio or ALSA, whichever the system has), loaded at run
      time like the controllers (backend_x11.c). Same format and the same cap as the Windows path: 32 chunks of
      5 ms queued at most, a chunk past that is dropped rather than letting latency grow */
   typedef struct { int freq; u16 format; u8 channels, silence; u16 samples, padding; u32 size; void* callback; void* userdata; } SdlSpec;
@@ -204,7 +204,11 @@ static void aoutput(const i16*pcm){
   static void (*pause_dev)(u32,int); static int (*queue)(u32,const void*,u32); static u32 (*queued)(u32);
   if(!attempted){ attempted=1;
     if(!getenv("SWR_MUTE_AUDIO")){
+#if defined(__APPLE__)
+      void* h=RTLD_DEFAULT;   /* macOS: the runtime links SDL2 itself (backend_sdl.c) */
+#else
       void* h=dlopen("libSDL2-2.0.so.0",RTLD_NOW|RTLD_LOCAL); if(!h) h=dlopen("libSDL2.so",RTLD_NOW|RTLD_LOCAL);
+#endif
       if(h){ *(void**)&init_sub=dlsym(h,"SDL_InitSubSystem"); *(void**)&open_dev=dlsym(h,"SDL_OpenAudioDevice"); *(void**)&pause_dev=dlsym(h,"SDL_PauseAudioDevice");
         *(void**)&queue=dlsym(h,"SDL_QueueAudio"); *(void**)&queued=dlsym(h,"SDL_GetQueuedAudioSize"); }
       if(init_sub && open_dev && pause_dev && queue && queued && init_sub(0x10)==0){   /* SDL_INIT_AUDIO */

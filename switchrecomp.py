@@ -14,8 +14,8 @@ Usage:
   python switchrecomp.py FOLDER -o Game --cc gcc -O 2 --jobs 8
 
 Output (next to the executable):
-  Game.exe             runtime (Windows) or Game (Linux)
-  Game_code.dll/.so    the game code already translated to native
+  Game.exe             runtime (Windows) or Game (Linux, macOS)
+  Game_code.dll/.so/.dylib   the game code already translated to native
   Game_data/           exefs + romfs + save data
   Game.ini             options
 
@@ -62,6 +62,18 @@ def find_cc(pref=None, target_win=False):
 
 
 def is_tcc(cc): return 'tcc' in os.path.basename(cc).lower()
+
+
+def is_mac(target_win):
+    # macOS builds are native only (Apple clang, no cross compiling): not Windows and running on a Mac
+    return not target_win and sys.platform == 'darwin'
+
+
+def code_suffix(target_win):
+    return '_code.dll' if target_win else '_code.dylib' if is_mac(target_win) else '_code.so'
+
+
+MAC_MIN = '-mmacosx-version-min=12.0'   # MoltenVK's Vulkan 1.3 needs macOS 12 or later
 
 
 def tcc_b(cc):
@@ -168,6 +180,9 @@ def compile_all(files, cc, opt, outdir, target_win, jobs, say, extra_flags=()):
     else:
         flags = ['-O' + opt, '-fno-strict-aliasing', '-fwrapv', '-w', '-I', RT, '-foptimize-sibling-calls', '-fno-semantic-interposition']
         if not target_win: flags += ['-fPIC', '-fvisibility=hidden']
+        if is_mac(target_win):
+            # the Dread patches call a few Windows functions; runtime/posix_compat.h maps them (as linux/lx_compat.h)
+            flags += [MAC_MIN, '-include', 'posix_compat.h']
         flags += list(extra_flags)
     t0 = time.time()
     done = [0]; lock = threading.Lock()
@@ -219,7 +234,8 @@ def link_module(objs, cc, out, target_win, say):
         cmd = [cc, '-shared', '-o', out] + tcc_b(cc) + ['@objects.rsp']
     else:
         cmd = [cc, '-shared', '-o', out, '@objects.rsp']
-        if not target_win: cmd += ['-lm']
+        if is_mac(target_win): cmd += [MAC_MIN, '-Wl,-install_name,@loader_path/' + os.path.basename(out)]
+        elif not target_win: cmd += ['-lm']
         else: cmd += ['-static-libgcc']
     err = run_cc(cmd, cc, cwd=bdir)
     if err: raise SystemExit('Linking failed:\n' + err[-4000:])
@@ -255,8 +271,20 @@ def elf_stack_not_exec(path):
 
 
 def runtime_path(target_win, backend):
-    return os.path.join(HERE, 'bin', 'runtime_%s_%s%s' % ('win64' if target_win else 'linux', backend,
-                                                           '.exe' if target_win else ''))
+    return os.path.join(HERE, 'bin', 'runtime_%s_%s%s' % ('win64' if target_win else 'macos' if is_mac(target_win) else 'linux',
+                                                           backend, '.exe' if target_win else ''))
+
+
+def sdl2_flags():
+    """compile and link flags of the SDL2 the macOS runtime links (Homebrew's: brew install sdl2)"""
+    for tool in (['sdl2-config', '--cflags'], ['pkg-config', '--cflags', 'sdl2']):
+        if shutil.which(tool[0]):
+            r = subprocess.run(tool, capture_output=True, text=True)
+            libs = subprocess.run(tool[:-1] + ['--libs'], capture_output=True, text=True)
+            if r.returncode == 0 and libs.returncode == 0:
+                lf = libs.stdout.split()
+                return r.stdout.split(), lf + ['-Wl,-rpath,' + f[2:] for f in lf if f.startswith('-L')]
+    raise SystemExit('SDL2 not found: install it with Homebrew (brew install sdl2).')
 
 
 def build_runtime(cc, out, target_win, backend, say, opt='2'):
@@ -268,6 +296,8 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     extra = ['gpu_gl', 'gl_load', 'shader', 'astc', 'glq', 'glq_gen', 'dlss_gl'] if gl else ['gpu_nogl']
     gles = backend in ('x11es', 'android')
     if gles: extra += ['overlay']
+    mac = is_mac(target_win)
+    plat = 'win' if target_win else 'mac' if mac else 'lin'   # prebuilt static libraries: runtime/<lib>/<plat>/
     srcs = [os.path.join(RT, s + '.c') for s in RUNTIME_SRC + extra] + [os.path.join(RT, 'backend_%s.c' % backend), os.path.join(RT, 'entry.c')]
     if gles or gl: srcs += [os.path.join(RT, 'bcn', 'bcn.cpp'), os.path.join(RT, 'bcn', 'bcdec.cpp')]
     # LSFG (uses the user's Lossless.dll), desktop GL only
@@ -287,10 +317,12 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
         if wr and subprocess.run([wr, '-i', os.path.join(RT, 'app.rc'), '-o', res, '-O', 'coff', '--include-dir', RT], capture_output=True).returncode == 0:
             srcs += [res]
     # NVDEC/VIC video: link OpenH264 (BSD) statically if we have it for this target
-    oh = os.path.join(RT, 'oh264', 'win' if target_win else 'lin')
-    h264 = os.path.isfile(os.path.join(oh, 'libdecoder.a')) and backend in ('win32', 'x11', 'headless')
-    vp = os.path.join(RT, 'vp9', 'win' if target_win else 'lin')   # libvpx (VP9 .webm videos); optional
-    vp9 = os.path.isfile(os.path.join(vp, 'libvpx.a')) and backend in ('win32', 'x11', 'headless')
+    oh = os.path.join(RT, 'oh264', plat)
+    h264 = all(os.path.isfile(os.path.join(oh, lib)) for lib in ('libdecoder.a', 'libcommon.a')) and backend in ('win32', 'x11', 'headless', 'sdl')
+    vp = os.path.join(RT, 'vp9', plat)   # libvpx (VP9 .webm videos); optional
+    vp9 = os.path.isfile(os.path.join(vp, 'libvpx.a')) and backend in ('win32', 'x11', 'headless', 'sdl')
+    if mac and backend == 'sdl' and (not h264 or not vp9):
+        raise SystemExit('macOS requires both OpenH264 and libvpx for video playback: run macos/build.sh first.')
     srcs += [os.path.join(RT, 'host1x.c'), os.path.join(RT, 'snxvk_glue.c')]
     # Metroid Dread front end + in-game menu (Dear ImGui, runtime/dread_ui); prebuilt by work-profiler/build_imgui.py
     imgui = os.path.join(RT, 'imgui', 'libimgui.a')
@@ -303,8 +335,15 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     # renderer=vulkan_native: ScarletNX's GPU front end + Vulkan renderer (GPL-3.0), prebuilt by work-profiler/build_snxvk.py
     snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss.a' if release else 'libsnxvk_new.a')   # ScarletNX main b5f4f14 (work-profiler/build_snxvk2.py)
     if os.environ.get('SWR_SNXVK_LIB'): snxvk = os.path.join(RT, 'snxvk', os.environ['SWR_SNXVK_LIB'])   # e.g. libsnxvk_new.a (re-vendor tests)
-    snxvk = snxvk if os.path.isfile(snxvk) and target_win and backend == 'win32' and not os.environ.get('SWR_NO_SNXVK') else None
+    if mac: snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_mac.a')   # work-profiler/build_snxvk2.py on the Mac, no DLSS
+    snxvk = snxvk if os.path.isfile(snxvk) and ((target_win and backend == 'win32') or (mac and backend == 'sdl')) and not os.environ.get('SWR_NO_SNXVK') else None
+    if mac and backend == 'sdl' and not snxvk:
+        raise SystemExit('macOS draws with the native Vulkan renderer only: build runtime/snxvk/libsnxvk_mac.a first '
+                         '(python3 work-profiler/build_snxvk2.py).')
     cmd = [cc, '-O' + opt, '-w', '-fno-strict-aliasing', '-Wl,-S', '-I', RT, '-I', os.path.join(RT, 'bcn'), '-I', os.path.join(RT, 'spvc'), '-I', os.path.join(RT, 'oh264', 'include'), '-I', os.path.join(RT, 'vp9', 'include'), '-I', os.path.join(RT, 'snxvk', 'deps', 'Vulkan-Headers-1.4.365', 'include')] + srcs + ['-o', out]
+    if mac:
+        sdl_cf, sdl_lf = sdl2_flags() if backend == 'sdl' else ([], [])
+        cmd += [MAC_MIN, '-I', os.path.join(HERE, 'third_party', 'khronos', 'include')] + sdl_cf
     if not h264: cmd += ['-DSWR_NO_H264']
     if vp9: cmd += ['-DSWR_HAVE_VP9']
     if release: cmd += ['-DSWR_RELEASE']
@@ -315,7 +354,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if spvc: cmd += [spvc]
     if h264: cmd += [os.path.join(oh, 'libdecoder.a'), os.path.join(oh, 'libcommon.a')]
     if vp9: cmd += [os.path.join(vp, 'libvpx.a')]
-    if spvc or h264 or snxvk or frontend or overlay:
+    if mac:
+        cmd += ['-lc++']   # bcn, VMA: the system's libc++
+    elif spvc or h264 or snxvk or frontend or overlay:
         # static on Linux too, so the runtime doesn't depend on the libstdc++ version of the distro
         cmd += ['-lstdc++'] if target_win else ['-Wl,-Bstatic', '-lstdc++', '-Wl,-Bdynamic', '-static-libgcc']
     if target_win:
@@ -324,6 +365,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
         if frontend: cmd += ['-ld3d11', '-ldxgi', '-ld3dcompiler', '-ldwmapi', '-luuid', '-loleaut32', '-lurlmon', '-lwinhttp', '-lbcrypt']
     else:
         cmd += ['-lpthread', '-ldl', '-lm', '-rdynamic']
+        if mac:
+            cmd += sdl_lf + ['-Wl,-rpath,@executable_path']   # SDL2 next to the game first (macos/package.sh)
+            cmd += ['-Wl,-U,_swr_module_static']   # main.c's weak hook for a statically linked game: may stay undefined
         if backend == 'x11': cmd += ['-lX11', '-lGL']
         if backend == 'x11es': cmd += ['-lX11', '-lEGL']
     err = run_cc(cmd, cc)
@@ -407,8 +451,8 @@ def main():
     ap.add_argument('-O', default='2', help='optimization level (0-3)')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--chunk', type=int, default=30000, help='instructions per C file')
-    ap.add_argument('--target', choices=['auto', 'win64', 'linux'], default='auto')
-    ap.add_argument('--backend', choices=['auto', 'win32', 'x11', 'x11es', 'headless', 'android'], default='auto')
+    ap.add_argument('--target', choices=['auto', 'win64', 'linux', 'macos'], default='auto')
+    ap.add_argument('--backend', choices=['auto', 'win32', 'x11', 'x11es', 'headless', 'android', 'sdl'], default='auto')
     ap.add_argument('--native', action='store_true', help='optimize for THIS processor (-march=native)')
     ap.add_argument('--no-build', action='store_true', help='only generate the C code and copy the game data')
     ap.add_argument('--keep-c', action='store_true', help=argparse.SUPPRESS)   # the C is always kept, for rebuilds
@@ -419,7 +463,9 @@ def main():
     a = ap.parse_args()
     say = (lambda m: None) if a.quiet else (lambda m: print(m, flush=True))
     target_win = a.target == 'win64' or (a.target == 'auto' and sys.platform.startswith('win'))
-    backend = a.backend if a.backend != 'auto' else ('win32' if target_win else 'x11')
+    if a.target == 'macos' and sys.platform != 'darwin': raise SystemExit('--target macos builds on a Mac only.')
+    if a.target == 'linux' and sys.platform == 'darwin': raise SystemExit('--target linux does not build on a Mac.')
+    backend = a.backend if a.backend != 'auto' else ('win32' if target_win else 'sdl' if is_mac(target_win) else 'x11')
     if a.build_runtime:
         cc = find_cc(a.cc, target_win)
         if not cc: raise SystemExit('C compiler not found: %s' % (a.cc or 'gcc'))
@@ -453,7 +499,7 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     base = os.path.join(outdir, title)
     exe = base + ('.exe' if target_win else '')
-    modout = base + ('_code.dll' if target_win else '_code.so')
+    modout = base + code_suffix(target_win)
     if not a.no_build: check_writable(exe, modout)
     hints = []
     hp = base + '.hints'
