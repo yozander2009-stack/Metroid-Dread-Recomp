@@ -94,6 +94,9 @@ static void sdl_load(void){
   *(FARPROC*)&sdl_gctype=GetProcAddress(h,"SDL_GameControllerTypeForIndex");   /* SDL 2.0.9+; optional: no rumble without it */
   sdl_sethint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS","0");   /* positions, not printed labels */
   sdl_sethint("SDL_JOYSTICK_HIDAPI_PS4","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_PS5","1");
+  /* PS4/PS5 pads rumble over Bluetooth only with these (SDL2 keeps their simple report mode otherwise): a DualSense
+     felt nothing in game (MEASURED 2026-10-29, GitHub #20) */
+  sdl_sethint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE","1");
   sdl_sethint("SDL_JOYSTICK_HIDAPI_SWITCH","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_JOY_CONS","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS","1");
   sdl_sethint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS","1");
   /* We poll from the game's input thread, not the thread that started SDL, and pump events only once a second.

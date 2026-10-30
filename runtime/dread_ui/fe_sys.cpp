@@ -539,6 +539,7 @@ void pads_init() {
     *(FARPROC*)&s_rumble = GetProcAddress(s_mod, "SDL_GameControllerRumble");
     // the same hints the game uses (backend_win32.c sdl_load), so SDL behaves the same in both
     const char* hints[][2] = {{"SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0"}, {"SDL_JOYSTICK_HIDAPI_PS4", "1"}, {"SDL_JOYSTICK_HIDAPI_PS5", "1"},
+        {"SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "1"}, {"SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1"},
         {"SDL_JOYSTICK_HIDAPI_SWITCH", "1"}, {"SDL_JOYSTICK_HIDAPI_JOY_CONS", "1"}, {"SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", "1"},
         {"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"}, {"SDL_JOYSTICK_RAWINPUT", "0"}, {"SDL_JOYSTICK_THREAD", "1"}};
     for (auto& h : hints) s_hint(h[0], h[1]);
