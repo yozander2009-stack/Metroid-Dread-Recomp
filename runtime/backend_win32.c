@@ -461,7 +461,7 @@ int backend_gl_create(void){
       WARN("OpenGL: no 4.3+ context (attempt %d, pixel format %d, %s, renderer %s, error %lu)\n",attempt+1,GetPixelFormat(g_hdc),
            cca? "attribs entry found" : "no attribs entry",rn? rn : "?",GetLastError()); }
     wglMakeCurrent(NULL,NULL); wglDeleteContext(tmp); }
-  if(!g_ctx){ fatal("Your graphics card does not support OpenGL 4.3.\nPlease update your GPU driver."); return 0; }
+  if(!g_ctx){ fatal("Could not start OpenGL 4.3 on the game window.\nUpdate your GPU driver, or pick Native Vulkan in the settings.\nMetroid Dread.log says why."); return 0; }
   wglMakeCurrent(g_hdc,g_ctx);
   if(g_glwnd && !vkp_init()){
     /* Vulkan unavailable: give the real window the same pixel format and render to it with GL as usual */
