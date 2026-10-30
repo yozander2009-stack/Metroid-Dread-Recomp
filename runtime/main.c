@@ -95,7 +95,12 @@ int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backen
 char g_opt_mouse_buttons[64]="y,l,r,-,-";   /* left, right, middle, back, forward -> Switch buttons */   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
 int g_opt_diag=0;
 int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt_drs=0;
-int g_opt_media_turns=1;   /* serialize_media_threads, read by kernel.c core0_member */
+#ifdef _WIN32
+#define MEDIA_TURNS 1
+#else   /* Steam Deck: a held turn made 1 of 16 reloads freeze for 2 s; the freeze it guarded against is the fixed condvar order */
+#define MEDIA_TURNS 0
+#endif
+int g_opt_media_turns=MEDIA_TURNS;   /* serialize_media_threads, read by kernel.c core0_member */
 int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
 static int aspect_given;   /* ini aspect= seen: ultrawide= no longer applies */
@@ -415,7 +420,7 @@ static const IniOpt INI_PERF[]={
   {"fast_loading","0","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
   {"sleep_waits","1","1 = threads waiting on the OpenGL thread sleep instead of spinning (frees CPU on 2-4 core\n;   PCs and laptops); 0 = spin like older versions"},
   {"texture_threads","0","Threads that unpack texture loads: 0 = automatic (all cores), 1 = one thread like older versions"},
-  {"serialize_media_threads","1","1 = video/media threads that share a core on the Switch take turns like on the console\n;   (guards against a rare freeze when a video stops); 0 = run them fully in parallel"},
+  {"serialize_media_threads",MEDIA_TURNS?"1":"0","1 = video/media threads that share a core on the Switch take turns like on the console\n;   (guards against a rare freeze when a video stops); 0 = run them fully in parallel"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_FG[]={
 #ifndef SWR_RELEASE
