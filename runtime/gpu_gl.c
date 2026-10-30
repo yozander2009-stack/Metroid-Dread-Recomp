@@ -3355,8 +3355,9 @@ int gpu_gl_present_pacing(void){
 #if defined(_WIN32)
   extern int g_present_pacing_candidate,g_opt_fps,g_opt_vsync,g_lsfg_opt;extern volatile int g_vt_on,g_rec_active;
   return g_present_pacing_candidate&&g_gl&&glq_active()&&g_opt_fps&&!g_opt_vsync&&!g_lsfg_opt&&!g_vt_on&&!g_rec_active;
-#else
-  return 0;
+#else   /* Linux: same presentation-thread pacing (before: the main.c limiter, which paces before the GL work, so frames reached the screen 14-19 ms apart on a Steam Deck) */
+  extern int g_present_pacing_candidate,g_opt_fps,g_opt_vsync;extern volatile int g_vt_on,g_rec_active;
+  return g_present_pacing_candidate&&g_gl&&glq_active()&&g_opt_fps&&!g_opt_vsync&&!g_vt_on&&!g_rec_active;
 #endif
 }
 void gpu_gl_frame_consumed(void){

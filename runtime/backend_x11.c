@@ -66,6 +66,7 @@ static void sdl_load(void){
 
 /* the kind of controller connected, for the button icons (svc_fs.c), asked before the window exists: 1 Xbox or any
    other (the Steam Deck's controls and Steam Input pads among them), 2 DualShock 4, 3 DualSense, 4 Switch, 0 none */
+void mouse_map_reset(void){}   /* mouse free aim (main.c mouse_buttons) is Windows-only */
 int backend_pad_family(void){
   sdl_load(); if(!sdl.Init) return 0;
   for(int i=0;i<sdl.NumJoysticks();i++) if(sdl.IsGameController(i)){
@@ -119,8 +120,9 @@ static const char* HELP=
   "Keyboard:\n"
   "  Arrows = D-Pad     W A S D = Left stick    I J K L = Right stick\n"
   "  X / Space = A    Z = B    C = X    V = Y\n"
-  "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
-  "F1 = this help   F3 = screenshot   F4 = FPS limit 60 / unlimited   F5 = diagnostic dump (trace)\n"
+  "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n"
+  "  Shift = L3 (left stick click)   F = R3 (right stick click)\n\n"
+  "F1 = this help   F3 = screenshot   F4 = FPS limit 60 / your limit   F5 = diagnostic dump (trace)\n"
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
   "F11 / Alt+Enter = fullscreen   Esc = quit";
 
@@ -206,6 +208,7 @@ void video_present_rgba(const u32* px, int w, int h, int stride){ extern void gp
 /* keys -> HidNpadButton bits, the same layout as on Windows */
 static u64 keymap(KeySym k){
   switch(k){ case XK_x: case XK_space: return 1ull<<0; /* A */ case XK_z: return 1ull<<1; /* B */ case XK_c: return 1ull<<2; /* X */ case XK_v: return 1ull<<3; /* Y */
+    case XK_Shift_L: case XK_Shift_R: return 1ull<<4; /* L3 */ case XK_f: return 1ull<<5; /* R3 (GitHub #32) */
     case XK_q: return 1ull<<6; /* L */ case XK_e: return 1ull<<7; /* R */ case XK_1: return 1ull<<8; /* ZL */ case XK_3: return 1ull<<9; /* ZR */
     case XK_Return: case XK_KP_Enter: return 1ull<<10; /* + */ case XK_BackSpace: return 1ull<<11; /* - */
     case XK_Left: return 1ull<<12; case XK_Up: return 1ull<<13; case XK_Right: return 1ull<<14; case XK_Down: return 1ull<<15;
@@ -250,8 +253,11 @@ static void key_down(XKeyEvent* e){
         plat_mkdir("captures"); FILE* f=fopen("captures/threads.txt","w");   /* written next to the trace */
         if(f){ g_log_redirect=f; kernel_dump_threads(); g_log_redirect=NULL; fclose(f); }
         kernel_dump_threads(); gpu_gl_dump_rts(); } return;
-    case XK_F4: if(once){ g_opt_fps= g_opt_fps==0? 1 : 0; char t[300]; snprintf(t,sizeof t,"%s  |  FPS limit: %s",g_title,g_opt_fps==0? "unlimited" : "60"); set_title(t);
-        extern void ini_set(const char*, const char*); char v[8]; snprintf(v,sizeof v,"%d",g_opt_fps); ini_set("fps_limit",v); } return;
+    case XK_F4: if(once){   /* 60 and back to the player's own cap, this session only (as backend_win32.c, GitHub #20) */
+        static int cap=-1; if(cap<0) cap= g_opt_fps==1? 0 : g_opt_fps;
+        if(g_opt_fps==1) g_opt_fps=cap; else { cap=g_opt_fps; g_opt_fps=1; }
+        char t[300]; if(g_opt_fps==0) snprintf(t,sizeof t,"%s  |  FPS limit: unlimited",g_title); else snprintf(t,sizeof t,"%s  |  FPS limit: %d",g_title,g_opt_fps==1? 60 : g_opt_fps);
+        set_title(t); } return;
   }
   keys_held|=keymap(k); }
 
@@ -262,6 +268,9 @@ static i32 axis(u64 b, int neg, int pos){ return ((b>>pos)&1? 32767:0) - ((b>>ne
    SWR_TEST_CAPTURE_FRAMES (SWR_TEST_CAPTURE_PREFIX-fN); SWR_TEST_EXIT_FRAME. Inert when unset */
 typedef struct { u32 frame; u64 buttons; i32 lx, ly, rx, ry; } TestInput;
 static TestInput* test_inputs; static u32 test_n, test_i; static int test_loaded, test_replay;
+/* SWR_TEST_SCRIPT_MS=1: the first column is milliseconds since the replay started (the first input poll, right after the
+   guest main thread starts) instead of presented frames, as backend_win32.c; SWR_TEST_EXIT_MS ends the run the same way */
+static int test_ms; static u64 test_clock_start;
 static void test_input_apply(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   if(!test_loaded){ test_loaded=1; const char* path=getenv("SWR_TEST_SCRIPT");
     if(path && *path){ FILE* f=fopen(path,"r"); char line[256]; u32 cap=8192;
@@ -270,12 +279,15 @@ static void test_input_apply(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
       while(fgets(line,sizeof line,f)){ if(line[0]=='#'||line[0]=='\n'||line[0]=='\r') continue; TestInput v={0}; unsigned long long m;
         if(sscanf(line,"%u,%llx,%d,%d,%d,%d",&v.frame,&m,&v.lx,&v.ly,&v.rx,&v.ry)!=6 || test_n==cap){ fclose(f); WARN("test input: invalid replay row\n"); _exit(2); }
         v.buttons=(u64)m; test_inputs[test_n++]=v; }
-      fclose(f); test_replay= test_n>0; LOG("test input: frame replay active, %u states\n",test_n); } }
+      fclose(f); test_replay= test_n>0; LOG("test input: frame replay active, %u states\n",test_n); }
+    test_clock_start=plat_ns(); if(getenv("SWR_TEST_SCRIPT_MS")) test_ms=1;
+    if(path && *path){ LOG("test input clock: start_ns=%llu\n",(unsigned long long)test_clock_start); } }
   u32 frame=(u32)g_frames;
   { static int done; const char* se; if(!done && (se=getenv("SWR_TEST_SETENV")) && *se){ u32 at=(u32)strtoul(se,NULL,10); const char* kv=strchr(se,':');
       if(!kv) done=1; else if(frame>=at){ char k[64]; const char* eq=strchr(kv+1,'=');
         if(eq && eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; setenv(k,eq+1,1); LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
-  if(test_replay){ while(test_i+1<test_n && test_inputs[test_i+1].frame<=frame) test_i++; TestInput* v=&test_inputs[test_i];
+  u64 pos= test_ms? (plat_ns()-test_clock_start)/1000000ull : frame;
+  if(test_replay){ while(test_i+1<test_n && test_inputs[test_i+1].frame<=pos) test_i++; TestInput* v=&test_inputs[test_i];
     *b=v->buttons; *lx=v->lx; *ly=v->ly; *rx=v->rx; *ry=v->ry; }
 }
 static void test_frame_hooks(void){
@@ -287,7 +299,8 @@ static void test_frame_hooks(void){
     LOG("test capture: requested_frame=%llu actual_frame=%d ns=%llu\n",(unsigned long long)next,g_frames,(unsigned long long)plat_ns()); gpu_gl_screenshot(path);
     if(*times==','){ times++; next=strtoull(times,(char**)&times,10); } else { times=NULL; next=0; } }
   static u64 heartbeat; u64 now=plat_ns(); if(!heartbeat || now-heartbeat>=1000000000ull){ heartbeat=now; LOG("test heartbeat: frame=%d fps_limit=%d ns=%llu\n",g_frames,g_opt_fps,(unsigned long long)now); }
-  const char* stop=getenv("SWR_TEST_EXIT_FRAME"); if(stop && (u64)g_frames>=strtoull(stop,NULL,10)){ LOG("test complete: frame=%d\n",g_frames); extern void save_hints(void); save_hints(); log_flush(); fflush(NULL); _exit(0); }
+  const char* stop=getenv("SWR_TEST_EXIT_FRAME"), *stop_ms=getenv("SWR_TEST_EXIT_MS");
+  if((stop && (u64)g_frames>=strtoull(stop,NULL,10)) || (stop_ms && test_clock_start && (plat_ns()-test_clock_start)/1000000ull>=strtoull(stop_ms,NULL,10))){ LOG("test complete: frame=%d\n",g_frames); extern void save_hints(void); save_hints(); log_flush(); fflush(NULL); _exit(0); }
 }
 
 void video_poll(void){

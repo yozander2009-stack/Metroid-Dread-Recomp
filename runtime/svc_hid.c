@@ -94,23 +94,38 @@ static int hid_applet_res(SvcObj* o, IpcCtx* c){
 static int hid_vibration_list(SvcObj* o, IpcCtx* c){ (void)o; (void)c; return 0; }   /* IActiveVibrationDeviceList: 0 ActivateVibrationDevice */
 static u64 g_hold_type=0, g_comm_mode=0, g_handheld_mode=0;
 
-/* controller rumble: the newest HD rumble value the game sent for each Joy-Con side (VibrationDeviceHandle device
-   index: 0 left, 1 right) as {low amplitude, low frequency, high amplitude, high frequency}. The backends read it as
-   a standard pad's two motors (hid_rumble_get) */
+/* controller rumble: the newest HD rumble value the game sent for each controller (VibrationDeviceHandle: npad id in
+   bits 8-15, 0x20 = handheld; device index in bits 16-23, 0 left, 1 right) as {low amplitude, low frequency, high
+   amplitude, high frequency}. The backends read player 1's (npad 0 or handheld) as a standard pad's two motors
+   (hid_rumble_get). Kept per controller: one slot per side let the zeros the game sends the other npads in the same
+   SendVibrationValues batch overwrite player 1's, so nothing rumbled in game (GitHub #20) */
 int g_opt_rumble=100;   /* ini [Input] rumble: strength in percent, 0 = off */
-static volatile float g_vib[2][4]; static volatile u64 g_vib_ns[2]; static u64 g_vib_n;
+#define VIB_PADS 9      /* npads 0..7, then handheld */
+static volatile float g_vib[VIB_PADS][2][4]; static volatile u64 g_vib_ns[VIB_PADS][2]; static u64 g_vib_n;
+static volatile float g_vib_peak[2];   /* player 1's strongest low / high since the backend last read: a pulse shorter
+                                          than the backend's refresh still reaches the motors */
 static void vib_set(u32 handle, const float* v){
-  u32 dev=(handle>>16)&0xFF; if(dev>1) dev=1;
-  for(int i=0;i<4;i++) g_vib[dev][i]= v[i]==v[i] && v[i]>0? v[i] : 0;   /* NaN or negative: silent */
-  g_vib_ns[dev]=plat_ns();
-  if(!g_vib_n++) LOG("input: the game sent its first rumble (amplitudes %.2f low / %.2f high)\n",v[0],v[2]); }
-/* the pad's motors, 0..1: the heavy (low-frequency) one takes the stronger low band of the two sides, the light one
-   the stronger high band. A side not refreshed for 200 ms counts as stopped (the game stops sending when it ends) */
+  u32 npad=(handle>>8)&0xFF, dev=(handle>>16)&0xFF; if(dev>1) dev=1;
+  u32 p= npad==0x20? 8 : npad;
+  if(p>=VIB_PADS) return;
+  for(int i=0;i<4;i++) g_vib[p][dev][i]= v[i]==v[i] && v[i]>0? v[i] : 0;   /* NaN or negative: silent */
+  g_vib_ns[p][dev]=plat_ns();
+  if(p==0 || p==8){ if(g_vib[p][dev][0]>g_vib_peak[0]) g_vib_peak[0]=g_vib[p][dev][0]; if(g_vib[p][dev][2]>g_vib_peak[1]) g_vib_peak[1]=g_vib[p][dev][2]; }
+  if(!g_vib_n++) LOG("input: the game sent its first rumble (npad %u, amplitudes %.2f low / %.2f high)\n",npad,v[0],v[2]); }
+/* the pad's motors, 0..1: the heavy (low-frequency) one takes the stronger low band of player 1's sides, the light one
+   the stronger high band, and at least the peak since the last read. A side not refreshed for 200 ms counts as stopped
+   (the game stops sending when it ends). A weak effect (beam shots send 0.03) is raised to 0.1, which a pad's motors
+   can be felt at; 0 stays 0 */
 void hid_rumble_get(float* lo, float* hi){
-  u64 now=plat_ns(); float l=0, h=0;
-  for(int d=0;d<2;d++){ if(!g_vib_ns[d] || now-g_vib_ns[d]>200000000ull) continue; if(g_vib[d][0]>l) l=g_vib[d][0]; if(g_vib[d][2]>h) h=g_vib[d][2]; }
+  u64 now=plat_ns(); float l=g_vib_peak[0], h=g_vib_peak[1];
+  g_vib_peak[0]=g_vib_peak[1]=0;
+  for(int p=0;p<VIB_PADS;p+=8) for(int d=0;d<2;d++){ if(!g_vib_ns[p][d] || now-g_vib_ns[p][d]>200000000ull) continue;
+    if(g_vib[p][d][0]>l) l=g_vib[p][d][0]; if(g_vib[p][d][2]>h) h=g_vib[p][d][2]; }
+  if(l>0 && l<0.1f) l=0.1f;
+  if(h>0 && h<0.1f) h=0.1f;
   float s= g_opt_rumble>0? g_opt_rumble/100.0f : 0; l*=s; h*=s;
-  *lo= l>1? 1 : l; *hi= h>1? 1 : h; }
+  *lo= l>1? 1 : l; *hi= h>1? 1 : h;
+  { static int said; if(!said && (*lo>0 || *hi>0)){ said=1; LOG("input: first rumble to the pad (%.2f low / %.2f high)\n",*lo,*hi); } } }
 
 static int hid_disp(SvcObj* o, IpcCtx* c){
   switch(c->cmd){
@@ -137,8 +152,8 @@ static int hid_disp(SvcObj* o, IpcCtx* c){
     case 201: { float v[4]; for(int i=0;i<4;i++){ u32 w=in32(c,4+4*i); memcpy(&v[i],&w,4); } vib_set(in32(c,0),v); return 0; }   /* SendVibrationValue(handle, value, aruid) */
     case 206: if(c->nx>=2){ u64 nh=c->x[0].size/4, nv=c->x[1].size/16, n= nh<nv? nh : nv;   /* SendVibrationValues(aruid, handles[], values[]) */
         for(u64 i=0;i<n && i<8;i++){ float v[4]; memcpy(v,GP(c->x[1].addr+i*16),16); vib_set(gr32(c->x[0].addr+i*4),v); } } return 0;
-    case 202: { u32 h=in32(c,0), dev=(h>>16)&0xFF; if(dev>1) dev=1;   /* GetActualVibrationValue: what was last sent */
-      float v[4]={g_vib[dev][0], g_vib[dev][1]>0? g_vib[dev][1] : 160.f, g_vib[dev][2], g_vib[dev][3]>0? g_vib[dev][3] : 320.f}; outbytes(c,v,16); return 0; }
+    case 202: { u32 h=in32(c,0), dev=(h>>16)&0xFF, npad=(h>>8)&0xFF, p= npad==0x20? 8 : npad; if(dev>1) dev=1; if(p>=VIB_PADS) p=0;   /* GetActualVibrationValue: what was last sent */
+      float v[4]={g_vib[p][dev][0], g_vib[p][dev][1]>0? g_vib[p][dev][1] : 160.f, g_vib[p][dev][2], g_vib[p][dev][3]>0? g_vib[p][dev][3] : 320.f}; outbytes(c,v,16); return 0; }
     case 203: out_obj(c,svcobj_new("IActiveVibrationDeviceList",hid_vibration_list,0)); return 0;
     case 205: case 211: out8(c,1); return 0;                                       /* IsVibrationPermitted / Mounted */
     case 208: out32(c,0); return 0;

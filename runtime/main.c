@@ -573,6 +573,21 @@ static void pace_update(void){
       static int was; int slow= s>0.0f && s<0.95f;
       if(slow!=was){ was=slow; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",slow?"started":"ended",s,slow?60:f); }
       if(slow) f=60; } }
+  /* Particle vertex-buffer pool. The game keeps 1024 of them (F_8173910; [GOT+2000] -> the count in use; F_8174D48 takes
+     array[count] and count++ with no check). Effects take them every frame and give them back about 0.5 s later, so at
+     high frame rates more are in use at once, and an acid splash takes ~125 in one or two frames. At 1025 the game read
+     past the pool and crashed (F_8173AE4/F_8166D70; every crash had a count of 1026-1027). MEASURED 2026-10-29 (pool
+     logger work-profiler/snxup/mk_patch_pool.py, acid replay): peaks at a 60 cap 72-109; at 240 560 (our renderer,
+     ~100-190 FPS), 800-1040 with faster renderer variants. A guard at 768 came too late (one run went 900 -> 1025 in
+     two frames). So: over 400 in use pace at 120, over 600 at 60, back to the cap under 200. A cap of 60 or less is
+     never touched; SWR_NO_POOL_GUARD=1 = off (tests) */
+  { static int off2=-1; if(off2<0) off2=getenv("SWR_NO_POOL_GUARD")!=NULL;
+    static int lvl; u32 n=0;
+    if(!off2 && (f>60 || f==0)){ u64 p=*(volatile u64*)GP(164409344ull+2000); if(p && p<(1ull<<40)) n=*(volatile u32*)GP(p); }
+    if(n>4096) n=0;   /* not the pool's count (before the game made it) */
+    int want= n>600? 2 : n>400? (lvl>1? 2 : 1) : n<200? 0 : lvl;
+    if(want!=lvl){ lvl=want; LOG("particle pool: %u of 1024 in use, pacing at %s\n",n,lvl==2?"60 FPS":lvl==1?"120 FPS":"the frame cap"); }
+    if(lvl==2) f=60; else if(lvl==1 && (f>120 || f==0)) f=120; }
   /* Cinematics run at 30: the main loop sets its frame timer's target ([[GOT 0x9CBF0E8]] +64, float) to 30 and the game
      makes a new picture every ~33 ms, give or take 2 ms. Shown the moment each arrives, they stayed on screen 29 or 37 ms
      on a 240 Hz monitor (MEASURED, hold-0: 32-35 ms gaps) and stuttered; the Switch shows them every second 60 Hz
@@ -893,7 +908,12 @@ int swr_main(int argc, char** argv){
     { static int last_frames=-1, still=0, dumps=0; if(g_frames!=last_frames){ last_frames=g_frames; still=0; }
       else if(++still==60*15 && dumps<4){ dumps++; still=0; extern void kernel_dump_threads(void);
         LOG("warning: %d s without a new image (frames=%d, GPU submits=%llu)\n",15,g_frames,(unsigned long long)g_gpu_submits); kernel_dump_threads(); } }
-    next+=16666667ull; u64 now=plat_ns(); if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
+    next+=16666667ull; u64 now=plat_ns();
+    /* Above 60 FPS the controller is also read every ~4 ms in between (the console reads its pads at ~200 Hz): read at
+       60 Hz only, a 240 FPS game saw the same input for four frames (GitHub #20). SWR_INPUT_60HZ=1 = old (tests) */
+    { static int in60=-1; if(in60<0) in60=getenv("SWR_INPUT_60HZ")!=NULL;
+      if(!in60 && (g_opt_fps==0 || g_opt_fps>60)) while(next>now+4500000ull){ plat_sleep_ns(4000000); video_poll(); hid_update(); now=plat_ns(); } }
+    if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
   }
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } { extern void snxvk_exit(void); snxvk_exit(); } LOG("Exit.\n"); log_flush(); fflush(NULL);
   { extern void launcher_on_exit(void); launcher_on_exit(); }

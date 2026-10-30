@@ -120,6 +120,14 @@ static void sdl_scan(void){
     int have=0; for(int i=0;i<sdl_npad;i++) if(sdl_pad[i]==g) have=1;
     if(have) sdl_gcclose(g);   /* Open on an open pad only adds a reference */
     else { sdl_pad[sdl_npad++]=g; LOG("input: controller %d connected: %s\n",sdl_npad,sdl_gcname(g)? sdl_gcname(g) : "?"); } } }
+/* stick_deadzone (main.c), round: a stick inside it reads 0, outside it is rescaled from the dead zone's edge to full,
+   in its own direction. Per axis it was a cross: aiming near an axis snapped onto it, and diagonals came in late
+   (GitHub #20) */
+static void stick_dz(i32* x, i32* y){
+  extern int g_opt_deadzone; float dzv=(float)g_opt_deadzone, fx=(float)*x, fy=(float)*y, m=sqrtf(fx*fx+fy*fy);
+  if(m<=dzv || m<1.0f){ *x=*y=0; return; }
+  float out=(m-dzv)/(32767.0f-dzv); if(out>1.0f) out=1.0f;
+  float k=out*32767.0f/m; *x=(i32)lrintf(fx*k); *y=(i32)lrintf(fy*k); }
 /* returns 1 when SDL handled input this frame */
 static int sdl_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   if(!sdl_ok) return 0;
@@ -136,7 +144,7 @@ static int sdl_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
     if(sdl_gcbutton(g,13)) *b|=1<<12; if(sdl_gcbutton(g,11)) *b|=1<<13; if(sdl_gcbutton(g,14)) *b|=1<<14; if(sdl_gcbutton(g,12)) *b|=1<<15;
     i32 ax=sdl_gcaxis(g,0), ay=-(i32)sdl_gcaxis(g,1), bx=sdl_gcaxis(g,2), by=-(i32)sdl_gcaxis(g,3);
     if(ay<-32767) ay=-32767; if(ay>32767) ay=32767; if(by<-32767) by=-32767; if(by>32767) by=32767;   /* SDL y is down-positive */
-    int dzv=g_opt_deadzone; if(ax>-dzv && ax<dzv) ax=0; if(ay>-dzv && ay<dzv) ay=0; if(bx>-dzv && bx<dzv) bx=0; if(by>-dzv && by<dzv) by=0;
+    stick_dz(&ax,&ay); stick_dz(&bx,&by);
     if(!*lx && !*ly){ *lx=ax; *ly=ay; } if(!*rx && !*ry){ *rx=bx; *ry=by; } }
   return 1; }
 
@@ -207,8 +215,9 @@ static const char* HELP=
   "Keyboard:\n"
   "  Arrows = D-Pad     W A S D = Left stick    I J K L = Right stick\n"
   "  X / Space = A    Z = B    C = X    V = Y\n"
-  "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
-  "F1 = menu   F3 = screenshot   F4 = FPS limit 60 / unlimited   F5 = diagnostic dump (trace)\n"
+  "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n"
+  "  Shift = L3 (left stick click)   F = R3 (right stick click)\n\n"
+  "F1 = menu   F3 = screenshot   F4 = FPS limit 60 / your limit   F5 = diagnostic dump (trace)\n"
   "F7 = record .mp4 video (press F7 again to stop; saved in the recordings folder)\n"
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
   "F11 / Alt+Enter = fullscreen   Esc = quit";
@@ -216,7 +225,7 @@ static const char* HELP=
 /* keyboard_map (main.c): 24 entries, buttons 0..15 then the stick keys 40..47 (turned into axes later), each up to
    two Windows key codes joined by '+', 0 = none. Esc, Tab and the F keys are handled before this table. */
 extern char g_opt_kb_map[256];
-static const char KB_DEFAULT[]="88+32,90,67,86,0,0,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
+static const char KB_DEFAULT[]="88+32,90,67,86,16,70,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";   /* L3 Shift, R3 F: R3 had no key (GitHub #32, Phantom Cloak) */
 static u64 keymap(WPARAM k){
   static u64 t[256]; static char built[256]; static int ready;
   if(!ready || strcmp(built,g_opt_kb_map)){
@@ -275,7 +284,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
       CreateDirectoryA("captures",NULL); FILE* f=fopen("captures/threads.txt","w");   /* written next to the trace */
       if(f){ g_log_redirect=f; kernel_dump_threads(); g_log_redirect=NULL; fclose(f); }
       kernel_dump_threads(); gpu_gl_dump_rts(); return 0; }
-    if(w==VK_F4){ if(l & (1L<<30)) return 0; g_opt_fps= g_opt_fps==0? 1 : 0; char t[64]; snprintf(t,sizeof t,"FPS limit: %s",g_opt_fps==0? "unlimited" : "60"); SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d\n",g_opt_fps); { extern void ini_set(const char*, const char*); char v[8]; snprintf(v,sizeof v,"%d",g_opt_fps); ini_set("fps_limit",v); } return 0; }
+    if(w==VK_F4){ if(l & (1L<<30)) return 0;
+      /* 60 and back to the player's own cap (unlimited when that is 60), for this session: it used to flip between 60 and
+         unlimited and save that, which replaced a 240 cap in the .ini (GitHub #20) */
+      static int cap=-1; if(cap<0) cap= g_opt_fps==1? 0 : g_opt_fps;
+      if(g_opt_fps==1) g_opt_fps=cap; else { cap=g_opt_fps; g_opt_fps=1; }
+      char t[64]; if(g_opt_fps==0) snprintf(t,sizeof t,"FPS limit: unlimited"); else snprintf(t,sizeof t,"FPS limit: %d",g_opt_fps==1? 60 : g_opt_fps);
+      SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d (not saved)\n",g_opt_fps); return 0; }
     keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
   case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
   case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); ClipCursor(NULL); ReleaseCapture(); return 0;
@@ -463,7 +478,7 @@ void video_present_rgba(const u32* px, int w, int h, int stride){ extern void gp
 
 static i32 axis(u64 b, int neg, int pos){ return ((b>>pos)&1? 32767:0) - ((b>>neg)&1? 32767:0); }
 
-static i32 dz(i32 v){ return (v>-7000 && v<7000)? 0 : v; }
+
 
 
 /* Test-only virtual-controller replay. CSV: guest_frame,hex_buttons,lx,ly,rx,ry.
@@ -557,7 +572,7 @@ void video_poll(void){
       if(g->bLeftTrigger>60) b|=1<<8; if(g->bRightTrigger>60) b|=1<<9;
       if(x&0x0010) b|=1<<10; if(x&0x0020) b|=1<<11;
       if(x&0x0004) b|=1<<12; if(x&0x0001) b|=1<<13; if(x&0x0008) b|=1<<14; if(x&0x0002) b|=1<<15;
-      if(!lx&&!ly){ lx=dz(g->sThumbLX); ly=dz(g->sThumbLY); } if(!rx&&!ry){ rx=dz(g->sThumbRX); ry=dz(g->sThumbRY); }
+      if(!lx&&!ly){ lx=g->sThumbLX; ly=g->sThumbLY; stick_dz(&lx,&ly); } if(!rx&&!ry){ rx=g->sThumbRX; ry=g->sThumbRY; stick_dz(&rx,&ry); }
       { static int xseen; if(!xseen && x){ xseen=1; LOG("input: first button press seen through XInput (pad %lu)\n",(unsigned long)i); } }
       g_xpad=(int)i;
       break; }

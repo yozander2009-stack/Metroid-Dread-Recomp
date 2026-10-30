@@ -462,7 +462,7 @@ static const char* const GAME_BUTTONS[17] = {"A", "B", "X", "Y", "Left stick cli
     "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Disabled"};
 #ifdef _WIN32   // Windows key codes (the X11 backend has its own fixed keys)
 // keyboard_map (main.c, backend_win32.c keymap): 24 actions, each up to two Windows key codes
-static const char KB_DEFAULT[] = "88+32,90,67,86,0,0,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
+static const char KB_DEFAULT[] = "88+32,90,67,86,16,70,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
 static const char* const KB_ACTIONS[24] = {"A", "B (jump)", "X", "Y (shoot)", "Left stick click", "Right stick click", "L (free aim)", "R (missiles)", "ZL", "ZR",
     "+ (pause)", "- (map)", "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Move left", "Move up", "Move right", "Move down",
     "Right stick left", "Right stick up", "Right stick right", "Right stick down"};
@@ -593,7 +593,7 @@ static void page_controls() {
           if (row_button(fmt("##kb%d", i).c_str(), fmt("%s:  %s", KB_ACTIONS[i], keys.c_str()).c_str(), g_kb_capture == i ? "CANCEL" : "SET"))
               g_kb_capture = g_kb_capture == i ? -1 : i;
       }
-      if (row_button("##kbr", "Default keys (WASD, X/Space, Z, C, V, arrows)", "RESET")) { set("keyboard_map", ""); g_kb_capture = -1; flash("Keyboard reset to the default keys"); } }
+      if (row_button("##kbr", "Default keys (WASD, X/Space, Z, C, V, Shift, F, arrows)", "RESET")) { set("keyboard_map", ""); g_kb_capture = -1; flash("Keyboard reset to the default keys"); } }
 #else
     section("KEYBOARD");
 #endif

@@ -98,14 +98,44 @@ int plat_cpus(int* ids, int max){ int n=(int)GetActiveProcessorCount(ALL_PROCESS
 const char* plat_dl_error(void){ static char b[64]; snprintf(b,sizeof b,"error %lu",(unsigned long)GetLastError()); return b; }
 int plat_setenv(const char* name, const char* value){ char b[600]; snprintf(b,sizeof b,"%s=%s",name,value? value : ""); SetEnvironmentVariableA(name,value); return _putenv(b); }
 u32 plat_tid(void){ return (u32)GetCurrentThreadId(); }
+#ifdef SWR_SNXVK_V2
+const char* snx_build_commit(void){ return "112db409"; }
+const char* snx_build_info(void){ return "ScarletNX renderer 112db409 in the SwitchRecomp runtime"; }
+/* ScarletNX main 112db409 asks these too: no HUD/stats overlay, no save states, no profiler lock names, the guest's
+   address space as the old fixed 128 GiB (AS_SIZE), no GPU-owned memory traps (own_init says none) */
+u64 g_as_size=0x2000000000ull;
+void* backend_vk_driver(void){ return NULL; }   /* the system's Vulkan loader serves */
+void hud_draw(void* l, const int safe[4], int scale){ (void)l; (void)safe; (void)scale; }
+void stats_draw(void* l, const int safe[4], int scale, u64 now){ (void)l; (void)safe; (void)scale; (void)now; }
+void stats_frame(u64 now){ (void)now; }
+void overlay_place(int sw, int sh, int* x, int* y, int* scale){ (void)sw; (void)sh; *x=0; *y=0; *scale=1; }
+u32 own_lookup(u64 a, u64 n, void* out, u32 max){ (void)a; (void)n; (void)out; (void)max; return 0; }
+int own_traps(void){ return 0; }
+void pm_lock_announce(PMutex* m, const char* name){ (void)m; (void)name; }
+void snx_path_native(char* p){ for(; p && *p; p++) if(*p=='/') *p='\\'; }
+void* state_fn_find(const char* name){ (void)name; return NULL; }
+const char* state_fn_name(void* fn){ (void)fn; return NULL; }
+const u8* ui_image_get(u32* version){ if(version) *version=0; return NULL; }
+#else
 const char* snx_build_commit(void){ return "b5f4f14f2bfc"; }
 const char* snx_build_info(void){ return "ScarletNX renderer b5f4f14f2bfc in the SwitchRecomp runtime"; }
+#endif
 char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s.exe",g_exedir,g_exename); return _strdup(b); }
 char* snx_format(const char* fmt, ...){ va_list a; va_start(a,fmt); int n=vsnprintf(NULL,0,fmt,a); va_end(a); if(n<0) return NULL;
   char* p=malloc((size_t)n+1); if(!p) return NULL; va_start(a,fmt); vsnprintf(p,(size_t)n+1,fmt,a); va_end(a); return p; }
 char* snx_os_error(char* out, size_t size){ DWORD e=GetLastError(); if(!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,e,0,out,(DWORD)size,NULL)) snprintf(out,size,"error %lu",(unsigned long)e);
   size_t n=strlen(out); while(n && (out[n-1]=='\r'||out[n-1]=='\n'||out[n-1]=='.')) out[--n]=0; return out; }
 /* ---- the ScarletNX side, renamed */
+#ifdef SWR_SNXVK_V2   /* the renderer's entries through swr_settings.c's accessors: no mirror of its Renderer struct */
+extern int snxv_swr_r_start(void);
+extern void snxv_swr_r_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, const i32 crop[4], u32 transform);
+extern u64 snxv_swr_r_screenshot(const char* path);
+extern void snxv_swr_r_save(int at_exit);
+#define SNXR_START() snxv_swr_r_start()
+#define SNXR_PRESENT snxv_swr_r_present
+#define SNXR_SCREENSHOT(p) snxv_swr_r_screenshot(p)
+#define SNXR_SAVE(x) snxv_swr_r_save(x)
+#else
 typedef struct {   /* mirror of their Renderer (gpu/renderer.h, ScarletNX main b5f4f14f2bfc), same order */
   const char* name; int (*start)(void); void (*mem_may_have_changed)(void);
   void* clear; void* draw; void* method_barrier; void* draw_texture; void* blit; void* vic_compose;
@@ -119,6 +149,11 @@ typedef struct {   /* mirror of their Renderer (gpu/renderer.h, ScarletNX main b
   void* prepare;
 } SnxRenderer;
 extern const SnxRenderer snxv_vk_renderer;
+#define SNXR_START() snxv_vk_renderer.start()
+#define SNXR_PRESENT snxv_vk_renderer.present_buffer
+#define SNXR_SCREENSHOT(p) (snxv_vk_renderer.screenshot? snxv_vk_renderer.screenshot(p) : 0)
+#define SNXR_SAVE(x) do{ if(snxv_vk_renderer.save) snxv_vk_renderer.save(x); }while(0)
+#endif
 extern void snxv_gpu_init(void);
 extern void snxv_gpu_submit(const void* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect);
 extern void snxv_gpu_kick(void);
@@ -159,7 +194,7 @@ int snxvk_start(void){
     { extern void snxv_swr_settings_prepare(int); extern int g_opt_prebuild;
       int prep= g_opt_prebuild && !getenv("SWR_VK_NO_PREPARE"); snxv_swr_settings_prepare(prep);
       if(prep) LOG("vulkan_native: the game's shaders are translated in the background, then the pipeline recipes made\n"); } }   /* FIFO only with forced_vsync=1, like the GL path: otherwise mailbox, paced by snxvk_present (FIFO at 144/240 FPS on a 239 Hz screen lost frames to vblank waits) */
-  if(!snxv_vk_renderer.start()){ WARN("vulkan_native: Vulkan 1.3 renderer could not start (see above): using OpenGL\n");
+  if(!SNXR_START()){ WARN("vulkan_native: Vulkan 1.3 renderer could not start (see above): using OpenGL\n");
     /* the guest memory was set up with write tracking for Vulkan; OpenGL would scan it on every submit (measured 19 FPS,
        GPU thread 98% busy) - it runs without, as when OpenGL is chosen */
     g_ww_ok=0; return 0; }
@@ -215,25 +250,27 @@ int backend_hdr_peak_nits(void){
   return cached; }
 int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=60 && g_opt_fps<=240)); }
 void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
-  static const i32 crop[4]={0,0,0,0};
+  /* the game's crop from QueueBuffer (svc_vi.c): handheld Dread draws 1280x720 into a 1600x900 buffer. Passing none
+     showed the whole buffer, the picture in the top-left 80% of the screen (2026-10-29) */
+  extern volatile i32 g_vi_crop[4]; i32 crop[4]; for(int i=0;i<4;i++) crop[i]=g_vi_crop[i];
   static u64 st_n, st_wait, st_pres, st_gap, last_out;   /* SWR_SNXVK_TRACE: averages every 600 presents */
   u64 t_in=plat_ns(), t_w=t_in;
   if(snxvk_pacing()){ extern volatile int g_pace_fps; static u64 deadline; int pf=g_pace_fps;   /* g_opt_fps, or 60 during slow motion */
     u64 per= pf>=30 && pf<=240? 1000000000ull/(u64)pf : 16666667ull;   /* 30: cinematics (main.c pace_update) */
     u64 next=deadline+per; if(deadline) wait_deadline(next);
     u64 now=plat_ns(); t_w=now; deadline= deadline && (i64)(now-next)<(i64)(per/2)? next : now; }
-  { static u64 last_in; u64 t0=plat_ns(); snxv_vk_renderer.present_buffer(a,w,h,pitch,layout,bhl,fmt,crop,0); u64 t1=plat_ns();
+  { static u64 last_in; u64 t0=plat_ns(); SNXR_PRESENT(a,w,h,pitch,layout,bhl,fmt,crop,0); u64 t1=plat_ns();
     static int tr=-1; if(tr<0) tr=getenv("SWR_SNXVK_TRACE")!=NULL;
     if(t1-t0>250000000ull) LOG("vulkan_native: present_buffer took %.0f ms\n",(t1-t0)/1e6);
     if(tr && last_in && (t0-last_in>30000000ull || t1-t0>12000000ull)) LOG("vulkan_native: slow frame: game arrived %.1f ms after the last present, present took %.1f ms\n",(t0-last_in)/1e6,(t1-t0)/1e6);
     if(tr && last_out){ st_n++; st_wait+=t_w-t_in; st_pres+=t1-t0; st_gap+=t_in-last_out;
       if(st_n==600){ LOG("vulkan_native: per frame: game work %.2f ms, deadline wait %.2f ms, present call %.2f ms\n",st_gap/6e8,st_wait/6e8,st_pres/6e8); st_n=st_wait=st_pres=st_gap=0; } }
     last_out=t1; last_in=t1; } }
-u64 snxvk_screenshot(const char* path){ return g_snxvk_on && snxv_vk_renderer.screenshot? snxv_vk_renderer.screenshot(path) : 0; }
+u64 snxvk_screenshot(const char* path){ return g_snxvk_on? SNXR_SCREENSHOT(path) : 0; }
 void snxvk_tick(int tick){   /* frontend loop, 60 Hz */
   if(!g_snxvk_on) return;
-  if(tick%300==0 && snxv_vk_renderer.save) snxv_vk_renderer.save(0); }   /* it writes after a quiet stretch */
-void snxvk_exit(void){ if(g_snxvk_on && snxv_vk_renderer.save) snxv_vk_renderer.save(1); }
+  if(tick%300==0) SNXR_SAVE(0); }   /* it writes after a quiet stretch */
+void snxvk_exit(void){ if(g_snxvk_on) SNXR_SAVE(1); }
 
 #else   /* built without the library: the option is ignored */
 void snxvk_ini(const char* v){ if(!strcmp(v,"vulkan_native")) WARN("renderer=vulkan_native: this build has no native Vulkan renderer (runtime/snxvk/libsnxvk.a): using OpenGL\n"); }

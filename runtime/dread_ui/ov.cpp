@@ -134,7 +134,7 @@ void tab_content(int t) {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},
                                {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Quit", "Esc"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
-                               {"L R ZL ZR", "Q  E  1  3"}, {"+ / -", "Enter / Backspace"}};
+                               {"L R ZL ZR", "Q  E  1  3"}, {"L3 / R3", "Shift / F"}, {"+ / -", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
         section("ABOUT"); help_text("Metroid Dread recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; 60 FPS cutscenes by theboy181; Dear ImGui; SDL2. Full credits on the Play screen.");
     } }
