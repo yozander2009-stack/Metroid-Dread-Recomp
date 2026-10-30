@@ -24,9 +24,9 @@ Local changes to upstream (marked "SWR" in the code):
   gpu/vk/swr_settings.c, gpu/maxwell/mme_jit_stub.c: our settings and no LLVM macro JIT (the interpreter runs every macro);
                         swr_settings.c also gives snxvk_glue.c the renderer's entries (swr_r_*), so the glue never
                         mirrors upstream's Renderer struct
-  gpu/vk/render.c       SWR_VK_VCLAMP, default 0: vertex streams are copied to their limit, not to the last vertex a
-                        draw reads (upstream da6776e). Metroid Dread's indexed draws read past their highest index, and
-                        the clamp crashed it at the acid enemy (bisected 2026-10-29)
+  gpu/vk/render.c       SWR_VK_STREAM_MERGE (default 1): vertex streams over the same memory staged once; SWR_VK_VCLAMP
+                        (default 2 = upstream da6776e). Both made the game's particle pool overflow at the acid enemy
+                        until main.c pace_update got its guard (2026-10-29); staging there fell from 23-63 to <1 MB a frame
   gpu/vk/surface.c      pitch-linear targets aren't written back at each release without memory traps (we have none)
   gpu/gpu.c, vk/owned.c SWR_VK_GW / SWR_VK_GW_WATCH: logs GPU writes into guest memory (diagnostic, inert by default)
 

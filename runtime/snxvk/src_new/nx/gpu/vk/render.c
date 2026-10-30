@@ -2644,13 +2644,13 @@ retry:
     u32 nvq = 0;
     /* each stream up to the last vertex or instance the draw reads, rather than to its limit */
     /* SWR: SWR_VK_VCLAMP 0 = each stream to its limit (as before upstream da6776e), 1 = up to the last vertex for
-       non-indexed draws only, 2 = upstream (indexed too), 3 = 2 without the highest-index memo. Metroid Dread crashed in
-       its buffer manager (F_8173AE4, F_8166D70, main thread) at the acid enemy with 2 (3/3, bisected to da6776e) and 3
-       (2/2), as an OpenGL indexed clamp did: its draws read past the highest index, so the clamp isn't safe for it.
-       0 passed 3/3, 1 2/2 */
+       non-indexed draws only, 2 = upstream (default), 3 = 2 without the highest-index memo. The acid-enemy crashes
+       first blamed on it (bisected to da6776e) were the game's particle pool overflowing once the renderer got faster:
+       main.c pace_update guards that. With the guard 9/9 acid runs passed and staging fell from 23-63 to 0.3-0.8 MB a
+       frame (with the stream merge below) */
     if (g_swr_vclamp < 0) {
         const char* e = getenv("SWR_VK_VCLAMP");
-        g_swr_vclamp = e && *e ? atoi(e) : 0;
+        g_swr_vclamp = e && *e ? atoi(e) : 2;
     }
     int vclamp = g_swr_vclamp; /* 3: as 2, the highest index read again at every draw (no memo) */
     u64 last_vertex = k->nbind && (vclamp >= 2 || (vclamp == 1 && !indexed))
@@ -2706,12 +2706,12 @@ retry:
        at +0, +0xC and +0x14, which the cache kept as three ranges by their starts: each copied in full, ~40-100 MB a
        frame in the acid enemy's fight. Streams whose ranges overlap take one range over all of them, each bound at its
        offset in it (a multiple of 4, as vertex formats need). Every byte a stream had is still there.
-       Default off (SWR_VK_STREAM_MERGE=1 on): it crashed the game 2/2 at the acid enemy like the clamp did,
-       copying the same bytes, so the crash follows the renderer getting faster, not missing data */
+       SWR_VK_STREAM_MERGE=0: one range each, as upstream. The game crashes it once
+       caused were its particle pool overflowing at high frame rates (main.c pace_update guards it) */
     static int merge = -1;
     if (merge < 0) {
         const char* e = getenv("SWR_VK_STREAM_MERGE");
-        merge = e && *e ? atoi(e) != 0 : 0;
+        merge = e && *e ? atoi(e) != 0 : 1;
     }
     u8 merged[33] = {0};
     for (u32 q = 0; merge && q < nvq; q++) {
