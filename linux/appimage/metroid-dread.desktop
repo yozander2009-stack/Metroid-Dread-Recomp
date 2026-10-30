@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Metroid Dread
+Comment=Metroid Dread recompiled for PC: sets up and plays your own copy of the game
+Exec=metroid-dread
+Icon=metroid-dread
+Categories=Game;
+Terminal=false
+StartupWMClass=MetroidDread

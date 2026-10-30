@@ -1,0 +1,15 @@
+#!/bin/sh
+# Metroid Dread AppImage: the game is installed outside the (read-only) AppImage, in METROID_DREAD_HOME or
+# ~/.local/share/MetroidDreadRecomp. The runtime finds its .ini, _code.so and _data next to itself, so a copy of it lives
+# there, refreshed when this AppImage brings a different one. The Play / setup screen (dread_ui/fe.cpp) gets the
+# recompiler, GCC and Python from inside the AppImage through SWR_RECOMPILER.
+HERE="$(dirname "$(readlink -f "$0")")"
+GAME="${METROID_DREAD_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/MetroidDreadRecomp}"
+mkdir -p "$GAME" || { echo "Cannot create the game folder $GAME" >&2; exit 1; }
+if ! cmp -s "$HERE/usr/bin/metroid-dread" "$GAME/Metroid Dread"; then
+  cp -f "$HERE/usr/bin/metroid-dread" "$GAME/Metroid Dread.new" && chmod +x "$GAME/Metroid Dread.new" && mv -f "$GAME/Metroid Dread.new" "$GAME/Metroid Dread"
+fi
+[ -d "$GAME/licenses" ] || cp -r "$HERE/usr/share/metroid-dread/licenses" "$GAME/licenses" 2>/dev/null
+export SWR_RECOMPILER="$HERE/usr/share/metroid-dread/recompiler"
+cd "$GAME" || exit 1
+exec "./Metroid Dread" "$@"

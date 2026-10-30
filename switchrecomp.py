@@ -219,7 +219,7 @@ def link_module(objs, cc, out, target_win, say):
         cmd = [cc, '-shared', '-o', out] + tcc_b(cc) + ['@objects.rsp']
     else:
         cmd = [cc, '-shared', '-o', out, '@objects.rsp']
-        if not target_win: cmd += ['-lm']
+        if not target_win: cmd += ['-lm', '-ldl']   # -ldl: the Linux game code dlopens libz (linux/lx_compat.h)
         else: cmd += ['-static-libgcc']
     err = run_cc(cmd, cc, cwd=bdir)
     if err: raise SystemExit('Linking failed:\n' + err[-4000:])
@@ -298,7 +298,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if frontend: srcs += [os.path.join(RT, 'dread_ui', f) for f in ('ui.cpp', 'fe.cpp', 'fe_sys.cpp', 'fe_steam.cpp', 'fe_update.cpp', 'ov.cpp')]
     # Linux (X11): the in-game menu from ImGui's sources (runtime/imgui/src, copied there by build_imgui.py), no Play screen
     overlay = not frontend and backend == 'x11' and os.path.isfile(os.path.join(RT, 'imgui', 'src', 'imgui.cpp')) and not os.environ.get('SWR_NO_FRONTEND')
-    if overlay: srcs += [os.path.join(RT, 'dread_ui', f) for f in ('ui.cpp', 'ov.cpp', 'stub_fe.c')] + [os.path.join(RT, 'imgui', 'src', f) for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui_impl_opengl3.cpp')]
+    # and the Play screen / setup in its own X11 window (fe.cpp + fe_sys_linux.cpp); SWR_NO_LINUX_FRONTEND=1 leaves it out
+    lx_frontend = overlay and not os.environ.get('SWR_NO_LINUX_FRONTEND')
+    if overlay: srcs += [os.path.join(RT, 'dread_ui', f) for f in ('ui.cpp', 'ov.cpp') + (('fe.cpp', 'fe_sys_linux.cpp') if lx_frontend else ('stub_fe.c',))] + [os.path.join(RT, 'imgui', 'src', f) for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui_impl_opengl3.cpp')]
     elif gl and not frontend: srcs += [os.path.join(RT, 'dread_ui', 'stub.c')]
     # renderer=vulkan_native: ScarletNX's GPU front end + Vulkan renderer (GPL-3.0), prebuilt by work-profiler/build_snxvk.py
     snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss.a' if release else 'libsnxvk_new.a')   # ScarletNX main b5f4f14 (work-profiler/build_snxvk2.py)
@@ -312,6 +314,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if snxvk: cmd += ['-DSWR_HAVE_SNXVK', snxvk]
     if frontend: cmd += ['-DSWR_HAVE_FRONTEND', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui'), imgui]
     if overlay: cmd += ['-DSWR_HAVE_OVERLAY', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui')]
+    if overlay and lx_frontend: cmd += ['-DSWR_HAVE_FRONTEND']
     if spvc: cmd += [spvc]
     if h264: cmd += [os.path.join(oh, 'libdecoder.a'), os.path.join(oh, 'libcommon.a')]
     if vp9: cmd += [os.path.join(vp, 'libvpx.a')]

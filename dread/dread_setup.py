@@ -8,12 +8,19 @@ Output protocol on stdout (one line each): '@@P <percent> <stage>|<detail>' prog
 '@@D' done; everything else is log. Every stage leaves a marker so a stopped or failed setup continues where it was.
 
 Usage: dread_setup.py --out DIR --name "Metroid Dread" --base DIR [--update DIR]
+
+On Linux (linux/setup_game.sh) the same steps give Metroid Dread_code.so, compiled with the system's gcc and with
+linux/lx_compat.h force-included, so the patched (Windows) sources compile unchanged.
 """
 import argparse, hashlib, json, os, shutil, struct, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if not os.path.isfile(os.path.join(HERE, 'switchrecomp.py')):
+    HERE = os.path.dirname(HERE)   # run from the repository's dread/, not from the release's recompiler folder
 sys.path.insert(0, HERE)
+WIN = sys.platform.startswith('win')
+LX_COMPAT = os.path.join(HERE, 'linux', 'lx_compat.h')
 TITLE_ID = 0x010093801237C000
 BUILD_ID = '646761F643AFEBB379EDD5E6A5151AF2CEF93DC1'
 VERSION = '2.1.0'
@@ -154,7 +161,15 @@ def load_manifest():
 
 
 def same_volume(a, b):
-    return os.path.splitdrive(os.path.abspath(a))[0].lower() == os.path.splitdrive(os.path.abspath(b))[0].lower()
+    if WIN:
+        return os.path.splitdrive(os.path.abspath(a))[0].lower() == os.path.splitdrive(os.path.abspath(b))[0].lower()
+
+    def dev(p):   # no drive letters: the device of the nearest folder that exists (the destination may not yet)
+        p = os.path.abspath(p)
+        while not os.path.exists(p):
+            p = os.path.dirname(p)
+        return os.stat(p).st_dev
+    return dev(a) == dev(b)
 
 
 def assemble_romfs(base_romfs, upd_romfs, dst, pct0, pct1):
@@ -292,7 +307,8 @@ def main():
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
     out, name = os.path.abspath(a.out), a.name
-    data = os.path.join(out, name + '_data'); build = os.path.join(out, name + '_build'); dll = os.path.join(out, name + '_code.dll')
+    data = os.path.join(out, name + '_data'); build = os.path.join(out, name + '_build')
+    dll = os.path.join(out, name + ('_code.dll' if WIN else '_code.so'))
     log('Metroid Dread setup (format %d) - SwitchRecomp by MZ Labs; use only your own copy of the game.' % SETUP_FORMAT)
     log('Game folder: %s' % a.base)
     if a.update:
@@ -377,14 +393,26 @@ def main():
                 f.write(gen_key)
         P(31, 'Compiling with GCC', '0 of %d files' % len(files))
 
-        cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
-        cc = cc if os.path.isfile(cc) else None
-        if not cc:
-            raise Fail('The bundled GCC is missing (recompiler\\gcc). Extract the release again.')
+        if WIN:
+            cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
+            cc = cc if os.path.isfile(cc) else None
+            if not cc:
+                raise Fail('The bundled GCC is missing (recompiler\\gcc). Extract the release again.')
+        else:
+            # $CC, else the GCC bundled next to this script (the AppImage's recompiler/gcc), else the system's
+            cc = shutil.which(os.environ['CC']) if os.environ.get('CC') else None
+            for n in ('gcc', 'x86_64-buildroot-linux-gnu-gcc'):
+                if not cc and os.path.isfile(os.path.join(HERE, 'gcc', 'bin', n)):
+                    cc = os.path.join(HERE, 'gcc', 'bin', n)
+            cc = cc or shutil.which('gcc')
+            if not cc:
+                raise Fail('gcc not found. Install it first (bash linux/install_deps.sh).')
+            if not os.path.isfile(LX_COMPAT):
+                raise Fail('linux/lx_compat.h is missing next to the recompiler.')
         objs = compile_all(files, cc, build, a.jobs, 31, 96)
-        P(96, 'Linking', name + '_code.dll')
+        P(96, 'Linking', os.path.basename(dll))
         switchrecomp.check_writable(dll)
-        switchrecomp.link_module(objs, cc, dll, True, log)
+        switchrecomp.link_module(objs, cc, dll, WIN, log)
         if not os.path.isfile(dll) or os.path.getsize(dll) < 50 * 2**20:
             raise Fail('Linking produced no usable game code.')
         with open(os.path.join(data, 'setup.ok'), 'w') as f:
@@ -413,6 +441,10 @@ def compile_all(files, cc, build, jobs, p0, p1):
     """switchrecomp.compile_all with a progress line per file (same flags and object names, so objects are reused)"""
     import switchrecomp
     flags = ['-O2', '-fno-strict-aliasing', '-fwrapv', '-w', '-I', switchrecomp.RT, '-foptimize-sibling-calls', '-fno-semantic-interposition']
+    if not WIN:
+        flags += ['-fPIC', '-fvisibility=hidden', '-include', LX_COMPAT]
+        if os.environ.get('SWR_CFLAGS'):
+            flags += os.environ['SWR_CFLAGS'].split()   # e.g. -march=native, or -march=znver2 for a Steam Deck
     with open(os.path.join(switchrecomp.RT, 'cpu.h'), 'rb') as f1, open(os.path.join(switchrecomp.RT, 'cpu_helpers.c'), 'rb') as f2:
         key = '|'.join([cc] + flags) + '|' + f1.read().decode('latin1') + '|' + f2.read().decode('latin1')
     sig = hashlib.sha1(key.encode('utf-8', 'replace')).hexdigest()[:10]

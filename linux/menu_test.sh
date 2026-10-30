@@ -1,13 +1,17 @@
 #!/bin/bash
-# Linux: open the in-game menu (Home, replayed) on the title screen under WSLg software GL and screenshot it
+# Linux: open the in-game menu (Home, replayed from linux/menu_test.csv) on the title screen and screenshot it.
+# Runs on the real GPU; SWR_SOFTGL=1 uses Mesa's software OpenGL instead.
 set -e
-W=${SWR_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}   # the repository (this script is in linux/)
+source "$(dirname "$(readlink -f "$0")")/env.sh"
+CSV="$W/linux/menu_test.csv"
+[ -f "$CSV" ] || { echo "missing $CSV (the frame-indexed input route of the menu test)" >&2; exit 1; }
 bash "$W/linux/make_test_game.sh" > /dev/null
-cd /opt/swr/game
+G="$TEST/game"
+cd "$G"
 rm -f menu-m*.ppm
-export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
-export SWR_TEST_SCRIPT="$W/linux/menu_test.csv" SWR_TEST_EXIT_FRAME=140 SWR_OV_SHOTS=3,30 SWR_OV_SHOT_PREFIX=/opt/swr/game/menu
-timeout 900 "./Metroid Dread" --fullscreen=0 > run_stdout.txt 2>&1 || echo "exit=$?"
-grep -E "menu:|test complete|fatal|FATAL|rror" "Metroid Dread.log" | head -10
-ls -la menu-m*.ppm 2>/dev/null && cp menu-m*.ppm "$W/linux/"
+softgl
+export SWR_TEST_SCRIPT="$CSV" SWR_TEST_EXIT_FRAME=140 SWR_OV_SHOTS=3,30 SWR_OV_SHOT_PREFIX="$G/menu"
+timeout 900 "./$NAME" --fullscreen=0 > run_stdout.txt 2>&1 || echo "exit=$?"
+grep -E "menu:|test complete|fatal|FATAL|rror" "$NAME.log" | head -10
+ls -la menu-m*.ppm 2>/dev/null && cp menu-m*.ppm "$TEST/"
 echo MENUTESTDONE

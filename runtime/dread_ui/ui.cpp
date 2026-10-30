@@ -54,6 +54,9 @@ void load_fonts(ImGuiIO& io) {
     // a symbol font for arrows and prompt glyphs, merged into the body font
     std::string sym = dir + "seguisym.ttf";
     if (exists(sym)) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(sym.c_str(), 20.0f, &m); }
+#else   // DejaVu has the arrows and shapes Noto Sans lacks (the Play screen's "CHANGE ▸")
+    for (const char* sym : {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"})
+        if (exists(sym)) { ImFontConfig m; m.MergeMode = true; io.Fonts->AddFontFromFileTTF(sym, 20.0f, &m); break; }
 #endif
     g_fonts.head = g_fonts.body;
 }

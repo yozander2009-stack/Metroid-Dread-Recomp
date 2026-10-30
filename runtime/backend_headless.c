@@ -7,6 +7,8 @@ static int g_maxframes=-1, g_shot_every=0; static char g_shot[1024]; static int 
 static u32* g_last; static int g_lw, g_lh; static PMutex g_hl; static u64 g_start;
 static int g_seconds=0; static u64 g_buttons_at=0, g_buttons=0;
 
+/* [Input] mouse_buttons: the game mouse (free aim, buttons) is the Windows backend's only; nothing to re-parse here */
+void mouse_map_reset(void){}
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"frames")) g_maxframes=atoi(v);
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);

@@ -80,6 +80,36 @@ python\python.exe dread\make_release.py release <empty folder> --version X.Y.Z -
 The release step also needs `redist\zlib1.dll` (zlib 1.3.1, x64) and `redist\SDL2.dll` (SDL 2.x x64 release), the two
 DLLs the game ships beside it. They are not in this repository.
 
+## Build and play on Linux
+
+Native Linux (X11 or Wayland through XWayland, OpenGL 4.3), built from this repository with the system's GCC. The
+scripts in `linux/` keep everything inside the repository: the runtime in `bin/`, the installed game in `games/`.
+You need your own Metroid Dread 2.1.0 extracted to an ExeFS and a RomFS folder, as for Windows.
+
+```
+bash linux/install_deps.sh                    # gcc, X11/OpenGL headers, static libvpx, SDL2 (asks for sudo)
+bash linux/setup_and_build_runtime.sh         # bin/runtime_linux_x11, with the in-game menu
+bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]   # checks the files, compiles games/Metroid Dread_code.so
+bash linux/run.sh                             # play; settings in games/Metroid Dread.ini, log in games/Metroid Dread.log
+```
+
+`linux/run.sh` opens the same Play / setup / settings screens as the Windows EXE (`--play` skips them, `--launcher`
+brings them back when skipped). `linux/build_game_so.sh` recompiles only what changed (after editing the patches or the
+translator), `linux/package.sh` makes the Steam Deck package in `linux/dist/` (no game data inside), and `run_test.sh`,
+`menu_test.sh` and `run_route_linux.sh` run the automated tests on a copy of the game folder (`SWR_SOFTGL=1` for
+Mesa's software OpenGL). Not on Linux yet: native Vulkan, updates from the releases page, the Steam shortcut button,
+the mouse free aim and F7 recording.
+
+### AppImage
+
+`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Dread-x86_64.AppImage`: one file for players, like the Windows
+EXE. It has the runtime with the Play / setup screens, the recompiler, a relocatable GCC 14.3
+([Bootlin](https://toolchains.bootlin.com)) and Python 3.12
+([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), so nothing needs to be installed;
+no game files are inside. The downloads are checked against their SHA-256 and kept in `linux/appimage/cache/`. The game
+is installed in `~/.local/share/MetroidDreadRecomp` (or `METROID_DREAD_HOME`). It needs glibc 2.38 or newer, SDL2 for
+controllers and an OpenGL 4.3 driver.
+
 ## What is in this repository
 
 - Source code only, plus three prebuilt third-party static libraries, kept so the build does not need MSYS2:

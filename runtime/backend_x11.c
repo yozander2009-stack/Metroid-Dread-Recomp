@@ -23,6 +23,8 @@ static char g_script[1024]; static char g_title[256]; static volatile int g_shot
 static u64 keys_held;
 extern int g_opt_fps;
 
+/* [Input] mouse_buttons: the game mouse (free aim, buttons) is the Windows backend's only; nothing to re-parse here */
+void mouse_map_reset(void){}
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
@@ -106,8 +108,14 @@ static void set_fullscreen(int on){
   XEvent e; memset(&e,0,sizeof e); e.xclient.type=ClientMessage; e.xclient.window=win; e.xclient.message_type=a_state; e.xclient.format=32;
   e.xclient.data.l[0]=on? 1 : 0; e.xclient.data.l[1]=(long)a_fs; e.xclient.data.l[3]=1;
   XSendEvent(dpy,DefaultRootWindow(dpy),False,SubstructureRedirectMask|SubstructureNotifyMask,&e);
-  if(on) XDefineCursor(dpy,win,g_blank); else XUndefineCursor(dpy,win);
-  XFlush(dpy); g_fullscreen=on; }
+  XFlush(dpy); g_fullscreen=on; }   /* the cursor follows in cursor_sync */
+/* the cursor is hidden in fullscreen, but shown while the in-game menu is open (its mouse / touch), as backend_win32.c
+   does with WM_SETCURSOR; checked on every poll */
+extern int ov_is_open(void);
+static void cursor_sync(void){
+  static int hidden=-1; int want= g_fullscreen && !ov_is_open();
+  if(want==hidden) return;
+  hidden=want; if(want) XDefineCursor(dpy,win,g_blank); else XUndefineCursor(dpy,win); XFlush(dpy); }
 
 static void set_title(const char* t){ XStoreName(dpy,win,t); XFlush(dpy); }
 /* fast forward on/off in the title, as backend_win32.c does it (main.c ff_*) */
@@ -149,7 +157,7 @@ void video_init(const char* title){
   /* without this X11 sends a release before every auto-repeated press */
   XkbSetDetectableAutoRepeat(dpy,True,NULL);
   /* start fullscreen: the window manager reads the state when the window is mapped */
-  if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); XDefineCursor(dpy,win,g_blank); g_fullscreen=1; }
+  if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); g_fullscreen=1; }
   XMapWindow(dpy,win); XFlush(dpy);
   sdl_load();
   g_start=plat_ns();
@@ -305,6 +313,7 @@ static void test_frame_hooks(void){
 
 void video_poll(void){
   { int r=g_fs_req; if(r>=0){ g_fs_req=-1; set_fullscreen(r); } }
+  cursor_sync();
   while(XPending(dpy)){ XEvent e; XNextEvent(dpy,&e);
     if(e.type==KeyPress) key_down(&e.xkey);
     else if(e.type==KeyRelease){ KeySym k=XLookupKeysym(&e.xkey,0); key_once(k,0); keys_held&=~keymap(k); if(ov_is_open()) ov_input_key(ovk_from_keysym(k),0); }
@@ -348,3 +357,12 @@ void frontend_frame(void){
 }
 
 int backend_glq_ok(void){ return 1; }   /* GL calls go through glq */
+
+/* Play screen / first-run setup (dread_ui/fe.cpp, in its own window) before the game starts (main.c). 0 = go on with the
+   game, 1 = quit. Skipped for test runs and --no-launcher, as backend_win32.c does; builds without it link stub_fe.c */
+extern int fe_should_show(int argc, char** argv, const char* exedir, const char* exename); extern int fe_run(void* hwnd);
+int backend_frontend(int argc, char** argv, const char* exedir, const char* exename){
+  if(!getenv("SWR_FE_TEST") && (getenv("SWR_TEST_SCRIPT") || getenv("SWR_TEST_EXIT_FRAME") || getenv("SWR_TEST_RECORD"))) return 0;
+  for(int i=1;i<argc;i++) if(!strcmp(argv[i],"--no-launcher") || !strncmp(argv[i],"--seconds=",10) || !strncmp(argv[i],"--frames=",9)) return 0;   /* timed runs are tests */
+  if(!fe_should_show(argc,argv,exedir,exename)) return 0;
+  return fe_run(NULL); }

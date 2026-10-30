@@ -35,6 +35,8 @@ extern void overlay_draw(int w, int h);
 void android_log(const char* s){ __android_log_write(ANDROID_LOG_INFO,"SwitchRecomp",s); }
 
 /* ---------------- ini */
+/* [Input] mouse_buttons: the game mouse (free aim, buttons) is the Windows backend's only; nothing to re-parse here */
+void mouse_map_reset(void){}
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"touch_controls_opacity")) overlay_set_opacity((float)atof(v));
   else if(!strcmp(k,"touch_controls")) g_overlay_visible=atoi(v); }

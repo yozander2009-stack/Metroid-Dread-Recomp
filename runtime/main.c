@@ -849,10 +849,14 @@ int swr_main(int argc, char** argv){
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   pm_init(&g_setq_lock); g_setq_init=1;
-#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
-  { /* Play screen / first-run setup in the game window (dread_ui/fe.cpp); returns 0 = start the game, 1 = quit */
+#if defined(SWR_HAVE_FRONTEND)
+  { /* Play screen / first-run setup in the game window (dread_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */
     extern int backend_frontend(int argc, char** argv, const char* exedir, const char* exename);
+#ifdef _WIN32
     if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); TerminateProcess(GetCurrentProcess(),0); } }
+#else
+    if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); _exit(0); } }
+#endif
 #endif
   ini_open(ini);
 #if !defined(_WIN32)

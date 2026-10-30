@@ -19,6 +19,15 @@ release/
 shader_cache/
 vulkan_native/
 
+# Linux build output (linux/*.sh)
+*.so
+linux/test/
+linux/dist/MetroidDread-Linux/
+linux/dist/*.tar.gz
+linux/dist/*.AppImage
+linux/appimage/cache/
+linux/appimage/AppDir/
+
 # never commit binaries, archives or game files
 *.exe
 *.dll

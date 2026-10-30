@@ -1,30 +1,58 @@
 // Metroid Dread front end: first-run setup and the Play / settings screens, drawn with Dear ImGui + Direct3D 11
 // in the game's own window before the game starts (backend_win32.c). Direct3D leaves no pixel format on the window,
 // so OpenGL or Vulkan can take it over afterwards: one process, one window.
+// Linux (backend_x11.c): the same screens in their own X11 window with OpenGL 3 (the host at the end of this file); it
+// closes on Play and the game opens its window. The system side is fe_sys_linux.cpp.
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
 #include <d3d11.h>
 #include <objbase.h>
+#else
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#include <X11/XKBlib.h>
+#include <X11/keysym.h>
+#include <GL/glx.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <unistd.h>
+#endif
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
 #include "imgui.h"
 #include "imgui_internal.h"
+#ifdef _WIN32
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
+#else
+#include "imgui_impl_opengl3.h"
+#endif
 #include "ui.h"
 #include "fe.h"
 
+#ifdef _WIN32
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 extern "C" void backend_fe_fullscreen(int on);
 extern "C" int backend_is_fullscreen(void);
+#else
+extern char** environ;
+#endif
 
 using namespace ui;
 namespace fe {
 
 // ---------------------------------------------------------------- state
+#ifdef _WIN32
 static HWND g_hwnd; static ID3D11Device* g_dev; static ID3D11DeviceContext* g_ctx; static IDXGISwapChain* g_sc; static ID3D11RenderTargetView* g_rtv;
+#else
+static void* g_hwnd;   // the pickers' owner window: none on Linux (zenity / kdialog open their own)
+static void backend_fe_fullscreen(int on); static int backend_is_fullscreen(void);   // the front end's own window (host below)
+static bool g_focused = true; static double g_rumble_off;   // window focus; when the PULSE test rumble stops
+#endif
 static bool g_quit, g_play, g_resize;
 static IniFile g_ini; static bool g_ini_dirty;
 enum Page { PG_SETUP, PG_PLAY, PG_DISPLAY, PG_GRAPHICS, PG_GAMEPLAY, PG_AUDIO, PG_CONTROLS, PG_MODS, PG_ADVANCED, PG_ABOUT, PG_COUNT };
@@ -72,14 +100,24 @@ static bool draw_opt(const char* key, const char* tag = nullptr) {
 }
 
 // ---------------------------------------------------------------- environment for the game (same switches the Python launcher set)
+#ifdef _WIN32
 static void env(const char* name, bool on) {
     SetEnvironmentVariableA(name, on ? "1" : nullptr); char b[160]; snprintf(b, sizeof b, "%s=%s", name, on ? "1" : ""); _putenv(b);
 }
+#else
+static void env(const char* name, bool on) { if (on) setenv(name, "1", 1); else unsetenv(name); }
+#endif
 static void apply_env(const IniFile& ini) {
     // never inherit stray test / diagnostic switches
-    LPWCH all = GetEnvironmentStringsW(); std::vector<std::string> drop;
+    std::vector<std::string> drop;
+#ifdef _WIN32
+    LPWCH all = GetEnvironmentStringsW();
     for (LPWCH p = all; *p; p += wcslen(p) + 1) { std::string s = utf8(p); if (_strnicmp(s.c_str(), "SWR_", 4) == 0) drop.push_back(s.substr(0, s.find('='))); }
     FreeEnvironmentStringsW(all);
+#else
+    // SWR_RECOMPILER is the AppImage's, not a switch
+    for (char** p = environ; *p; p++) if (!strncmp(*p, "SWR_", 4) && strncmp(*p, "SWR_RECOMPILER=", 15)) { std::string s = *p; drop.push_back(s.substr(0, s.find('='))); }
+#endif
     if (!getenv("SWR_FE_TEST")) for (auto& d : drop) env(d.c_str(), false);
     env("SWR_SYNC_SHADERS", ini.get("wait_for_shaders", "1") == "1");
     env("SWR_LOADING_60", ini.get("loading_60fps", "1") == "1");
@@ -88,6 +126,7 @@ static void apply_env(const IniFile& ini) {
 }
 
 // ---------------------------------------------------------------- D3D11
+#ifdef _WIN32
 static void make_rtv() { ID3D11Texture2D* bb; g_sc->GetBuffer(0, IID_PPV_ARGS(&bb)); g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv); bb->Release(); }
 static bool d3d_init() {
     DXGI_SWAP_CHAIN_DESC sd = {}; sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -103,11 +142,19 @@ static void d3d_shutdown() {
     if (g_rtv) g_rtv->Release(); if (g_sc) g_sc->Release(); if (g_ctx) g_ctx->Release(); if (g_dev) g_dev->Release();
     g_rtv = nullptr; g_sc = nullptr; g_ctx = nullptr; g_dev = nullptr;
 }
+#endif
 
 // ---------------------------------------------------------------- pieces
+#ifndef _WIN32
+void fe_x11_screen(int* w, int* h, int* hz);   // host below
+#endif
 static float native_scale() {
     bool docked = getb("docked"); std::string asp = get("aspect");
+#ifdef _WIN32
     RECT r; GetWindowRect(GetDesktopWindow(), &r); float sh = (float)(r.bottom - r.top);
+#else
+    int sw = 1920, shi = 1080, hz = 60; fe_x11_screen(&sw, &shi, &hz); float sh = (float)shi;
+#endif
     float s = sh / game_base_h(docked, asp.c_str()); s = roundf(s * 20) / 20; return std::max(0.25f, std::min(4.0f, s));
 }
 
@@ -275,7 +322,7 @@ static void update_rows(bool banner) {
     switch (u.stage) {
     case UP_AVAILABLE:
         if (row_button("##upd", fmt("Version %s is available (you have %s)", u.latest.c_str(), have.c_str()).c_str(), "UPDATE", true)) update_install_async();
-        if (row_button("##updn", "What's new in it", "OPEN")) ShellExecuteW(nullptr, L"open", wide(update_notes_url()).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (row_button("##updn", "What's new in it", "OPEN")) open_in_explorer(update_notes_url());
         if (!banner) help_text("Only the files that changed are downloaded, each one is checked before anything is replaced, and the "
                                "replaced files are kept so you can go back. Your saves and settings are not touched.");
         break;
@@ -312,7 +359,7 @@ static void report_problem() {
     if (!g_test) open_in_explorer(reports_dir());
     std::string url = "https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
                       "&gpu=" + url_enc(g_hw.gpu) + "&cpu=" + url_enc(cpu) + (g_hw.ram_gb ? "&ram=" + url_enc(fmt("%d GB", g_hw.ram_gb)) : std::string());
-    if (g_test) g_report_url = url; else ShellExecuteW(nullptr, L"open", wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (g_test) g_report_url = url; else open_in_explorer(url);
     flash("Logs packed: " + zip + ". Drag it into the bug report.");
 }
 
@@ -327,7 +374,9 @@ static void page_play() {
     ImGui::Dummy({1, S(8)});
     if (big_button("##play", "PLAY", {S(420), S(86)})) { if (ready) g_play = true; else go(PG_SETUP); }
     ImGui::Dummy({1, S(14)});
+#ifdef _WIN32
     { UpStage st = update_state().stage; if (st == UP_AVAILABLE || st == UP_DOWNLOADING || st == UP_REBUILD || (st == UP_INSTALLED && update_state().restart)) { update_rows(true); ImGui::Dummy({1, S(10)}); } }
+#endif
     // three tiles
     float w = ImGui::GetContentRegionAvail().x, tw = (w - S(24)) / 3, th = S(108);
     std::string rn = get("renderer"); const char* rl = rn == "vulkan" ? "Vulkan output" : rn == "vulkan_native" ? "Native Vulkan" : "OpenGL";
@@ -361,6 +410,7 @@ static void page_play() {
     if (row_button("##bk", "Back up saves now", "BACK UP")) { std::string z, e; if (backup_saves(&z, &e)) flash("Saves backed up: " + z); else flash("Backup failed: " + e); }
     if (row_button("##ob", "Open backups folder", "OPEN")) { make_dirs(backups_dir()); open_in_explorer(backups_dir()); }
     if (row_button("##os", "Open saves folder", "OPEN")) { if (have) open_in_explorer(join(P.data, "save")); else flash("No saves yet."); }
+#ifdef _WIN32   // Linux: the Steam shortcut and updates from the releases page aren't there yet
     section("STEAM");
     if (row_button("##steam", "Add Metroid Dread to Steam as a non-Steam game", "ADD")) {
         std::string m; steam_add_shortcut(P.exe, P.exedir, m); flash(m); }
@@ -373,9 +423,14 @@ static void page_play() {
         std::string m; bool rb = false, rs = false;
         if (update_rollback(&m, &rb, &rs)) { flash(m); if (rb) start_rebuild(rs); else if (rs) { g_do_restart = true; g_quit = true; } } else flash(m); }
     help_text("Updates come from this project's GitHub releases page and only replace this game's own files.");
+#endif
     section("PROBLEMS");
     if (row_button("##report", "Report a problem: pack the logs and open the bug report page", "REPORT")) report_problem();
+#ifdef _WIN32
     help_text("The zip has this game's logs and settings, nothing else (no saves, no game files). Logs show your Windows user name in folder paths. Drag the zip into the report.");
+#else
+    help_text("The zip has this game's logs and settings, nothing else (no saves, no game files). Logs show your user name in folder paths. Drag the zip into the report.");
+#endif
     section("FOLDERS");
     if (row_button("##gf", "Game folder", "OPEN")) open_in_explorer(P.exedir);
     if (row_button("##sc", "Screenshots and recordings", "OPEN")) { make_dirs(join(P.exedir, "captures")); open_in_explorer(join(P.exedir, "captures")); }
@@ -506,6 +561,7 @@ static void kb_assign(int vk) {
 #endif
 
 static void page_controls() {
+#ifdef _WIN32
     page_title("CONTROLS", "Pair Bluetooth controllers in Windows Settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
                "DualSense, 8BitDo and Xbox controllers over USB or Bluetooth.");
     section("CONTROLLER SUPPORT");
@@ -517,6 +573,12 @@ static void page_controls() {
         if (!f.empty()) { if (CopyFileW(wide(f).c_str(), wide(join(P.exedir, "SDL2.dll")).c_str(), FALSE)) flash("SDL2.dll installed: restart the launcher to use it"); else flash("Copy failed"); }
     }
     section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) draw_opt("mouse_sensitivity");
+#else   // controllers come from the system's SDL2 (backend_x11.c); the game mouse is Windows-only
+    page_title("CONTROLS", "Pair Bluetooth controllers in your desktop's settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
+               "DualSense, 8BitDo, Xbox and Steam Deck controls over USB or Bluetooth.");
+    section("CONTROLLER SUPPORT");
+    row_text("SDL2", pads_sdl_loaded() ? "Found on this system" : "Not found: install SDL2 (libSDL2-2.0.so.0) for controllers", pads_sdl_loaded() ? C_OK : C_WARN);
+#endif
     section("BUTTON ICONS");
     draw_opt("button_icons");
     for (int i = 0; i < 3; i++) {
@@ -558,7 +620,11 @@ static void page_controls() {
     }
     section("FEEL");
     draw_opt("stick_deadzone"); draw_opt("rumble");
+#ifdef _WIN32
     if (row_button("##rt", "Test rumble", "PULSE")) { pads_rumble(atoi(get("rumble").c_str())); SetTimer(g_hwnd, 77, 300, nullptr); }
+#else
+    if (row_button("##rt", "Test rumble", "PULSE")) { pads_rumble(atoi(get("rumble").c_str())); g_rumble_off = ImGui::GetTime() + 0.3; }
+#endif
     draw_opt("menu_shortcut");
     section("GAME BUTTONS");
     draw_opt("menu_buttons");
@@ -650,13 +716,24 @@ static void page_advanced() {
     section("SHADERS"); draw_opt("wait_for_shaders"); draw_opt("prebuild_shaders"); draw_opt("low_priority_shader_compiler");
     section("CPU"); draw_opt("sleep_waits"); draw_opt("texture_threads");
     section("MEMORY"); draw_opt("memory_gb");
+#ifdef _WIN32   // the F7 recorder is Media Foundation
     section("RECORDING (F7)"); draw_opt("smooth_recording"); draw_opt("recording_fps");
+#endif
     section("DIAGNOSTICS"); draw_opt("log"); draw_opt("diag"); draw_opt("profile");
     section("START-UP");
     { bool v = getb("skip_launcher"); if (row_bool("##skip", "Start the game directly (skip this screen)", &v)) set("skip_launcher", v ? "1" : "0");
+#ifdef _WIN32
       help_text("Hold Shift while starting the game to see this screen again."); }
+#else
+      help_text("Start the game with --launcher to see this screen again."); }
+#endif
     section("FILES");
-    if (row_button("##ini", "Open the settings file in Notepad", "OPEN")) { if (g_ini_dirty) { g_ini.save(); g_ini_dirty = false; } open_in_notepad(P.ini); }
+#ifdef _WIN32
+    if (row_button("##ini", "Open the settings file in Notepad", "OPEN"))
+#else
+    if (row_button("##ini", "Open the settings file in a text editor", "OPEN"))
+#endif
+        { if (g_ini_dirty) { g_ini.save(); g_ini_dirty = false; } open_in_notepad(P.ini); }
     if (row_button("##slog", "Open the setup log", "OPEN")) open_in_notepad(join(P.exedir, "setup.log"));
     if (row_button("##resetup", "Check game files and rebuild", "SETUP")) { g_base = get("setup_base"); g_update = get("setup_update"); g_ss = SS_WELCOME; go(PG_SETUP); }
 }
@@ -753,7 +830,11 @@ static void handle_nav() {
     ImGuiIO& io = ImGui::GetIO();
     double now = ImGui::GetTime();
     int api = get("controller_api") == "sdl" ? 1 : get("controller_api") == "xinput" ? 2 : 0;
+#ifdef _WIN32
     bool fg = GetForegroundWindow() == g_hwnd;
+#else
+    bool fg = g_focused;
+#endif
     g_pad = pads_read(api, atoi(get("controller_index").c_str()));
     unsigned long long phys = (fg ? g_pad.phys : 0) | test_input();
     if (g_test && test_input()) g_pad.name = g_pad.name.empty() ? "Test pad" : g_pad.name;
@@ -788,6 +869,7 @@ static void test_shot() {
     static const char* s = getenv("SWR_FE_SHOTS"); static const char* pre = getenv("SWR_FE_SHOT_PREFIX"); if (!s || !pre) return;
     bool want = false; for (const char* p = s; *p;) { char* e; long f = strtol(p, &e, 10); if (f == g_frame_no) want = true; if (e == p) break; p = *e == ',' ? e + 1 : e; }
     if (!want) return;
+#ifdef _WIN32
     ID3D11Texture2D* bb; g_sc->GetBuffer(0, IID_PPV_ARGS(&bb)); D3D11_TEXTURE2D_DESC d; bb->GetDesc(&d);
     d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
     ID3D11Texture2D* st; if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &st))) { bb->Release(); return; }
@@ -800,6 +882,12 @@ static void test_shot() {
         g_ctx->Unmap(st, 0);
     }
     st->Release(); bb->Release();
+#else   // the back buffer of the front end's window, bottom row first in GL
+    GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp); int w = vp[2], h = vp[3]; std::vector<unsigned char> px((size_t)w * h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1); glReadBuffer(GL_BACK); glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    std::string path = fmt("%s-f%d.ppm", pre, g_frame_no); FILE* f = fopen(path.c_str(), "wb");
+    if (f) { fprintf(f, "P6\n%d %d\n255\n", w, h); for (int y = h - 1; y >= 0; y--) fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f); fclose(f); }
+#endif
 }
 static void test_tick() {
     if (!g_test) return;
@@ -852,11 +940,26 @@ static void test_tick() {
                      (int)ImGui::IsKeyDown(ImGuiKey_GamepadDpadDown), (int)update_state().stage, update_state().installed.c_str(), update_state().pct, g_job.error.c_str(), update_state().error.c_str()); setup_unlock(); fclose(f); } }
 }
 
+// the settings, the page to open and the menu buttons, before the window shows (fe_run on both systems)
+static void fe_prepare() {
+    g_ini.load(P.ini); if (g_ini.path.empty()) g_ini.path = P.ini;
+    g_old = find_old_installs();
+    if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
+    g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
+    // Metroid Dread has no Portuguese (9, pt-BR 17): the game is given English then (svc_core.c game_lang), and the menu shows that
+    { std::string l = g_ini.get("language", ""); if (l == "9" || l == "17") { set("language", "1"); g_ini.save(); g_ini_dirty = false; } }
+    bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
+    g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
+    GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;
+    if (g_test && getenv("SWR_FE_PAGE") && g_page != PG_SETUP) { int pg = atoi(getenv("SWR_FE_PAGE")); if (pg > PG_SETUP && pg < PG_COUNT) g_page = (Page)pg; }   // screenshots
+}
+
 } // namespace fe
 
 using namespace fe;
 
 // ---------------------------------------------------------------- entry points (backend_win32.c)
+#ifdef _WIN32
 extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const char* exename) {
     P.init(exedir, exename);
     IniFile ini; ini.load(P.ini);
@@ -892,6 +995,7 @@ extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l
 extern "C" int fe_run(void* hwnd) {
     g_hwnd = (HWND)hwnd; g_test = getenv("SWR_FE_TEST") != nullptr;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+<<<<<<< HEAD
     g_ini.load(P.ini); if (g_ini.path.empty()) g_ini.path = P.ini;
     g_old = find_old_installs();
     if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
@@ -902,6 +1006,9 @@ extern "C" int fe_run(void* hwnd) {
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
     GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;
     if (g_test && getenv("SWR_FE_PAGE") && g_page != PG_SETUP) { int pg = atoi(getenv("SWR_FE_PAGE")); if (pg > PG_SETUP && pg < PG_COUNT) g_page = (Page)pg; }   // screenshots
+=======
+    fe_prepare();
+>>>>>>> pr22
     // a 16:10 window on the primary screen, centred; fullscreen if the game will be
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int ww = std::min(1440, (int)((wa.right - wa.left) * 0.85f)), wh = std::min((int)(ww * 0.625f), (int)((wa.bottom - wa.top) * 0.9f));
@@ -947,3 +1054,188 @@ extern "C" int fe_run(void* hwnd) {
     InvalidateRect(g_hwnd, nullptr, FALSE);
     return 0;
 }
+#endif
+
+#ifndef _WIN32
+// ---------------------------------------------------------------- Linux host (backend_x11.c backend_frontend)
+// An X11 window with an OpenGL 3 context for ImGui's OpenGL3 renderer, input fed to ImGui here. On Play it closes and
+// fe_run returns: the game then opens its own window and GL context (video_init), as on Windows after Direct3D.
+namespace fe {
+static Display* x_dpy; static Window x_win; static GLXContext x_ctx; static Atom x_wm_delete, x_state, x_fs; static int x_fs_on, x_w = 1280, x_h = 800;
+
+static void backend_fe_fullscreen(int on) {
+    if (!x_dpy || (on != 0) == (x_fs_on != 0)) return;
+    XEvent e; memset(&e, 0, sizeof e); e.xclient.type = ClientMessage; e.xclient.window = x_win; e.xclient.message_type = x_state; e.xclient.format = 32;
+    e.xclient.data.l[0] = on ? 1 : 0; e.xclient.data.l[1] = (long)x_fs; e.xclient.data.l[3] = 1;
+    XSendEvent(x_dpy, DefaultRootWindow(x_dpy), False, SubstructureRedirectMask | SubstructureNotifyMask, &e); XFlush(x_dpy); x_fs_on = on;
+}
+static int backend_is_fullscreen(void) { return x_fs_on; }
+
+// the primary monitor (XRandR 1.5 monitors, libXrandr loaded at run time), else the whole X screen at 60 Hz
+void fe_x11_screen(int* w, int* h, int* hz) {
+    Display* d = x_dpy ? x_dpy : XOpenDisplay(nullptr); if (!d) return;
+    *w = DisplayWidth(d, DefaultScreen(d)); *h = DisplayHeight(d, DefaultScreen(d)); *hz = 60;
+    static void* xr = dlopen("libXrandr.so.2", RTLD_NOW | RTLD_LOCAL);
+    struct Mon { Atom name; Bool primary, automatic; int noutput, x, y, width, height, mwidth, mheight; unsigned long* outputs; };
+    typedef Mon* (*GetMonitors)(Display*, Window, Bool, int*); typedef void (*FreeMonitors)(Mon*);
+    typedef void* (*GetInfo)(Display*, Window); typedef short (*Rate)(void*); typedef void (*FreeInfo)(void*);
+    if (xr) {
+        GetMonitors gm = (GetMonitors)dlsym(xr, "XRRGetMonitors"); FreeMonitors fm = (FreeMonitors)dlsym(xr, "XRRFreeMonitors");
+        int n = 0; Mon* m = gm ? gm(d, DefaultRootWindow(d), True, &n) : nullptr;
+        if (m && n > 0) { int k = 0; for (int i = 0; i < n; i++) if (m[i].primary) k = i; *w = m[k].width; *h = m[k].height; }
+        if (m && fm) fm(m);
+        GetInfo gi = (GetInfo)dlsym(xr, "XRRGetScreenInfo"); Rate rt = (Rate)dlsym(xr, "XRRConfigCurrentRate"); FreeInfo fi = (FreeInfo)dlsym(xr, "XRRFreeScreenConfigInfo");
+        void* c = gi && rt ? gi(d, DefaultRootWindow(d)) : nullptr; if (c) { short r = rt(c); if (r > 0) *hz = r; if (fi) fi(c); }
+    }
+    if (d != x_dpy) XCloseDisplay(d);
+}
+// what the front end's GL context runs on; Mesa also tells the video memory and whether it is the system's (an APU)
+std::string fe_x11_gpu(int* vram_mb, bool* integrated) {
+    if (!x_ctx) return {};
+    const char* r = (const char*)glGetString(GL_RENDERER); std::string n = r ? r : "";
+    typedef Bool (*QRI)(int, unsigned*); QRI q = (QRI)glXGetProcAddressARB((const GLubyte*)"glXQueryCurrentRendererIntegerMESA");
+    unsigned v[1] = {0};
+    if (q && q(0x8187 /* GLX_RENDERER_VIDEO_MEMORY_MESA */, v)) *vram_mb = (int)v[0];
+    if (q && q(0x8188 /* GLX_RENDERER_UNIFIED_MEMORY_ARCHITECTURE_MESA */, v)) *integrated = v[0] != 0;
+    if (!*vram_mb) { GLint kb = 0; while (glGetError()) {} glGetIntegerv(0x9047 /* GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX */, &kb); if (!glGetError() && kb > 0) *vram_mb = kb / 1024; }
+    return n;
+}
+
+static ImGuiKey x_key(KeySym k) {
+    if (k >= XK_a && k <= XK_z) return (ImGuiKey)(ImGuiKey_A + (k - XK_a));
+    if (k >= XK_0 && k <= XK_9) return (ImGuiKey)(ImGuiKey_0 + (k - XK_0));
+    switch (k) {
+    case XK_Tab: case XK_ISO_Left_Tab: return ImGuiKey_Tab; case XK_Left: return ImGuiKey_LeftArrow; case XK_Right: return ImGuiKey_RightArrow;
+    case XK_Up: return ImGuiKey_UpArrow; case XK_Down: return ImGuiKey_DownArrow; case XK_Prior: return ImGuiKey_PageUp; case XK_Next: return ImGuiKey_PageDown;
+    case XK_Home: return ImGuiKey_Home; case XK_End: return ImGuiKey_End; case XK_Insert: return ImGuiKey_Insert; case XK_Delete: return ImGuiKey_Delete;
+    case XK_BackSpace: return ImGuiKey_Backspace; case XK_space: return ImGuiKey_Space; case XK_Return: return ImGuiKey_Enter; case XK_KP_Enter: return ImGuiKey_KeypadEnter;
+    case XK_Escape: return ImGuiKey_Escape; case XK_F11: return ImGuiKey_F11;
+    case XK_Shift_L: return ImGuiKey_LeftShift; case XK_Shift_R: return ImGuiKey_RightShift; case XK_Control_L: return ImGuiKey_LeftCtrl; case XK_Control_R: return ImGuiKey_RightCtrl;
+    case XK_Alt_L: return ImGuiKey_LeftAlt; case XK_Alt_R: return ImGuiKey_RightAlt;
+    }
+    return ImGuiKey_None;
+}
+static void x_events() {
+    ImGuiIO& io = ImGui::GetIO();
+    while (XPending(x_dpy)) {
+        XEvent e; XNextEvent(x_dpy, &e);
+        switch (e.type) {
+        case KeyPress: case KeyRelease: {
+            bool down = e.type == KeyPress; unsigned st = e.xkey.state;
+            io.AddKeyEvent(ImGuiMod_Ctrl, (st & ControlMask) != 0); io.AddKeyEvent(ImGuiMod_Shift, (st & ShiftMask) != 0); io.AddKeyEvent(ImGuiMod_Alt, (st & Mod1Mask) != 0);
+            KeySym k = XLookupKeysym(&e.xkey, 0);
+            if (down && (k == XK_Return || k == XK_KP_Enter) && (st & Mod1Mask)) { bool fs = !x_fs_on; backend_fe_fullscreen(fs); set("fullscreen", fs ? "1" : "0"); break; }   // Alt+Enter, as in the game
+            ImGuiKey ik = x_key(k); if (ik != ImGuiKey_None) io.AddKeyEvent(ik, down);
+            if (down) { char c[16]; KeySym ks; int n = XLookupString(&e.xkey, c, sizeof c - 1, &ks, nullptr); c[n > 0 ? n : 0] = 0;
+                if (n == 1 && (unsigned char)c[0] >= 32 && c[0] != 127) io.AddInputCharacter((unsigned char)c[0]); }
+            break; }
+        case MotionNotify: io.AddMousePosEvent((float)e.xmotion.x, (float)e.xmotion.y); break;
+        case ButtonPress: case ButtonRelease: {
+            unsigned b = e.xbutton.button; io.AddMousePosEvent((float)e.xbutton.x, (float)e.xbutton.y);
+            if (b == 1 || b == 2 || b == 3) io.AddMouseButtonEvent(b == 1 ? 0 : b == 3 ? 1 : 2, e.type == ButtonPress);
+            else if (e.type == ButtonPress && (b == 4 || b == 5)) io.AddMouseWheelEvent(0, b == 4 ? 1.0f : -1.0f);
+            break; }
+        case LeaveNotify: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
+        case FocusIn: g_focused = true; io.AddFocusEvent(true); break;
+        case FocusOut: g_focused = false; io.AddFocusEvent(false); break;
+        case ConfigureNotify: x_w = std::max(1, e.xconfigure.width); x_h = std::max(1, e.xconfigure.height); break;
+        case ClientMessage:
+            if ((Atom)e.xclient.data.l[0] == x_wm_delete) { if (g_job.running) setup_cancel(g_job); g_quit = true; }   // setup continues from where it stopped next time
+            break;
+        }
+    }
+}
+static int x_err_ignore(Display*, XErrorEvent*) { return 0; }
+static bool x_open() {
+    x_dpy = XOpenDisplay(nullptr); if (!x_dpy) return false;
+    int scr = DefaultScreen(x_dpy);
+    static int att[] = {GLX_X_RENDERABLE, True, GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT, GLX_RENDER_TYPE, GLX_RGBA_BIT, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_DOUBLEBUFFER, True, None};
+    int n = 0; GLXFBConfig* fc = glXChooseFBConfig(x_dpy, scr, att, &n); if (!fc || !n) return false;
+    XVisualInfo* vi = glXGetVisualFromFBConfig(x_dpy, fc[0]); if (!vi) return false;
+    // a 16:10 window on the primary screen, centred; fullscreen if the game will be (as on Windows)
+    int sw = 1920, sh = 1080, hz = 60; fe_x11_screen(&sw, &sh, &hz);
+    x_w = std::min(1440, (int)(sw * 0.85f)); x_h = std::min((int)(x_w * 0.625f), (int)(sh * 0.9f));
+    XSetWindowAttributes swa; memset(&swa, 0, sizeof swa); swa.colormap = XCreateColormap(x_dpy, RootWindow(x_dpy, vi->screen), vi->visual, AllocNone);
+    swa.background_pixel = BlackPixel(x_dpy, scr);
+    swa.event_mask = KeyPressMask | KeyReleaseMask | StructureNotifyMask | FocusChangeMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | LeaveWindowMask;
+    x_win = XCreateWindow(x_dpy, RootWindow(x_dpy, vi->screen), (sw - x_w) / 2, (sh - x_h) / 2, x_w, x_h, 0, vi->depth, InputOutput, vi->visual, CWColormap | CWEventMask | CWBackPixel, &swa);
+    XFree(vi);
+    XStoreName(x_dpy, x_win, "Metroid Dread");
+    { XClassHint ch = {(char*)"metroid-dread", (char*)"MetroidDread"}; XSetClassHint(x_dpy, x_win, &ch); }
+    x_wm_delete = XInternAtom(x_dpy, "WM_DELETE_WINDOW", False); XSetWMProtocols(x_dpy, x_win, &x_wm_delete, 1);
+    x_state = XInternAtom(x_dpy, "_NET_WM_STATE", False); x_fs = XInternAtom(x_dpy, "_NET_WM_STATE_FULLSCREEN", False);
+    XkbSetDetectableAutoRepeat(x_dpy, True, nullptr);
+    if (g_ini.get("fullscreen", "1") == "1") { XChangeProperty(x_dpy, x_win, x_state, XA_ATOM, 32, PropModeReplace, (unsigned char*)&x_fs, 1); x_fs_on = 1; }   // read when mapped
+    XMapWindow(x_dpy, x_win);
+    typedef GLXContext (*CCA)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
+    CCA cca = (CCA)glXGetProcAddressARB((const GLubyte*)"glXCreateContextAttribsARB");
+    int (*old)(Display*, XErrorEvent*) = XSetErrorHandler(x_err_ignore);
+    if (cca) { int ca[] = {0x2091, 3, 0x2092, 3, 0x9126, 0x00000001, None}; x_ctx = cca(x_dpy, fc[0], nullptr, True, ca); XSync(x_dpy, False); }   // 3.3 core
+    if (!x_ctx) x_ctx = glXCreateNewContext(x_dpy, fc[0], GLX_RGBA_TYPE, nullptr, True);
+    XSetErrorHandler(old); XFree(fc);
+    if (!x_ctx || !glXMakeCurrent(x_dpy, x_win, x_ctx)) return false;
+    typedef void (*SIE)(Display*, GLXDrawable, int); typedef int (*SIM)(unsigned);
+    SIE sie = (SIE)glXGetProcAddressARB((const GLubyte*)"glXSwapIntervalEXT"); SIM sim = (SIM)glXGetProcAddressARB((const GLubyte*)"glXSwapIntervalMESA");
+    if (sie) sie(x_dpy, x_win, 1); else if (sim) sim(1);
+    return true;
+}
+static void x_close() {
+    if (!x_dpy) return;
+    if (x_ctx) { glXMakeCurrent(x_dpy, None, nullptr); glXDestroyContext(x_dpy, x_ctx); x_ctx = nullptr; }
+    if (x_win) { XDestroyWindow(x_dpy, x_win); x_win = 0; }
+    XCloseDisplay(x_dpy); x_dpy = nullptr;
+}
+static double x_now() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+} // namespace fe
+
+extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const char* exename) {
+    P.init(exedir, exename);
+    IniFile ini; ini.load(P.ini);
+    bool play = false, launcher = false;
+    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--play")) play = true; if (!strcmp(argv[i], "--launcher")) launcher = true; }
+    bool skip = (play || ini.get("skip_launcher", "0") == "1") && !launcher;   // --launcher: the Play screen even when it is skipped
+    GameCheck g = check_installed();
+    if (!g.code_ok || !g.data_ok) return 1;   // setup first, whatever was asked
+    if (skip) { apply_env(ini); return 0; }
+    return 1;
+}
+
+extern "C" int fe_run(void*) {
+    g_test = getenv("SWR_FE_TEST") != nullptr;
+    fe_prepare();
+    if (!x_open()) { fprintf(stderr, "front end: no X11 display with OpenGL 3: the game starts directly\n"); x_close(); apply_env(g_ini); return check_installed().code_ok ? 0 : 1; }
+    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr; io.LogFilename = nullptr; io.BackendPlatformName = "fe_x11";
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    load_fonts(io); apply_style(1.0f);
+    ImGui_ImplOpenGL3_Init("#version 150");
+    pads_init();
+    double last = x_now();
+    while (!g_quit && !g_play) {
+        x_events();
+        if (g_quit || g_play) break;
+        double now = x_now(); io.DeltaTime = (float)std::max(1e-4, now - last); last = now;
+        io.DisplaySize = ImVec2((float)x_w, (float)x_h); io.DisplayFramebufferScale = ImVec2(1, 1);
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui::NewFrame();
+        nav_frame_begin();
+        handle_nav();
+        frame();
+        nav_move(g_nav.down ? 1 : g_nav.up ? -1 : 0);
+        ImGui::Render();
+        glViewport(0, 0, x_w, x_h); glClearColor(0.015f, 0.027f, 0.05f, 1); glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        test_shot(); g_frame_no++; test_tick();
+        glXSwapBuffers(x_dpy, x_win);
+        if (g_rumble_off && ImGui::GetTime() >= g_rumble_off) { pads_rumble_off(); g_rumble_off = 0; }
+        if (g_ini_dirty) { g_ini.save(); g_ini_dirty = false; }
+    }
+    if (g_ini_dirty) g_ini.save();
+    pads_shutdown();
+    ImGui_ImplOpenGL3_Shutdown(); ImGui::DestroyContext();
+    x_close();
+    if (g_quit) return 1;
+    apply_env(g_ini);
+    return 0;
+}
+#endif
