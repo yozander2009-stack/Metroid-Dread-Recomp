@@ -133,6 +133,32 @@
     ]
    ]
   },
+  "code_017.c": {
+   "pristine": "edff8041521b19ebad7c077414343c68aa513e72abf1f1bf65f73746e895270c",
+   "result": "c9b30e62ed3a7ec4ba77848dc9137e5388299b89fa63e102238b84aa078516e9",
+   "hunks": [
+    [
+     30139,
+     30139,
+     [
+      "/* SWR Hor+ (GitHub #19): F_821CEE0(hfov degrees, aspect) turns the camera's horizontal field of view into the vertical",
+      "   one, 2 atan(tan(hfov/2) / aspect), which F_807EA04 builds the projection from with the real aspect. So a picture",
+      "   wider than 16:9 (ultrawide=1/4, 21:9 / 32:9) lost height (zoomed in) instead of gaining width. The aspect here is",
+      "   capped at 16:9: the vertical view stays the 16:9 one and the extra width shows more to the sides. 16:9 and narrower",
+      "   (16:10) are unchanged. SWR_NO_HORPLUS=1 = the game's own (tests) */",
+      "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
+      "static int swr_horplus(void){ static int v=-1; if(v<0){ char b[8]; v= !(GetEnvironmentVariableA(\"SWR_NO_HORPLUS\",b,sizeof b)>0 && b[0]=='1'); } return v; }"
+     ]
+    ],
+    [
+     30155,
+     30155,
+     [
+      " if(swr_horplus() && c->v[8].f[0]>16.0f/9.0f) c->v[8].f[0]=16.0f/9.0f;   /* SWR Hor+: the aspect capped at 16:9 */"
+     ]
+    ]
+   ]
+  },
   "code_127.c": {
    "pristine": "85c70563edb6e3e593b5de9e71f32bc2416e1cb5a1066971c8dd96a0e023beb7",
    "result": "9e65e8ffc05ac3dcca4f1c84966569f0616aa51eae0b4120ef88aab51cf5e1e6",
