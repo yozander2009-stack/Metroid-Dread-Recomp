@@ -946,8 +946,8 @@ static void fe_prepare() {
     g_old = find_old_installs();
     if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
     g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
-    // Metroid Dread has no Portuguese (9, pt-BR 17): the game is given English then (svc_core.c game_lang), and the menu shows that
-    { std::string l = g_ini.get("language", ""); if (l == "9" || l == "17") { set("language", "1"); g_ini.save(); g_ini_dirty = false; } }
+    // pt-BR (17) is the menu's Portuguese (9): the fan translation applies with either (svc_fs.c), the list shows 9
+    { std::string l = g_ini.get("language", ""); if (l == "17") { set("language", "9"); g_ini.save(); g_ini_dirty = false; } }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
     GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;
@@ -995,20 +995,7 @@ extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l
 extern "C" int fe_run(void* hwnd) {
     g_hwnd = (HWND)hwnd; g_test = getenv("SWR_FE_TEST") != nullptr;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-<<<<<<< HEAD
-    g_ini.load(P.ini); if (g_ini.path.empty()) g_ini.path = P.ini;
-    g_old = find_old_installs();
-    if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
-    g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
-    // pt-BR (17) is the menu's Portuguese (9): the fan translation applies with either (svc_fs.c), the list shows 9
-    { std::string l = g_ini.get("language", ""); if (l == "17") { set("language", "9"); g_ini.save(); g_ini_dirty = false; } }
-    bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
-    g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
-    GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;
-    if (g_test && getenv("SWR_FE_PAGE") && g_page != PG_SETUP) { int pg = atoi(getenv("SWR_FE_PAGE")); if (pg > PG_SETUP && pg < PG_COUNT) g_page = (Page)pg; }   // screenshots
-=======
     fe_prepare();
->>>>>>> pr22
     // a 16:10 window on the primary screen, centred; fullscreen if the game will be
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int ww = std::min(1440, (int)((wa.right - wa.left) * 0.85f)), wh = std::min((int)(ww * 0.625f), (int)((wa.bottom - wa.top) * 0.9f));
