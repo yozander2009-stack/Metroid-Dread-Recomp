@@ -97,8 +97,9 @@ bash linux/run.sh                             # play; settings in games/Metroid 
 brings them back when skipped). `linux/build_game_so.sh` recompiles only what changed (after editing the patches or the
 translator), `linux/package.sh` makes the Steam Deck package in `linux/dist/` (no game data inside), and `run_test.sh`,
 `menu_test.sh` and `run_route_linux.sh` run the automated tests on a copy of the game folder (`SWR_SOFTGL=1` for
-Mesa's software OpenGL). Not on Linux yet: native Vulkan, updates from the releases page, the Steam shortcut button,
-the mouse free aim and F7 recording.
+Mesa's software OpenGL). The AppImage updates itself from the releases page (Play screen > Updates; publish
+`linux/dist/update-linux.txt` with the AppImage, made by `VERSION=x.y.z bash linux/make_appimage.sh`), and Add to Steam
+works from Desktop Mode. Not on Linux yet: native Vulkan, the mouse free aim and F7 recording.
 
 ### AppImage
 

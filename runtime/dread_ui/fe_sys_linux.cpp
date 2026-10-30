@@ -487,16 +487,7 @@ bool mod_remove(const std::string& name) {
     bool ok = recycle(join(mods_dir(), name));
     auto m = mods_list(); mods_write(m); return ok;
 }
-int steam_add_shortcut(const std::string&, const std::string&, std::string& msg) { msg = "Not available on Linux yet: add the AppImage to Steam with Add a Non-Steam Game."; return -1; }
-
-// ---------------------------------------------------------------- updates (fe_update.cpp): Windows-only for now
-std::string installed_version() { return ""; }
-void update_check_async() {}
-void update_install_async() {}
-UpdateState update_state() { return {}; }
-std::string update_notes_url() { return ""; }
-bool update_rollback(std::string* msg, bool*, bool*) { if (msg) *msg = "Not available on Linux."; return false; }
-bool update_restart() { return false; }
+// Add to Steam: fe_steam.cpp; updates: fe_update_linux.cpp
 
 // ---------------------------------------------------------------- controllers: SDL2 from the system, as the game loads it (backend_x11.c)
 typedef void* GC;

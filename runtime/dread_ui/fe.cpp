@@ -410,11 +410,14 @@ static void page_play() {
     if (row_button("##bk", "Back up saves now", "BACK UP")) { std::string z, e; if (backup_saves(&z, &e)) flash("Saves backed up: " + z); else flash("Backup failed: " + e); }
     if (row_button("##ob", "Open backups folder", "OPEN")) { make_dirs(backups_dir()); open_in_explorer(backups_dir()); }
     if (row_button("##os", "Open saves folder", "OPEN")) { if (have) open_in_explorer(join(P.data, "save")); else flash("No saves yet."); }
-#ifdef _WIN32   // Linux: the Steam shortcut and updates from the releases page aren't there yet
     section("STEAM");
     if (row_button("##steam", "Add Metroid Dread to Steam as a non-Steam game", "ADD")) {
         std::string m; steam_add_shortcut(P.exe, P.exedir, m); flash(m); }
+#ifdef _WIN32
     help_text("Uses this game's icon. Steam is closed and started again if it's running.");
+#else
+    help_text("Starts this AppImage (or run.sh) from Steam. Steam is closed and started again if it's running: on a Steam Deck, add it from Desktop Mode.");
+#endif
     section("UPDATES");
     update_rows(false);
     { UpStage st = update_state().stage; if (st != UP_CHECKING && st != UP_DOWNLOADING && st != UP_AVAILABLE && row_button("##updc", "Check for a new version now", "CHECK")) update_check_async(); }
@@ -423,7 +426,6 @@ static void page_play() {
         std::string m; bool rb = false, rs = false;
         if (update_rollback(&m, &rb, &rs)) { flash(m); if (rb) start_rebuild(rs); else if (rs) { g_do_restart = true; g_quit = true; } } else flash(m); }
     help_text("Updates come from this project's GitHub releases page and only replace this game's own files.");
-#endif
     section("PROBLEMS");
     if (row_button("##report", "Report a problem: pack the logs and open the bug report page", "REPORT")) report_problem();
 #ifdef _WIN32
@@ -915,6 +917,12 @@ static void test_tick() {
         if (f) { fprintf(f, "report msg=%s url=%s\n", g_flash.c_str(), g_report_url.c_str()); fclose(f); }
         g_quit = true;
     }
+    if (getenv("SWR_FE_STEAM") && g_frame_no == 30) {   // presses Add to Steam (with SWR_STEAM_VDF on Linux: only that file), writes the result, quits
+        std::string m; int r = steam_add_shortcut(P.exe, P.exedir, m);
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "steam r=%d msg=%s\n", r, m.c_str()); fclose(f); }
+        g_quit = true;
+    }
     if (getenv("SWR_FE_PT_IMPORT") && g_frame_no == 30) {   // installs the Portuguese translation from that path, writes the result, quits
         std::string err; bool ok = pt_pack_import(getenv("SWR_FE_PT_IMPORT"), &err);
         const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
@@ -1201,6 +1209,7 @@ extern "C" int fe_run(void*) {
     load_fonts(io); apply_style(1.0f);
     ImGui_ImplOpenGL3_Init("#version 150");
     pads_init();
+    if (g_ini.get("check_updates", "1") != "0" && (!g_test || getenv("SWR_UPDATE_URL"))) update_check_async();
     double last = x_now();
     while (!g_quit && !g_play) {
         x_events();
@@ -1225,6 +1234,7 @@ extern "C" int fe_run(void*) {
     pads_shutdown();
     ImGui_ImplOpenGL3_Shutdown(); ImGui::DestroyContext();
     x_close();
+    if (g_do_restart) update_restart();   // an update replaced the AppImage: the new one takes over
     if (g_quit) return 1;
     apply_env(g_ini);
     return 0;

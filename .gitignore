@@ -25,6 +25,7 @@ linux/test/
 linux/dist/MetroidDread-Linux/
 linux/dist/*.tar.gz
 linux/dist/*.AppImage
+linux/dist/update-linux.txt
 linux/appimage/cache/
 linux/appimage/AppDir/
 

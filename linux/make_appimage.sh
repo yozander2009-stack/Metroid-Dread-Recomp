@@ -4,10 +4,13 @@
 # (Bootlin) and Python (python-build-standalone), so the player needs neither. No game files inside.
 # The game is installed in ~/.local/share/MetroidDreadRecomp (METROID_DREAD_HOME moves it), see appimage/AppRun.
 # Downloads are checked against the SHA-256 below and kept in linux/appimage/cache.
-# Output: linux/dist/Metroid_Dread-x86_64.AppImage
+# Output: linux/dist/Metroid_Dread-x86_64.AppImage, and linux/dist/update-linux.txt for the in-game updater
+# (dread_ui/fe_update_linux.cpp). VERSION=x.y.z names the release (default: 0.0.0-dev); publish both files as release
+# assets of tag vVERSION (TAG=... otherwise).
 set -e -o pipefail
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 need curl "curl"; need "$PY" "python3"
+need desktop-file-validate "desktop-file-utils (appimagetool makes no AppImage without it, and says nothing)"
 C="$W/linux/appimage/cache"; A="$W/linux/appimage/AppDir"; R="$A/usr/share/metroid-dread/recompiler"
 OUT="$W/linux/dist/Metroid_Dread-x86_64.AppImage"
 GCC_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/x86-64/tarballs/x86-64--glibc--stable-2025.08-1.tar.xz   # GCC 14.3.0, glibc 2.41
@@ -69,6 +72,12 @@ printf 'unsigned long GetEnvironmentVariableA(const char*,char*,unsigned long);\
 "$R/python/bin/python3" -I -c "import hashlib, json, zipfile, concurrent.futures, argparse, struct; import sys; sys.path.insert(0, '$R'); import switchrecomp"
 rm -rf "$T" "$R/__pycache__"
 
+# the updater's record of this build: version, release tag, and a hash over the recompiler (not GCC or Python), whose
+# change means the game code must be rebuilt after an update
+VERSION=${VERSION:-0.0.0-dev}; TAG=${TAG:-v$VERSION}
+RHASH=$( cd "$R" && find . -path ./gcc -prune -o -path ./python -prune -o -type f -print | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64 )
+printf 'version %s\ntag %s\nrecompiler %s\n' "$VERSION" "$TAG" "$RHASH" > "$A/usr/share/metroid-dread/update.txt"
+
 # desktop entry, icon (the 256 px PNG inside runtime/app.ico) and AppRun
 cp "$W/linux/appimage/AppRun" "$A/AppRun"; chmod +x "$A/AppRun"
 cp "$W/linux/appimage/metroid-dread.desktop" "$A/"
@@ -84,3 +93,6 @@ mkdir -p "$(dirname "$OUT")"
 du -sh "$R/gcc" "$R/python" "$A"
 ARCH=x86_64 "$C/appimagetool" --appimage-extract-and-run --no-appstream "$A" "$OUT"
 ls -la "$OUT"
+{ cat "$A/usr/share/metroid-dread/update.txt"
+  printf 'package %s %s %s\n' "$(basename "$OUT")" "$(sha256sum "$OUT" | cut -c1-64)" "$(stat -c %s "$OUT")"; } > "$(dirname "$OUT")/update-linux.txt"
+cat "$(dirname "$OUT")/update-linux.txt"

@@ -438,15 +438,28 @@ def main():
 
 
 def compile_all(files, cc, build, jobs, p0, p1):
-    """switchrecomp.compile_all with a progress line per file (same flags and object names, so objects are reused)"""
-    import switchrecomp
+    """switchrecomp.compile_all with a progress line per file (same flags; objects are reused across setups)"""
+    import switchrecomp, subprocess
     flags = ['-O2', '-fno-strict-aliasing', '-fwrapv', '-w', '-I', switchrecomp.RT, '-foptimize-sibling-calls', '-fno-semantic-interposition']
     if not WIN:
         flags += ['-fPIC', '-fvisibility=hidden', '-include', LX_COMPAT]
         if os.environ.get('SWR_CFLAGS'):
             flags += os.environ['SWR_CFLAGS'].split()   # e.g. -march=native, or -march=znver2 for a Steam Deck
+    # The objects' key: the compiler by what it is (version, target), the flags with this install's own folders taken
+    # out, and the contents of the headers they name. With paths in it, an AppImage (mounted at a new /tmp/.mount_*
+    # folder each run) or a moved install recompiled the whole game at every rebuild (~25 min on a Steam Deck)
+    def ident(args):
+        try: return subprocess.run([cc] + args, capture_output=True, text=True, timeout=30).stdout.strip()
+        except Exception: return cc
+    cc_id = '%s %s %s' % (os.path.basename(cc), ident(['-dumpfullversion']), ident(['-dumpmachine']))
+    roots = sorted({switchrecomp.RT} | ({os.path.dirname(LX_COMPAT)} if not WIN else set()), key=len, reverse=True)
+    def stable(f):
+        for r in roots: f = f.replace(r, '<R>')
+        return f
     with open(os.path.join(switchrecomp.RT, 'cpu.h'), 'rb') as f1, open(os.path.join(switchrecomp.RT, 'cpu_helpers.c'), 'rb') as f2:
-        key = '|'.join([cc] + flags) + '|' + f1.read().decode('latin1') + '|' + f2.read().decode('latin1')
+        key = '|'.join([cc_id] + [stable(f) for f in flags]) + '|' + f1.read().decode('latin1') + '|' + f2.read().decode('latin1')
+    if not WIN:
+        with open(LX_COMPAT, 'rb') as f3: key += '|' + f3.read().decode('latin1')
     sig = hashlib.sha1(key.encode('utf-8', 'replace')).hexdigest()[:10]
     # biggest first: a big file started last would leave every other core idle at the end
     order = sorted(files, key=lambda s: -os.path.getsize(s))

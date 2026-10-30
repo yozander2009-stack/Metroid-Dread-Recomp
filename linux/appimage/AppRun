@@ -10,6 +10,12 @@ if ! cmp -s "$HERE/usr/bin/metroid-dread" "$GAME/Metroid Dread"; then
   cp -f "$HERE/usr/bin/metroid-dread" "$GAME/Metroid Dread.new" && chmod +x "$GAME/Metroid Dread.new" && mv -f "$GAME/Metroid Dread.new" "$GAME/Metroid Dread"
 fi
 [ -d "$GAME/licenses" ] || cp -r "$HERE/usr/share/metroid-dread/licenses" "$GAME/licenses" 2>/dev/null
+# what this AppImage is (version, recompiler hash) for the updater (dread_ui/fe_update_linux.cpp), and the icon Add to
+# Steam gives the shortcut (fe_steam.cpp)
+if [ -f "$HERE/usr/share/metroid-dread/update.txt" ] && ! cmp -s "$HERE/usr/share/metroid-dread/update.txt" "$GAME/update.txt"; then
+  cp -f "$HERE/usr/share/metroid-dread/update.txt" "$GAME/update.txt"
+fi
+cmp -s "$HERE/metroid-dread.png" "$GAME/metroid-dread.png" || cp -f "$HERE/metroid-dread.png" "$GAME/metroid-dread.png" 2>/dev/null
 export SWR_RECOMPILER="$HERE/usr/share/metroid-dread/recompiler"
 cd "$GAME" || exit 1
 exec "./Metroid Dread" "$@"
