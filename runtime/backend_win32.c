@@ -444,13 +444,23 @@ static void* backend_gl_proc_raw(const char* n);
 #include "vk_present.inc"
 
 int backend_gl_create(void){
-  HGLRC tmp=wglCreateContext(g_hdc); if(!tmp) return 0;
-  wglMakeCurrent(g_hdc,tmp);
-  CCA cca=(CCA)wglGetProcAddress("wglCreateContextAttribsARB");
-  static const int vers[4][2]={{4,6},{4,5},{4,4},{4,3}};
-  for(int i=0;i<4 && !g_ctx && cca;i++){ int ca[]={0x2091,vers[i][0],0x2092,vers[i][1],0x9126,0x00000001,0x2094,getenv("SWR_GL_DRIVER_DEBUG")?1:0,0}; g_ctx=cca(g_hdc,NULL,ca);
-    if(g_ctx) g_wctx=cca(g_hdc,g_ctx,ca); }   /* second shared context for the shader compile thread */
-  wglMakeCurrent(NULL,NULL); wglDeleteContext(tmp);
+  /* Right after the Play screen hands over to the new window, context creation sometimes failed on a GPU that has
+     OpenGL 4.6 (3 of 12 fullscreen starts on an RTX 5070, MEASURED 2026-10-30; v0.4.0 0 of 6): log why and try again
+     a few times before giving up */
+  for(int attempt=0;attempt<10 && !g_ctx;attempt++){
+    if(attempt){ Sleep(100); if(!GetPixelFormat(g_hdc)) set_pixel_format(g_hdc); }
+    HGLRC tmp=wglCreateContext(g_hdc);
+    if(!tmp){ WARN("OpenGL: no context on the window (attempt %d, pixel format %d, error %lu)\n",attempt+1,GetPixelFormat(g_hdc),GetLastError()); continue; }
+    wglMakeCurrent(g_hdc,tmp);
+    CCA cca=(CCA)wglGetProcAddress("wglCreateContextAttribsARB");
+    static const int vers[4][2]={{4,6},{4,5},{4,4},{4,3}};
+    for(int i=0;i<4 && !g_ctx && cca;i++){ int ca[]={0x2091,vers[i][0],0x2092,vers[i][1],0x9126,0x00000001,0x2094,getenv("SWR_GL_DRIVER_DEBUG")?1:0,0}; g_ctx=cca(g_hdc,NULL,ca);
+      if(g_ctx) g_wctx=cca(g_hdc,g_ctx,ca); }   /* second shared context for the shader compile thread */
+    if(!g_ctx){ typedef const unsigned char* (WINAPI *GGS)(unsigned); GGS ggs=(GGS)backend_gl_proc_raw("glGetString");
+      const char* rn= ggs? (const char*)ggs(0x1F01) : NULL;   /* GL_RENDERER */
+      WARN("OpenGL: no 4.3+ context (attempt %d, pixel format %d, %s, renderer %s, error %lu)\n",attempt+1,GetPixelFormat(g_hdc),
+           cca? "attribs entry found" : "no attribs entry",rn? rn : "?",GetLastError()); }
+    wglMakeCurrent(NULL,NULL); wglDeleteContext(tmp); }
   if(!g_ctx){ fatal("Your graphics card does not support OpenGL 4.3.\nPlease update your GPU driver."); return 0; }
   wglMakeCurrent(g_hdc,g_ctx);
   if(g_glwnd && !vkp_init()){
