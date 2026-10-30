@@ -68,7 +68,6 @@ static void sdl_load(void){
 
 /* the kind of controller connected, for the button icons (svc_fs.c), asked before the window exists: 1 Xbox or any
    other (the Steam Deck's controls and Steam Input pads among them), 2 DualShock 4, 3 DualSense, 4 Switch, 0 none */
-void mouse_map_reset(void){}   /* mouse free aim (main.c mouse_buttons) is Windows-only */
 int backend_pad_family(void){
   sdl_load(); if(!sdl.Init) return 0;
   for(int i=0;i<sdl.NumJoysticks();i++) if(sdl.IsGameController(i)){

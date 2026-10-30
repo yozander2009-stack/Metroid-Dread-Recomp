@@ -187,7 +187,7 @@ static Rec recommend() {
     r.asp = ratio >= 2.2f ? "21:9" : fabsf(ratio - 1.6f) < 0.02f ? "16:10" : "16:9";
     float base = game_base_h(true, r.asp.c_str()), native = roundf(g_hw.h / base * 20) / 20;
     r.res = g_hw.tier == "high" ? (g_hw.h >= 2000 ? native : std::max(native, 2.0f)) : g_hw.tier == "mid" ? std::min(native, 1.5f) : 1.0f;
-    r.fps = g_hw.hz >= 230 && g_hw.tier == "high" && g_hw.cores >= 8 ? "240" : g_hw.hz >= 140 && g_hw.tier != "low" ? "144" : g_hw.hz >= 115 && g_hw.tier != "low" ? "120" : "1";
+    r.fps = g_hw.hz >= 230 && g_hw.tier == "high" && g_hw.cores >= 8 ? "240" : g_hw.hz >= 140 && g_hw.tier != "low" ? "144" : g_hw.hz >= 115 && g_hw.tier != "low" ? "120" : g_hw.hz >= 88 && g_hw.hz < 115 && g_hw.tier != "low" ? "90" : "1";
     r.af = g_hw.tier != "low" ? "16" : "4";
     r.sharp = base * r.res < g_hw.h - 1 ? "25" : "0";   // the picture is stretched to the screen: a light sharpen
     // renderer: above 60 FPS on a discrete NVIDIA / AMD card native Vulkan is clearly smoother (2026-10-23, RTX 5070, 240 cap:
@@ -453,7 +453,11 @@ static void page_display() {
         if (pt_pack_installed()) row_text("Portuguese text", "Installed: the JumpmanClub Brasil fan translation", C_OK);
         else row_text("Portuguese text", "Not installed yet: the game shows English until you add it", C_WARN);
         if (row_button("##ptweb", "Download the translation from JumpmanClub Brasil's website", "OPEN"))
+#ifdef _WIN32
             ShellExecuteW(nullptr, L"open", wide(PT_PACK_URL).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+            open_in_explorer(PT_PACK_URL);   // xdg-open (fe_sys_linux.cpp)
+#endif
         if (row_button("##ptzip", "Add the downloaded .zip", "CHOOSE")) { std::string z = pick_file(g_hwnd, "Choose the translation (.zip)", L"Zip archive", L"*.zip");
             if (!z.empty()) { flash("Installing..."); if (pt_pack_import(z, &err)) flash("Portuguese translation installed"); else flash(err); } }
         if (row_button("##ptdir", "Add the extracted folder", "CHOOSE")) { std::string d = pick_folder(g_hwnd, "Choose the extracted translation folder");
