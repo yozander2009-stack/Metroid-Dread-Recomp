@@ -623,8 +623,15 @@ Surf* vk_rt_snapshot(Surf* rt) {
    rt_prefiltered). A filtered-only read (ShTex.use 1) of a scaled target by a draw at least 2x smaller, or of a small
    glow buffer (480x270 and under, guest size), gets the target averaged down by 2^lv (lv: 1 at 2x, 2 at 4x), so its
    taps see the averages they see at 1x. Each level is a crop of the target (freed with it, dropped unused like the
-   others), made from the level before by a 2:1 linear blit: a 2x2 box. SWR_NO_RT_PREFILTER=1 = off */
+   others), made from the level before by a 2:1 linear blit: a 2x2 box. Other scales (1.85x showed the same dots, owner's
+   Deck 2026-11-01) go on from the last such level to a copy of the guest size, at most 2:1. SWR_NO_RT_PREFILTER=1 = off */
 static int can_blit(VkFormat f);
+#define PRE_GUEST 31u /* pre_lv of the guest-size copy */
+static u32 pre_levels(void) { /* whole halvings of the scale */
+    u32 lv = 0;
+    for (float k = 2.0f; k <= g_vk_scale + 0.01f; k *= 2.0f) lv++;
+    return lv;
+}
 static Surf* pre_level(Surf* t, u32 k) {
     if (!k) return t;
     Surf* c = NULL;
@@ -634,8 +641,8 @@ static Surf* pre_level(Surf* t, u32 k) {
         c = calloc(1, sizeof *c);
         if (!c) return NULL;
         c->gva = t->gva;
-        c->sw = t->sw >> k ? t->sw >> k : 1;
-        c->sh = t->sh >> k ? t->sh >> k : 1;
+        c->sw = k == PRE_GUEST ? t->w : t->sw >> k ? t->sw >> k : 1;
+        c->sh = k == PRE_GUEST ? t->h : t->sh >> k ? t->sh >> k : 1;
         c->w = c->sw;
         c->h = c->sh;
         c->layers = c->levels = c->depth3d = 1;
@@ -670,7 +677,7 @@ static Surf* pre_level(Surf* t, u32 k) {
     }
     c->last_used = g_vk_present;
     if (c->crop_gen != t->wgen) {
-        Surf* from = pre_level(t, k - 1);
+        Surf* from = pre_level(t, k == PRE_GUEST ? pre_levels() : k - 1);
         if (!from) return NULL;
         VkCommandBuffer cb = vk_cmd();
         vk_surf_use(cb, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
@@ -690,16 +697,16 @@ static Surf* pre_level(Surf* t, u32 k) {
 Surf* vk_rt_prefiltered(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
     static int off = -1;
     if (off < 0) off = getenv("SWR_NO_RT_PREFILTER") != NULL;
-    if (off || g_vk_scale < 1.99f || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+    if (off || g_vk_scale < 1.01f || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
         want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int || t->layers != 1 || st->use != 1 ||
         st->type != 1 || st->array || st->shadow || !n || !rt[0] || rt[0] == t)
         return t;
     const Surf* o = rt[0];
     if (!(t->w >= 2 * o->w && t->h >= 2 * o->h) && !(t->w <= 480 && t->h <= 270)) return t;
-    u32 lv = 0;
-    for (float k = 2.0f; k <= g_vk_scale + 0.01f; k *= 2.0f) lv++;
-    if (!lv || !can_blit(t->f.vk)) return t;
-    Surf* c = pre_level(t, lv);
+    u32 lv = pre_levels();
+    int frac = g_vk_scale > (float)(1u << lv) * 1.01f;
+    if ((!lv && !frac) || !can_blit(t->f.vk)) return t;
+    Surf* c = pre_level(t, frac ? PRE_GUEST : lv);
     return c ? c : t;
 }
 
@@ -918,7 +925,7 @@ static Surf* tex_from_tic(const u32* tic, int raw, int storage) {
                   "is loaded from memory\n",
                   f.bpp, (unsigned long long)gva, rt->f.bpp);
     }
-texture_from_memory:
+texture_from_memory:;
     /* loaded from memory, with what render targets drew into its layers and levels copied in after (tex_take_drawn) */
     /* what the device can make */
     const VkPhysicalDeviceLimits* lim = &g_vk.props.limits;

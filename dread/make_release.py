@@ -11,7 +11,7 @@ Nothing from Nintendo is copied: setup compiles the player's own files on their 
 import os, sys, shutil, zipfile, hashlib, fnmatch, time, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GCC = os.path.join(ROOT, 'gcc', 'Library')
+GCC = os.environ.get('SWR_RELEASE_GCC', os.path.join(ROOT, 'gcc', 'Library'))
 GV = '14.2.0'; TRIPLE = 'x86_64-w64-mingw32'
 RECOMPILER_PY = ['switchrecomp.py', 'codegen.py', 'a64.py', 'nxloader.py', 'metroid_perf.py']
 
@@ -24,18 +24,27 @@ def cptree(src, dst, ignore=None):
     shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
 
 
+def gcc_version():
+    versions_dir = os.path.join(GCC, 'lib', 'gcc', TRIPLE)
+    versions = [v for v in os.listdir(versions_dir) if os.path.isdir(os.path.join(versions_dir, v))] if os.path.isdir(versions_dir) else []
+    if GV in versions: return GV
+    if len(versions) == 1: return versions[0]
+    raise SystemExit('Expected one GCC version in ' + versions_dir)
+
+
 def slim_gcc(dst):
     """only what compiling C and linking one DLL needs (the full package has clang, gdb, cmake ...: 1.5 GB)"""
-    b = os.path.join(GCC, 'bin'); lx = os.path.join(GCC, 'libexec', 'gcc', TRIPLE, GV); lg = os.path.join(GCC, 'lib', 'gcc', TRIPLE, GV)
+    version = gcc_version()
+    b = os.path.join(GCC, 'bin'); lx = os.path.join(GCC, 'libexec', 'gcc', TRIPLE, version); lg = os.path.join(GCC, 'lib', 'gcc', TRIPLE, version)
     for f in ('gcc.exe', 'as.exe', 'ld.exe', 'ld.bfd.exe', 'libiconv-2.dll', 'libwinpthread-1.dll', 'libintl-8.dll', 'zlib1.dll', 'libzstd.dll'):
         cp(os.path.join(b, f), os.path.join(dst, 'bin', f))
     for f in os.listdir(lx):
         if f in ('cc1.exe', 'collect2.exe', 'lto-wrapper.exe', 'lto1.exe', 'liblto_plugin.dll') or f.endswith('.dll'):
-            cp(os.path.join(lx, f), os.path.join(dst, 'libexec', 'gcc', TRIPLE, GV, f))
+            cp(os.path.join(lx, f), os.path.join(dst, 'libexec', 'gcc', TRIPLE, version, f))
     for f in ('crtbegin.o', 'crtend.o', 'crtfastmath.o', 'libgcc.a', 'libgcc_eh.a'):
-        cp(os.path.join(lg, f), os.path.join(dst, 'lib', 'gcc', TRIPLE, GV, f))
+        cp(os.path.join(lg, f), os.path.join(dst, 'lib', 'gcc', TRIPLE, version, f))
     for d in ('include', 'include-fixed'):
-        cptree(os.path.join(lg, d), os.path.join(dst, 'lib', 'gcc', TRIPLE, GV, d))
+        cptree(os.path.join(lg, d), os.path.join(dst, 'lib', 'gcc', TRIPLE, version, d))
     cptree(os.path.join(GCC, TRIPLE, 'include'), os.path.join(dst, TRIPLE, 'include'))
     cptree(os.path.join(GCC, TRIPLE, 'lib'), os.path.join(dst, TRIPLE, 'lib'))
     for f in ('as.exe', 'ld.exe', 'ld.bfd.exe', 'libiconv-2.dll', 'libintl-8.dll', 'libwinpthread-1.dll', 'libzstd.dll', 'zlib1.dll'):
@@ -67,7 +76,7 @@ GCC_TXT = """recompiler\\gcc is GCC %s and GNU binutils (MinGW-w64, built by Bre
 GCC and binutils are GPL-3.0; the GCC runtime library exception covers code they compile. The MinGW-w64 runtime and headers
 are under the ZPL / public domain / MIT-style terms listed in their headers. Source: https://gcc.gnu.org, https://sourceware.org/binutils,
 https://www.mingw-w64.org, https://github.com/brechtsanders/winlibs_mingw (the exact version is in recompiler\\gcc\\version_info.txt).
-""" % GV
+"""
 
 README = """METROID DREAD - recompiled for PC
 =================================
@@ -160,7 +169,7 @@ def release(out, exe, version):
     for s, d in LICENSES:
         cp(os.path.join(ROOT, s), os.path.join(lic, d))
     open(os.path.join(lic, 'zlib-and-SDL2.txt'), 'w').write(ZLIB_TXT)
-    open(os.path.join(lic, 'GCC-binutils-MinGW.txt'), 'w').write(GCC_TXT)
+    open(os.path.join(lic, 'GCC-binutils-MinGW.txt'), 'w').write(GCC_TXT % gcc_version())
     open(os.path.join(lic, 'theboy181-patches.txt'), 'w').write(
         'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Dread v2.1.0 patches\n'
         '(https://github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081.\n')
@@ -280,12 +289,12 @@ def source(out):
     # line endings exactly as written (some runtime files are CRLF by rule, the Linux scripts must stay LF)
     open(os.path.join(out, '.gitattributes'), 'w', newline='\n').write('* -text\n')
     open(os.path.join(out, 'README.md'), 'w', encoding='utf-8').write(SOURCE_README)
-    cp(os.path.join(ROOT, 'dread', 'DLSS.md'), os.path.join(out, 'DLSS.md'))
-    # files that only belong in the repository (CONTRIBUTING.md, build.bat, .github issue forms)
-    repo = os.path.join(ROOT, 'dread', 'repo')
-    for dp, dn, fn in os.walk(repo):
-        for n in fn:
-            p = os.path.join(dp, n); cp(p, os.path.join(out, os.path.relpath(p, repo)))
+    cp(os.path.join(ROOT, 'DLSS.md'), os.path.join(out, 'DLSS.md'))
+    # files that only belong in the repository: at its root since the repository became the source tree
+    for f in ('CONTRIBUTING.md', 'build.bat'):
+        cp(os.path.join(ROOT, f), os.path.join(out, f))
+    cptree(os.path.join(ROOT, '.github'), os.path.join(out, '.github'))
+    cptree(os.path.join(ROOT, 'docs', 'images'), os.path.join(out, 'docs', 'images'))
     n = sum(len(fn) for dp, dn, fn in os.walk(out))
     print('source: %s (%d files)' % (out, n))
 
@@ -391,7 +400,8 @@ translator), `linux/package.sh` makes the Steam Deck package in `linux/dist/` (n
 `menu_test.sh` and `run_route_linux.sh` run the automated tests on a copy of the game folder (`SWR_SOFTGL=1` for
 Mesa's software OpenGL). The AppImage updates itself from the releases page (Play screen > Updates; publish
 `linux/dist/update-linux.txt` with the AppImage, made by `VERSION=x.y.z bash linux/make_appimage.sh`), and Add to Steam
-works from Desktop Mode. Not on Linux yet: native Vulkan, the mouse free aim and F7 recording.
+works from Desktop Mode. Native Vulkan needs Linux 6.7 or later (OpenGL otherwise). Not on Linux yet: the mouse free aim and F7
+recording.
 
 ### AppImage
 

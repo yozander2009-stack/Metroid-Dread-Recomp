@@ -452,9 +452,31 @@ void plat_prof_start(int boot){
   { HANDLE d=NULL; DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&d,0,FALSE,DUPLICATE_SAME_ACCESS); plat_prof_add_thread(d); CloseHandle(d); }
   uintptr_t h=_beginthreadex(NULL,0,prof_thread,NULL,0,NULL); if(h){ SetThreadPriority((HANDLE)h,THREAD_PRIORITY_TIME_CRITICAL); CloseHandle((HANDLE)h); } }
 #else
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <dirent.h>
+#include <sys/prctl.h>
+/* user + system time per thread since the last report, the busiest first: /proc, read on the render thread every 5 s */
+void plat_thread_cpu_report(FILE*f,u64 now,int prime){
+  typedef struct { int tid; u64 u,s; char name[16]; } TC; static TC last[256]; static int nlast; static u64 tlast;
+  TC cur[256], top[6]; int n=0, nt=0; memset(top,0,sizeof top); DIR* d=opendir("/proc/self/task"); if(!d) return;
+  struct dirent* e; u64 hz=(u64)sysconf(_SC_CLK_TCK); if(!hz) hz=100; double dt=tlast? (now-tlast)/1e9 : 0;
+  while((e=readdir(d)) && n<256){ int tid=atoi(e->d_name); if(tid<=0) continue; char p[64], b[512]; snprintf(p,sizeof p,"/proc/self/task/%d/stat",tid);
+    FILE* s=fopen(p,"r"); if(!s) continue; size_t l=fread(b,1,sizeof b-1,s); fclose(s); b[l]=0;
+    char* o=strchr(b,'('), *c=strrchr(b,')'); if(!o||!c) continue; TC t; memset(&t,0,sizeof t); t.tid=tid; size_t nl=(size_t)(c-o-1); if(nl>15) nl=15; memcpy(t.name,o+1,nl);
+    unsigned long long ut=0, st=0; if(sscanf(c+2,"%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",&ut,&st)!=2) continue; t.u=ut; t.s=st; cur[n++]=t;
+    for(int i=0;i<nlast;i++) if(last[i].tid==tid){ TC x=t; x.u=t.u-last[i].u; x.s=t.s-last[i].s; u64 sum=x.u+x.s;
+        for(int k=0;k<6;k++) if(sum>top[k].u+top[k].s){ for(int m=5;m>k;m--) top[m]=top[m-1]; top[k]=x; break; } break; } }
+  closedir(d); (void)nt;
+  if(f && !prime && dt>0.5){ fprintf(f,"      threads CPU (%% of a core, user+system): ");
+    for(int k=0;k<6 && top[k].tid;k++) fprintf(f,"%s %d: %.0f+%.0f  ",top[k].name,top[k].tid,100.0*top[k].u/hz/dt,100.0*top[k].s/hz/dt); fprintf(f,"\n"); }
+  memcpy(last,cur,sizeof(TC)*(size_t)n); nlast=n; tlast=now; }
+void plat_diag_role(const char*s){ prctl(PR_SET_NAME,s,0,0,0); }
+void plat_diag_guest(KThread*t){ plat_diag_role(t->is_main? "guest-main" : "guest"); }
+#else
 void plat_thread_cpu_report(FILE*f,u64 now,int prime){(void)now;if(f&&!prime)fprintf(f,"      threads CPU: unavailable on this platform\n");}
 void plat_diag_role(const char*s){(void)s;}
 void plat_diag_guest(KThread*t){(void)t;}
+#endif
 void plat_thread_diag_start(void){}
 /* ------------------------------------------------------------------ POSIX */
 #include <sys/mman.h>
@@ -516,7 +538,48 @@ int g_ww_ok;
 
 int plat_ww_collect(u8* base, u64 size, void (*cb)(u64)){ (void)base; (void)size; (void)cb; return -1; }
 
-u8* plat_vm_reserve(u64 size){ void* p=mmap(NULL,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0); return p==MAP_FAILED? NULL : (u8*)p; }
+/* Written-page tracking for renderer=vulkan_native, Linux 6.7 and later: what MEM_WRITE_WATCH does on Windows. The
+   reservation is registered with a userfaultfd in asynchronous write-protect mode, where the kernel clears the
+   protection itself on a write (no handler thread), and PAGEMAP_SCAN lists the written pages and protects them again.
+   Declared here: the build machine's kernel headers may be older than the kernel it runs on */
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <fcntl.h>
+#include <linux/userfaultfd.h>
+#define WW_USER_MODE_ONLY 1
+#define WW_FEATURES ((1ull<<13)|(1ull<<15))   /* UFFD_FEATURE_WP_UNPOPULATED, UFFD_FEATURE_WP_ASYNC */
+typedef struct { u64 start, end, categories; } WwRegion;
+typedef struct { u64 size, flags, start, end, walk_end, vec, vec_len, max_pages, category_inverted, category_mask, category_anyof_mask, return_mask; } WwScan;
+#define WW_PAGEMAP_SCAN _IOWR('f',16,WwScan)
+#define WW_MATCH_WP 1ull         /* PM_SCAN_WP_MATCHING */
+#define WW_IS_WRITTEN 2ull       /* PAGE_IS_WRITTEN */
+static int g_ww_pagemap=-1;
+static void ww_setup(u8* p, u64 size){
+  int fd=(int)syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK|WW_USER_MODE_ONLY); if(fd<0){ LOG("write tracking: no userfaultfd (%s)\n",strerror(errno)); return; }
+  struct uffdio_api api; memset(&api,0,sizeof api); api.api=UFFD_API; api.features=WW_FEATURES;
+  if(ioctl(fd,UFFDIO_API,&api)){ LOG("write tracking: this kernel has no asynchronous write protection (Linux 6.7 or later needed)\n"); close(fd); return; }
+  struct uffdio_register reg; memset(&reg,0,sizeof reg); reg.range.start=(u64)(uintptr_t)p; reg.range.len=size; reg.mode=UFFDIO_REGISTER_MODE_WP;
+  if(ioctl(fd,UFFDIO_REGISTER,&reg)){ LOG("write tracking: could not register guest memory (%s)\n",strerror(errno)); close(fd); return; }
+  int pm=open("/proc/self/pagemap",O_RDONLY|O_CLOEXEC); if(pm<0){ close(fd); return; }
+  g_ww_pagemap=pm; g_ww_ok=1; }   /* fd stays open: closing it would end the registration */
+int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)){
+  if(g_ww_pagemap<0) return -1;
+  u64 start=(u64)(uintptr_t)p&~0xFFFull, end=((u64)(uintptr_t)p+size+0xFFF)&~0xFFFull;
+  while(start<end){ WwRegion r[64]; WwScan a; memset(&a,0,sizeof a); a.size=sizeof a; a.flags=WW_MATCH_WP; a.start=start; a.end=end;
+    a.vec=(u64)(uintptr_t)r; a.vec_len=64; a.category_mask=WW_IS_WRITTEN; a.return_mask=WW_IS_WRITTEN;
+    int n=ioctl(g_ww_pagemap,WW_PAGEMAP_SCAN,&a); if(n<0) return -1;
+    for(int i=0;i<n;i++) cb((u8*)(uintptr_t)r[i].start,r[i].end-r[i].start);
+    if(n<64 || !a.walk_end || a.walk_end>=end) break;   /* a full list may have stopped the walk early */
+    start=a.walk_end; }
+  return 0; }
+#else
+static void ww_setup(u8* p, u64 size){ (void)p; (void)size; }
+#endif
+
+u8* plat_vm_reserve(u64 size){ void* p=mmap(NULL,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0); if(p==MAP_FAILED) return NULL;
+  if(getenv("SWR_WW")) ww_setup((u8*)p,size);
+  return (u8*)p; }
 
 int plat_vm_commit(u8* p, u64 size){ return mprotect(p,size,PROT_READ|PROT_WRITE); }
 

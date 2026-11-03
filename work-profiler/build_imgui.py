@@ -4,7 +4,7 @@ runtime build needs no path into third_party."""
 import os, shutil, subprocess, sys, concurrent.futures as cf
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 SRC = os.path.join(ROOT, 'third_party', 'imgui-1.92.5'); OUT = os.path.join(ROOT, 'runtime', 'imgui')
-OBJ = os.path.join(OUT, 'obj'); G = os.path.join(ROOT, 'gcc', 'Library', 'bin')
+OBJ = os.path.join(OUT, 'obj'); G = os.environ.get('SWR_GCC_BIN') or os.path.join(ROOT, 'gcc', 'Library', 'bin')
 FILES = ['imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp',
          'backends/imgui_impl_win32.cpp', 'backends/imgui_impl_opengl3.cpp', 'backends/imgui_impl_dx11.cpp']
 HEADERS = ['imgui.h', 'imconfig.h', 'imgui_internal.h', 'imstb_rectpack.h', 'imstb_textedit.h', 'imstb_truetype.h',

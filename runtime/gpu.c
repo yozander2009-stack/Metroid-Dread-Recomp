@@ -156,7 +156,10 @@ static void call_method(GpuChannel* ch, u32 sub, u32 m, u32 v, int last){
   }
 }
 
+extern void r3d_const_run(GpuChannel* ch, u32 m, int inc, const u32* w, u32 n);
+static int g_cb_runs=-1;   /* SWR_NO_CB_RUNS=1: word by word, as before */
 static void run_pushbuffer(GpuChannel* ch, const u32* w, u32 n){
+  if(g_cb_runs<0) g_cb_runs=getenv("SWR_NO_CB_RUNS")==NULL;
   /* method batches can spill over into the next GPFIFO entry (hw does this, so does yuzu's DmaPusher).
      keep the batch state across entries or the leftover data gets parsed as headers */
   u32 i=0;
@@ -164,7 +167,11 @@ static void run_pushbuffer(GpuChannel* ch, const u32* w, u32 n){
     if(ch->pb_k<ch->pb_cnt){
       u32 mode=ch->pb_mode, sub=ch->pb_sub, m=ch->pb_m;
       while(ch->pb_k<ch->pb_cnt && i<n){ u32 k=ch->pb_k++; u32 mm= mode==1? m+k : mode==5? (k==0? m : m+1) : m;
-        call_method(ch,sub,mm,w[i++],ch->pb_k==ch->pb_cnt); }
+        call_method(ch,sub,mm,w[i++],ch->pb_k==ch->pb_cnt);
+        /* constant data (cb_data): the rest of the run in one copy, after the first word took the whole path (it flushes pending draws) */
+        if(mm>=0x8E4 && mm<=0x8F3 && g_cb_runs && ch->sub_class[sub]==0xB197){ u32 left=ch->pb_cnt-ch->pb_k, nm= mode==1? mm+1 : mode==5? m+1 : m; if(left>n-i) left=n-i;
+          if(mode==1){ u32 room= mm<0x8F3? 0x8F3-mm : 0; if(left>room) left=room; }
+          if(left>=4 && nm>=0x8E4 && nm<=0x8F3){ r3d_const_run(ch,nm,mode==1,w+i,left); i+=left; ch->pb_k+=left; } } }
       if(ch->pb_k<ch->pb_cnt){ static int said; if(said<6){ said++; LOG("gpu: method batch continues in the next GPFIFO entry (sub %u method %x mode %u, %u of %u words done)\n",ch->pb_sub,ch->pb_m,ch->pb_mode,ch->pb_k,ch->pb_cnt); } return; }    /* rest comes in the next entry */
     }
     if(i>=n) return;

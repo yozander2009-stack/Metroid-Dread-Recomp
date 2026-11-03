@@ -306,7 +306,8 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     # renderer=vulkan_native: ScarletNX's GPU front end + Vulkan renderer (GPL-3.0), prebuilt by work-profiler/build_snxvk.py
     snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss.a' if release else 'libsnxvk_new.a')   # ScarletNX main 112db409 (work-profiler/build_snxvk2.py)
     if os.environ.get('SWR_SNXVK_LIB'): snxvk = os.path.join(RT, 'snxvk', os.environ['SWR_SNXVK_LIB'])   # e.g. libsnxvk_new.a (re-vendor tests)
-    snxvk = snxvk if os.path.isfile(snxvk) and target_win and backend == 'win32' and not os.environ.get('SWR_NO_SNXVK') else None
+    if backend == 'x11': snxvk = os.path.join(RT, 'snxvk', 'libsnxvk_new_nodlss_linux.a')   # Linux: always without DLSS
+    snxvk = snxvk if os.path.isfile(snxvk) and (backend == 'x11' or (target_win and backend == 'win32')) and not os.environ.get('SWR_NO_SNXVK') else None
     cmd = [cc, '-O' + opt, '-w', '-fno-strict-aliasing', '-Wl,-S', '-I', RT, '-I', os.path.join(RT, 'bcn'), '-I', os.path.join(RT, 'spvc'), '-I', os.path.join(RT, 'oh264', 'include'), '-I', os.path.join(RT, 'vp9', 'include'), '-I', os.path.join(RT, 'snxvk', 'deps', 'Vulkan-Headers-1.4.365', 'include')] + srcs + ['-o', out]
     if not h264: cmd += ['-DSWR_NO_H264']
     if vp9: cmd += ['-DSWR_HAVE_VP9']
@@ -314,7 +315,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if os.environ.get('SWR_RUNTIME_DEFS'): cmd += os.environ['SWR_RUNTIME_DEFS'].split()   # e.g. -DSWR_NO_SKIPCUT for a test build
     if snxvk: cmd += ['-DSWR_HAVE_SNXVK', snxvk]
     if snxvk:   # libsnxvk_<tag>[_nodlss].a is built from src_<tag>: its renderer entries through swr_settings.c's accessors -> snxvk_glue.c's V2
-        tag = os.path.basename(snxvk)[len('libsnxvk_'):].split('.')[0].replace('_nodlss', '')
+        tag = os.path.basename(snxvk)[len('libsnxvk_'):].split('.')[0].replace('_nodlss', '').replace('_linux', '')
         acc = os.path.join(RT, 'snxvk', 'src_' + tag, 'nx', 'gpu', 'vk', 'swr_settings.c')
         if os.path.isfile(acc) and 'swr_r_start' in open(acc, encoding='utf-8', errors='replace').read(): cmd += ['-DSWR_SNXVK_V2']
     if frontend: cmd += ['-DSWR_HAVE_FRONTEND', '-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS', '-I', os.path.join(RT, 'imgui'), imgui]
@@ -322,7 +323,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if overlay and lx_frontend: cmd += ['-DSWR_HAVE_FRONTEND']
     if spvc: cmd += [spvc]
     if h264: cmd += [os.path.join(oh, 'libdecoder.a'), os.path.join(oh, 'libcommon.a')]
-    if vp9: cmd += [os.path.join(vp, 'libvpx.a')]
+    if vp9:
+        cmd += [os.path.join(vp, 'libvpx.a')]
+        if target_win: cmd += ['-Wl,--defsym,__intrinsic_setjmpex=_setjmpex']   # libvpx's UCRT setjmp entry is the MSVCRT setjmpex entry.
     if spvc or h264 or snxvk or frontend or overlay:
         # static on Linux too, so the runtime doesn't depend on the libstdc++ version of the distro
         cmd += ['-lstdc++'] if target_win else ['-Wl,-Bstatic', '-lstdc++', '-Wl,-Bdynamic', '-static-libgcc']

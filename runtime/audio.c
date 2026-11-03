@@ -245,12 +245,16 @@ static void aoutput(const i16*pcm){
 #elif !defined(__ANDROID__)
   /* Linux / Steam Deck: SDL2's queued audio (PipeWire, PulseAudio or ALSA, whichever the system has), loaded at run
      time like the controllers (backend_x11.c). Same format and the same cap as the Windows path: 32 chunks of
-     5 ms queued at most, a chunk past that is dropped rather than letting latency grow */
+     5 ms queued at most, a chunk past that is dropped rather than letting latency grow. The queue has no reserve of
+     its own: chunks arrive every 5 ms, PipeWire takes them in larger periods, and whatever it finds short it fills
+     with silence. So at the start and whenever the queue ran dry it gets 40 ms of silence first, and from then on it
+     rides out late chunks (SWR_AUDIO_RESERVE=N chunks, 0 = none) */
   typedef struct { int freq; u16 format; u8 channels, silence; u16 samples, padding; u32 size; void* callback; void* userdata; } SdlSpec;
-  static int attempted; static u32 dev; static u64 writes, dropped;
+  static int attempted, reserve=8; static u32 dev, minq=~0u; static u64 writes, dropped, dry, maxgap;
   static int (*init_sub)(u32); static u32 (*open_dev)(const char*,int,const SdlSpec*,SdlSpec*,int);
   static void (*pause_dev)(u32,int); static int (*queue)(u32,const void*,u32); static u32 (*queued)(u32);
   if(!attempted){ attempted=1;
+    { const char* e=getenv("SWR_AUDIO_RESERVE"); if(e) reserve=atoi(e); if(reserve<0) reserve=0; if(reserve>24) reserve=24; }
     if(!getenv("SWR_MUTE_AUDIO")){
       void* h=dlopen("libSDL2-2.0.so.0",RTLD_NOW|RTLD_LOCAL); if(!h) h=dlopen("libSDL2.so",RTLD_NOW|RTLD_LOCAL);
       if(h){ *(void**)&init_sub=dlsym(h,"SDL_InitSubSystem"); *(void**)&open_dev=dlsym(h,"SDL_OpenAudioDevice"); *(void**)&pause_dev=dlsym(h,"SDL_PauseAudioDevice");
@@ -263,8 +267,16 @@ static void aoutput(const i16*pcm){
         else WARN("audio: SDL2 could not open an output device\n"); }
       else WARN("audio: no sound (libSDL2-2.0.so.0 not found or its audio failed to start)\n"); } }
   if(dev){
-    if(queued(dev) < 32u*AF*4u){ if(queue(dev,pcm,AF*4)==0) writes++; } else dropped++;
-    if(writes && writes%2000==0) LOG("audio: %llu chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped); }
+    u32 q=queued(dev);
+    { static u64 last; u64 now=plat_ns(); if(last && now-last>maxgap) maxgap=now-last; last=now; if(writes && q<minq) minq=q; }
+    if(!q){ static const i16 quiet[AF*2]; if(writes) dry++; for(int k=0;k<reserve;k++) queue(dev,quiet,AF*4); }
+    /* the game's chunks and the sound device run on different clocks: the Deck's device takes a little more than the game makes (MEASURED: the queue fell
+       from 90 ms to empty in 60 s with chunks on time, a cut each time; the owner's save-room stutter). So the queue is held between 40 and 120 ms by one
+       sample frame more or less in a chunk, 0.4% for as long as it takes, which isn't heard. SWR_AUDIO_RESERVE=0 = old */
+    if(q < 32u*AF*4u){ u32 lo=40u*192u, hi=120u*192u, bytes=AF*4; static i16 st[(AF+1)*2];
+      if(reserve && q<lo){ memcpy(st,pcm,AF*4); st[AF*2]=pcm[AF*2-2]; st[AF*2+1]=pcm[AF*2-1]; if(queue(dev,st,(AF+1)*4)==0) writes++; }
+      else { if(reserve && q>hi) bytes=(AF-1)*4; if(queue(dev,pcm,bytes)==0) writes++; } } else dropped++;
+    if(writes && writes%2000==0){ LOG("audio: %llu chunks queued, %llu overflow drops, ran dry %llu times; last 10 s: queue never under %.1f ms, longest gap between chunks %.1f ms\n",(unsigned long long)writes,(unsigned long long)dropped,(unsigned long long)dry,minq/192.0,maxgap/1e6); minq=~0u; maxgap=0; } }
 #else
   (void)pcm;
 #endif

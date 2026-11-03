@@ -99,7 +99,7 @@ translator), `linux/package.sh` makes the Steam Deck package in `linux/dist/` (n
 `menu_test.sh` and `run_route_linux.sh` run the automated tests on a copy of the game folder (`SWR_SOFTGL=1` for
 Mesa's software OpenGL). The AppImage updates itself from the releases page (Play screen > Updates; publish
 `linux/dist/update-linux.txt` with the AppImage, made by `VERSION=x.y.z bash linux/make_appimage.sh`), and Add to Steam
-works from Desktop Mode. Not on Linux yet: native Vulkan and F7 recording.
+works from Desktop Mode. Native Vulkan needs Linux 6.7 or later (OpenGL otherwise). Not on Linux yet: F7 recording.
 
 ### AppImage
 

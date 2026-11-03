@@ -6,6 +6,12 @@
    loop (window, input, vsync). */
 #include "rt.h"
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#else
+#include <windows.h>
+#endif
 
 const SwrModule* g_mod;
 GuestFn* g_disp;
@@ -859,6 +865,18 @@ int swr_main(int argc, char** argv){
   split_path(argv[0]);
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
+  { /* one copy per install: two would share the saves (a double click on a Linux desktop icon starts two). An update's
+       restart overlaps the old process for a moment, so the lock is tried for 3 s. The system frees it at exit, crash included */
+    int got=0;
+#ifdef _WIN32
+    char name[300]="Local\\SwitchRecompGame"; u32 hash=2166136261u; for(const char* c=g_exedir;*c;c++) hash=(hash^(u8)*c)*16777619u; snprintf(name+strlen(name),32,"%08x",hash);
+    for(int k=0;k<30 && !got;k++){ HANDLE h=CreateMutexA(NULL,TRUE,name); if(h && GetLastError()!=ERROR_ALREADY_EXISTS) got=1; else { if(h) CloseHandle(h); plat_sleep_ns(100000000); } }
+#else
+    char lk[1300]; snprintf(lk,sizeof lk,"%s%s.lock",g_exedir,g_exename); int fd=open(lk,O_CREAT|O_RDWR|O_CLOEXEC,0644);
+    for(int k=0;k<30 && !got && fd>=0;k++){ if(!flock(fd,LOCK_EX|LOCK_NB)) got=1; else plat_sleep_ns(100000000); }
+    if(fd<0) got=1;
+#endif
+    if(!got){ fprintf(stderr,"%s is already running.\n",g_exename); _exit(0); } }   /* no log: it would replace the running copy's */
   pm_init(&g_setq_lock); g_setq_init=1;
 #if defined(SWR_HAVE_FRONTEND)
   { /* Play screen / first-run setup in the game window (dread_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */

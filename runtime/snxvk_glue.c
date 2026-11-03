@@ -15,8 +15,16 @@ int g_snxvk_want;   /* renderer=vulkan_native in the .ini (backend_ini) */
 int g_snxvk_on;     /* the Vulkan renderer started: submissions and presents go to it */
 int snxvk_dlss_mode;   /* ini dlss: 0 off, 1 DLAA, 2 quality, 3 balanced, 4 performance (native Vulkan only) */
 
-#if defined(SWR_HAVE_SNXVK) && defined(_WIN32)
+#if defined(SWR_HAVE_SNXVK)
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <errno.h>
+#include <sched.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +35,13 @@ char g_cachedir[1024];
 int g_opt_headless;
 int snxvk_opt_vsync=1;      /* their g_opt_vsync: FIFO presentation (ours means "force vsync" for GL) */
 
+#ifdef _WIN32
 int pm_trylock(PMutex* m){ return TryAcquireSRWLockExclusive(&m->l)? 1 : 0; }
+#else
+int pm_trylock(PMutex* m){ return pthread_mutex_trylock(&m->l)==0? 1 : 0; }
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
+#endif
 
 typedef struct { const u8* data; u64 size; int borrowed; } PFileMap;
 int plat_file_map(PFileMap* m, const char* path){
@@ -37,6 +51,7 @@ int plat_file_map(PFileMap* m, const char* path){
   if(n){ u8* p=malloc((size_t)n); if(!p || fread(p,1,(size_t)n,f)!=(size_t)n){ free(p); fclose(f); return -1; } m->data=p; m->size=(u64)n; }
   fclose(f); return 0; }
 void plat_file_unmap(PFileMap* m){ if(!m->borrowed) free((void*)m->data); memset(m,0,sizeof *m); }
+#ifdef _WIN32
 int plat_replace_file(const char* tmp, const char* dst){ return MoveFileExA(tmp,dst,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)? 0 : -1; }
 
 extern int g_ww_ok;
@@ -48,6 +63,9 @@ int plat_ww_scan(u8* p, u64 size, void (*cb)(u8* p, u64 size)){
     for(ULONG_PTR i=0;i<n;i++) cb((u8*)a[i],gran);
     if(n<1024) return 0; }
   return 1; }
+#else
+int plat_replace_file(const char* tmp, const char* dst){ return rename(tmp,dst); }
+#endif
 
 
 /* no on-screen controls or menu overlay here: an empty list, and a 1x1 clear atlas so the renderer's upload is valid */
@@ -94,10 +112,17 @@ int vic_gpu_aligned(const void* j){ (void)j; return 0; }   /* their VIC path: ou
 void vic_gpu_params(const void* j, void* p, const u32 in_base[16], u32 oc_base){ (void)j; (void)p; (void)in_base; (void)oc_base; }
 void* vk_nvdec_hw_device(void){ return NULL; }
 int vk_nvdec_write(const void* p){ (void)p; return 0; }
+#ifdef _WIN32
 int plat_cpus(int* ids, int max){ int n=(int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); if(n>max) n=max; for(int i=0;i<n;i++) ids[i]=i; return n; }
 const char* plat_dl_error(void){ static char b[64]; snprintf(b,sizeof b,"error %lu",(unsigned long)GetLastError()); return b; }
 int plat_setenv(const char* name, const char* value){ char b[600]; snprintf(b,sizeof b,"%s=%s",name,value? value : ""); SetEnvironmentVariableA(name,value); return _putenv(b); }
 u32 plat_tid(void){ return (u32)GetCurrentThreadId(); }
+#else
+int plat_cpus(int* ids, int max){ int n=(int)sysconf(_SC_NPROCESSORS_ONLN); if(n<1) n=1; if(n>max) n=max; for(int i=0;i<n;i++) ids[i]=i; return n; }
+const char* plat_dl_error(void){ const char* e=dlerror(); return e? e : "unknown"; }
+int plat_setenv(const char* name, const char* value){ return setenv(name,value? value : "",1); }
+u32 plat_tid(void){ return (u32)syscall(SYS_gettid); }
+#endif
 #ifdef SWR_SNXVK_V2
 const char* snx_build_commit(void){ return "112db409"; }
 const char* snx_build_info(void){ return "ScarletNX renderer 112db409 in the SwitchRecomp runtime"; }
@@ -112,7 +137,11 @@ void overlay_place(int sw, int sh, int* x, int* y, int* scale){ (void)sw; (void)
 u32 own_lookup(u64 a, u64 n, void* out, u32 max){ (void)a; (void)n; (void)out; (void)max; return 0; }
 int own_traps(void){ return 0; }
 void pm_lock_announce(PMutex* m, const char* name){ (void)m; (void)name; }
+#ifdef _WIN32
 void snx_path_native(char* p){ for(; p && *p; p++) if(*p=='/') *p='\\'; }
+#else
+void snx_path_native(char* p){ (void)p; }
+#endif
 void* state_fn_find(const char* name){ (void)name; return NULL; }
 const char* state_fn_name(void* fn){ (void)fn; return NULL; }
 const u8* ui_image_get(u32* version){ if(version) *version=0; return NULL; }
@@ -120,11 +149,19 @@ const u8* ui_image_get(u32* version){ if(version) *version=0; return NULL; }
 const char* snx_build_commit(void){ return "b5f4f14f2bfc"; }
 const char* snx_build_info(void){ return "ScarletNX renderer b5f4f14f2bfc in the SwitchRecomp runtime"; }
 #endif
+#ifdef _WIN32
 char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s.exe",g_exedir,g_exename); return _strdup(b); }
+#else
+char* snx_executable(const char* argv0){ (void)argv0; char b[1300]; snprintf(b,sizeof b,"%s%s",g_exedir,g_exename); return strdup(b); }
+#endif
 char* snx_format(const char* fmt, ...){ va_list a; va_start(a,fmt); int n=vsnprintf(NULL,0,fmt,a); va_end(a); if(n<0) return NULL;
   char* p=malloc((size_t)n+1); if(!p) return NULL; va_start(a,fmt); vsnprintf(p,(size_t)n+1,fmt,a); va_end(a); return p; }
+#ifndef _WIN32
+char* snx_os_error(char* out, size_t size){ snprintf(out,size,"%s",strerror(errno)); return out; }
+#else
 char* snx_os_error(char* out, size_t size){ DWORD e=GetLastError(); if(!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,e,0,out,(DWORD)size,NULL)) snprintf(out,size,"error %lu",(unsigned long)e);
   size_t n=strlen(out); while(n && (out[n-1]=='\r'||out[n-1]=='\n'||out[n-1]=='.')) out[--n]=0; return out; }
+#endif
 /* ---- the ScarletNX side, renamed */
 #ifdef SWR_SNXVK_V2   /* the renderer's entries through swr_settings.c's accessors: no mirror of its Renderer struct */
 extern int snxv_swr_r_start(void);
@@ -170,8 +207,12 @@ void snxvk_ini(const char* v){
   static int set_ww;   /* SWR_WW set here: a later renderer= line that isn't vulkan_native takes it back (the OpenGL
                           path with write tracking on spent ~85% of its thread in GetWriteWatch: 19 FPS) */
   g_snxvk_want= !strcmp(v,"vulkan_native");
-  if(g_snxvk_want){ if(!getenv("SWR_WW")){ _putenv("SWR_WW=1"); set_ww=1; } }
+  if(g_snxvk_want){ if(!getenv("SWR_WW")){ plat_setenv("SWR_WW","1"); set_ww=1; } }
+#ifdef _WIN32
   else if(set_ww){ _putenv("SWR_WW="); set_ww=0; } }
+#else
+  else if(set_ww){ unsetenv("SWR_WW"); set_ww=0; } }
+#endif
 
 void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 
@@ -208,6 +249,13 @@ void snxvk_kick(void){ if(g_snxvk_on) snxv_gpu_kick(); }
 void snxvk_channel_close(u32 id){ if(g_snxvk_on){ snxv_gpu_release_retire(id); snxv_gpu_channel_close(id); } }
 /* GPU page table changes, for caches of what gmmu_translate returns (maxwell3d.c phys_dirty_since): gen moves at the
    start and end of every change, busy is nonzero while one runs */
+#ifndef _WIN32
+#define LONG64 long long
+#define LONG int
+#define InterlockedIncrement(p) __sync_add_and_fetch(p,1)
+#define InterlockedIncrement64(p) __sync_add_and_fetch(p,1)
+#define InterlockedDecrement(p) __sync_sub_and_fetch(p,1)
+#endif
 volatile LONG64 snxvk_gmmu_gen; volatile LONG snxvk_gmmu_busy;
 void snxvk_map_begin(u64 gva, u64 size){ InterlockedIncrement(&snxvk_gmmu_busy); InterlockedIncrement64(&snxvk_gmmu_gen); if(g_snxvk_on && snxv_g_gpu_mapping_begin) snxv_g_gpu_mapping_begin(gva,size,0); }
 void snxvk_map_end(u64 gva, u64 size){ InterlockedIncrement64(&snxvk_gmmu_gen); InterlockedDecrement(&snxvk_gmmu_busy); if(!g_snxvk_on) return; snxv_gpu_mem_written(gva,size); if(snxv_g_gpu_mapping_end) snxv_g_gpu_mapping_end(); }
@@ -223,6 +271,9 @@ static void wait_deadline(u64 deadline){
   while(plat_ns()<deadline) __builtin_ia32_pause(); }
 /* HDR output (snxvk hdr.c): the peak brightness the window's display reports through DXGI (Windows 10 1803+), in
    nits; 0 if unknown. dxgi.dll is loaded here, so the EXE doesn't import it */
+#if !defined(_WIN32)
+int backend_hdr_peak_nits(void){ return 0; }
+#else
 #if !defined(__TINYC__)
 #define COBJMACROS
 #include <dxgi1_6.h>
@@ -248,6 +299,7 @@ int backend_hdr_peak_nits(void){
   cached=(int)(best+0.5f);
 #endif
   return cached; }
+#endif
 int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=60 && g_opt_fps<=240)); }
 void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
   /* the game's crop from QueueBuffer (svc_vi.c): handheld Dread draws 1280x720 into a 1600x900 buffer. Passing none
@@ -260,6 +312,9 @@ void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt)
     u64 next=deadline+per; if(deadline) wait_deadline(next);
     u64 now=plat_ns(); t_w=now; deadline= deadline && (i64)(now-next)<(i64)(per/2)? next : now; }
   { static u64 last_in; u64 t0=plat_ns(); SNXR_PRESENT(a,w,h,pitch,layout,bhl,fmt,crop,0); u64 t1=plat_ns();
+    { static FILE* pf; static int pc; static u64 pn, pl;   /* SWR_TRACE_PRESENTS: as glq.c's, the time between present calls */
+      if(!pc){ pc=1; const char* e=getenv("SWR_TRACE_PRESENTS"); if(e && *e){ pf=fopen(e,"w"); if(pf) fprintf(pf,"swap_index,interval_ms\n"); } }
+      if(pf){ fprintf(pf,"%llu,%.3f\n",(unsigned long long)pn++,pl? (t1-pl)/1e6 : 0.0); pl=t1; if(pn%600==0) fflush(pf); } }
     static int tr=-1; if(tr<0) tr=getenv("SWR_SNXVK_TRACE")!=NULL;
     if(t1-t0>250000000ull) LOG("vulkan_native: present_buffer took %.0f ms\n",(t1-t0)/1e6);
     if(tr && last_in && (t0-last_in>30000000ull || t1-t0>12000000ull)) LOG("vulkan_native: slow frame: game arrived %.1f ms after the last present, present took %.1f ms\n",(t0-last_in)/1e6,(t1-t0)/1e6);

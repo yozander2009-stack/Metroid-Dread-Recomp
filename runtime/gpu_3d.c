@@ -35,6 +35,13 @@ void r3d_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u
 
 void r3d_const_upload(GpuChannel* ch, u32 v){
   u32* r=ch->r3d; u64 a=((u64)r[0x8E1]<<32)|r[0x8E2]; u32 off=r[0x8E3]; gmem_w32(a+off,v); r[0x8E3]=off+4; }
+/* the same for a run of words in one method batch (run_pushbuffer): what n r3d_const_upload calls leave in memory and in the
+   registers, in one copy. A scene can send 2 MB of constants a frame, which word by word cost 40% of the GPU thread (Deck,
+   Corpius death scene, MEASURED 2026-11-01). m: the method of w[0]; inc: it moves on by one for each word */
+void r3d_const_run(GpuChannel* ch, u32 m, int inc, const u32* w, u32 n){
+  u32* r=ch->r3d; u64 a=((u64)r[0x8E1]<<32)|r[0x8E2]; u32 off=r[0x8E3];
+  gmem_write(a+off,w,(u64)n*4); r[0x8E3]=off+n*4;
+  if(inc) memcpy(&r[m],w,(u64)n*4); else r[m]=w[n-1]; }
 
 void r3d_cb_bind(GpuChannel* ch, int stage, u32 v){ if(g_gl) r3d_cb_bind_gl(ch,stage,v); }
 extern int r3d_blit_gl(void* s, void* d, int dx, int dy, int dw, int dh, double sx, double sy, double sdx, double sdy);

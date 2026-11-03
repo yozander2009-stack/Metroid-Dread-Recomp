@@ -33,6 +33,7 @@ static int xi_opcode; static int g_mlast=0, g_mlx, g_mly;   /* XInput2 raw motio
 extern int g_opt_fps;
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
+  else if(!strcmp(k,"renderer")){ extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
   else if(!strcmp(k,"frames")) g_maxframes=atoi(v);
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);
@@ -213,6 +214,8 @@ void video_init(const char* title){
   xi_init();
   sdl_load();
   g_start=plat_ns();
+  { extern int snxvk_start(void); extern int g_snxvk_want;
+    if(g_snxvk_want && snxvk_start()) return; }   /* renderer=vulkan_native: the ScarletNX Vulkan renderer draws, no GL */
   extern void gpu_gl_start(void); gpu_gl_start();
 }
 /* GPU thread */
@@ -239,6 +242,18 @@ int backend_gl_create(void){
   SIE sie=(SIE)glXGetProcAddressARB((const GLubyte*)"glXSwapIntervalEXT"); SIM sim=(SIM)glXGetProcAddressARB((const GLubyte*)"glXSwapIntervalMESA");
   if(sie) sie(dpy,win,g_opt_vsync? 1 : 0); else if(sim) sim(g_opt_vsync? 1 : 0);
   return 1; }
+
+/* the window side of renderer=vulkan_native (snxvk_glue.c): the loader, the instance extensions and a surface on win */
+u32 backend_window_generation(void){ return 1; }   /* the swapchain follows the window size by itself */
+void backend_window_safe(int* x, int* y, int* w, int* h){ *x=0; *y=0; *w=g_ww; *h=g_wh; }
+int backend_window_shown(void){ return win!=0; }
+void* backend_vk_loader(void){ static void* m; if(!m) m=dlopen("libvulkan.so.1",RTLD_NOW|RTLD_LOCAL); return m? dlsym(m,"vkGetInstanceProcAddr") : NULL; }
+const char* const* backend_vk_extensions(u32* n){ static const char* const e[2]={"VK_KHR_surface","VK_KHR_xlib_surface"}; *n=2; return e; }
+int backend_vk_surface(void* instance, u64* surface){
+  typedef struct { u32 type; const void* next; u32 flags; Display* dpy; Window window; } Info;   /* VkXlibSurfaceCreateInfoKHR */
+  typedef void* (*GIPA)(void*,const char*); typedef int (*CXS)(void*,const Info*,const void*,u64*);
+  GIPA gipa=(GIPA)backend_vk_loader(); CXS cxs= gipa? (CXS)gipa(instance,"vkCreateXlibSurfaceKHR") : NULL; if(!cxs) return 0;
+  Info i={1000004000u,NULL,0,dpy,win}; return cxs(instance,&i,NULL,surface)==0; }
 
 void* backend_gl_proc(const char* n){ return (void*)glXGetProcAddressARB((const GLubyte*)n); }
 

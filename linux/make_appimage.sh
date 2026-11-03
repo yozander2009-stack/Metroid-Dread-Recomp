@@ -32,6 +32,9 @@ fetch appimagetool "$TOOL_URL"
 chmod +x "$C/appimagetool"
 
 # the runtime as released on Windows (SWR_RELEASE: no frame generation, no DLSS notes), with the front end
+# renderer=vulkan_native: ScarletNX's renderer (GPL-3.0, its source is in runtime/snxvk), built without DLSS
+need "$(command -v glslang || command -v glslangValidator || echo glslang)" "glslang-tools"
+"$PY" "$W/work-profiler/build_snxvk2.py" | tail -1
 SWR_RELEASE=1 bash "$W/linux/setup_and_build_runtime.sh" > /dev/null
 grep -qa "FIRST-TIME SETUP" "$RUNTIME" || { echo "error: the runtime was built without the front end (SWR_NO_LINUX_FRONTEND?)" >&2; exit 1; }
 

@@ -495,7 +495,11 @@ static std::vector<Opt> build_options() {
     // Graphics
     F("resolution", "Graphics", "Graphics", "Internal resolution", LIVE_GL, "1", 0.25f, 4.0f, 0.05f,
       "The game's 3D resolution. Above your screen's size it is averaged down (smoother edges, no shimmer).");
-    C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"}, {"vulkan", "Vulkan output"}, {"vulkan_native", "Native Vulkan (experimental)"}},
+    C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"},
+#ifdef _WIN32
+      {"vulkan", "Vulkan output"},
+#endif
+      {"vulkan_native", "Native Vulkan (experimental)"}},
       "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
     B("antialiasing", "Graphics", "Graphics", "Anti-aliasing (FXAA)", LIVE_YES, "0", "Smooths jagged edges on the final picture. Not needed above 1\xC3\x97 resolution.");
     C("sharpening", "Graphics", "Graphics", "Sharpening", LIVE_YES, "0", {{"0", "Off"}, {"25", "Low"}, {"50", "Medium"}, {"75", "High"}, {"100", "Maximum"}},
