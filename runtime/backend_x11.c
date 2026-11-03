@@ -3,7 +3,8 @@
    any copy or derived work must keep the credit to SwitchRecomp by MZ Labs. */
 /* X11 + GLX 4.3 backend, the Linux counterpart of backend_win32.c (Wayland desktops run it through
    XWayland). Controllers come from SDL2, loaded at run time like XInput on Windows.
-   F1 help  F3 screenshot  F4 fps limit  F5 trace  F8 full-res screenshot  F11/Alt+Enter fullscreen  Esc quit
+   F1 menu  F3 screenshot  F4 fps limit  F5 trace  F8 full-res screenshot  F11/Alt+Enter fullscreen  Tab fast forward
+   Esc quit. The keyboard follows keyboard_map and the mouse aims freely, as on Windows
    Also what the Xvfb tests run on (screenshots, scripted input). */
 #include "rt.h"
 #include "pad_remap.h"
@@ -15,16 +16,21 @@
 #include <GL/glx.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <math.h>
+#include <ctype.h>
+#include "x11_vk.h"
 
 static Display* dpy; static Window win; static Atom wm_delete, a_state, a_fs; static Cursor g_blank;
 static volatile int g_ww=1280, g_wh=720; static int g_fullscreen=0, g_want_fs=1;
 static int g_seconds=0, g_maxframes=-1; static char g_shot[1024]; static u64 g_start; static u64 g_press=0, g_press_at=0, g_press_len=300;
 static char g_script[1024]; static char g_title[256]; static volatile int g_shot_req;
 static u64 keys_held;
+/* mouse free aim (mouse_apply): raw movement since the last poll and the buttons held (1 left, 2 right, 4 middle,
+   8 back, 16 forward), both from the event loop in video_poll, the thread that reads them */
+static double g_mdx, g_mdy; static int g_mbtn, g_focus=1;
+static int g_mtap, g_aim_on;   /* buttons pressed since the last poll (a touchpad tap presses and releases at once); mouse_aim_toggle: aiming */
+static int xi_opcode; static int g_mlast=0, g_mlx, g_mly;   /* XInput2 raw motion; without it the cursor's own moves */
 extern int g_opt_fps;
-
-/* [Input] mouse_buttons: the game mouse (free aim, buttons) is the Windows backend's only; nothing to re-parse here */
-void mouse_map_reset(void){}
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
@@ -108,11 +114,12 @@ static void set_fullscreen(int on){
   e.xclient.data.l[0]=on? 1 : 0; e.xclient.data.l[1]=(long)a_fs; e.xclient.data.l[3]=1;
   XSendEvent(dpy,DefaultRootWindow(dpy),False,SubstructureRedirectMask|SubstructureNotifyMask,&e);
   XFlush(dpy); g_fullscreen=on; }   /* the cursor follows in cursor_sync */
-/* the cursor is hidden in fullscreen, but shown while the in-game menu is open (its mouse / touch), as backend_win32.c
-   does with WM_SETCURSOR; checked on every poll */
+/* the cursor is hidden in fullscreen and with mouse free aim, but shown while the in-game menu is open (its mouse /
+   touch), as backend_win32.c does with WM_SETCURSOR; checked on every poll */
 extern int ov_is_open(void);
 static void cursor_sync(void){
-  static int hidden=-1; int want= g_fullscreen && !ov_is_open();
+  extern int g_opt_mouse_aim;
+  static int hidden=-1; int want= (g_fullscreen || g_opt_mouse_aim) && !ov_is_open();
   if(want==hidden) return;
   hidden=want; if(want) XDefineCursor(dpy,win,g_blank); else XUndefineCursor(dpy,win); XFlush(dpy); }
 
@@ -132,6 +139,44 @@ static const char* HELP=
   "F1 = this help   F3 = screenshot   F4 = FPS limit 60 / your limit   F5 = diagnostic dump (trace)\n"
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
   "F11 / Alt+Enter = fullscreen   Esc = quit";
+
+/* Mouse free aim reads the mouse's own movement, as Windows' raw input does: XInput2 raw motion (libXi, loaded at run
+   time; XWayland has it too), which goes on at the window's edge and has no pointer acceleration. The declarations are
+   XInput2.h's, which not every system has installed */
+typedef struct { int deviceid; int mask_len; unsigned char* mask; } XIEventMask_;
+typedef struct { int mask_len; unsigned char* mask; double* values; } XIValuatorState_;
+typedef struct { int type; unsigned long serial; Bool send_event; Display* display; int extension; int evtype; Time time;
+                 int deviceid; int sourceid; int detail; int flags; XIValuatorState_ valuators; double* raw_values; } XIRawEvent_;
+static void xi_init(void){
+  int ev, err; if(!XQueryExtension(dpy,"XInputExtension",&xi_opcode,&ev,&err)){ xi_opcode=0; goto none; }
+  { void* h=dlopen("libXi.so.6",RTLD_NOW|RTLD_LOCAL); if(!h){ xi_opcode=0; goto none; }
+    Status (*qv)(Display*,int*,int*)=(Status(*)(Display*,int*,int*))dlsym(h,"XIQueryVersion");
+    int (*se)(Display*,Window,XIEventMask_*,int)=(int(*)(Display*,Window,XIEventMask_*,int))dlsym(h,"XISelectEvents");
+    /* 2.1 or later: under 2.0 the server sends no raw events while the pointer is grabbed, and aiming grabs it */
+    int ma=2, mi=2; if(!qv || !se || qv(dpy,&ma,&mi)!=Success || mi<1){ xi_opcode=0; goto none; }
+    unsigned char m[3]={0}; m[17>>3]|=1<<(17&7);   /* XI_RawMotion */
+    XIEventMask_ em={1 /* XIAllMasterDevices */,sizeof m,m}; se(dpy,DefaultRootWindow(dpy),&em,1); XFlush(dpy);
+    LOG("input: mouse free aim reads XInput2 raw motion\n"); return; }
+  none: LOG("input: no XInput2 (libXi): mouse free aim follows the cursor, which stops at the window's edge\n"); }
+static void xi_event(XEvent* e){
+  XGenericEventCookie* c=&e->xcookie;
+  if(c->extension!=xi_opcode || !XGetEventData(dpy,c)) return;
+  if(c->evtype==17 && g_focus){ XIRawEvent_* r=(XIRawEvent_*)c->data; const double* v=r->raw_values;
+    for(int i=0;i<r->valuators.mask_len*8 && i<2;i++) if(r->valuators.mask[i>>3]>>(i&7)&1){ if(i==0) g_mdx+=*v; else g_mdy+=*v; v++; }
+    { static int said; if(!said && (g_mdx || g_mdy)){ said=1; LOG("input: first mouse movement seen (XInput2 raw motion)\n"); } } }
+  XFreeEventData(dpy,c); }
+/* a mouse button (X11 1 left, 2 middle, 3 right, 8 back, 9 forward): held for mouse_apply; the one set to l keeps the
+   pointer in the window while it aims, as ClipCursor on Windows. With mouse_aim_toggle a press of it turns aiming on
+   or off: a touchpad can't hold a button while the finger moves */
+extern int mouse_aim_button(void);
+static void mouse_button(unsigned bt, int down){
+  int bit= bt==1? 1 : bt==3? 2 : bt==2? 4 : bt==8? 8 : bt==9? 16 : 0; if(!bit) return;
+  g_mbtn= down? g_mbtn|bit : g_mbtn&~bit; if(down) g_mtap|=bit;
+  extern int g_opt_mouse_aim, g_opt_mouse_toggle;
+  if(!(bit&mouse_aim_button()) || !g_opt_mouse_aim || ov_is_open()) return;
+  if(g_opt_mouse_toggle){ if(!down) return; g_aim_on=!g_aim_on; }
+  if(g_opt_mouse_toggle? g_aim_on : down) XGrabPointer(dpy,win,False,ButtonPressMask|ButtonReleaseMask|PointerMotionMask,GrabModeAsync,GrabModeAsync,win,None,CurrentTime);
+  else XUngrabPointer(dpy,CurrentTime); }
 
 void video_init(const char* title){
   snprintf(g_title,sizeof g_title,"%s - SwitchRecomp  (F1 help)",title);
@@ -158,6 +203,7 @@ void video_init(const char* title){
   /* start fullscreen: the window manager reads the state when the window is mapped */
   if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); g_fullscreen=1; }
   XMapWindow(dpy,win); XFlush(dpy);
+  xi_init();
   sdl_load();
   g_start=plat_ns();
   extern void gpu_gl_start(void); gpu_gl_start();
@@ -212,17 +258,31 @@ void backend_window_size(int* w, int* h){ *w=g_ww; *h=g_wh; }
 
 void video_present_rgba(const u32* px, int w, int h, int stride){ extern void gpu_gl_present_cpu(const u32*,int,int,int); gpu_gl_present_cpu(px,w,h,stride); }
 
-/* keys -> HidNpadButton bits, the same layout as on Windows */
-static u64 keymap(KeySym k){
-  switch(k){ case XK_x: case XK_space: return 1ull<<0; /* A */ case XK_z: return 1ull<<1; /* B */ case XK_c: return 1ull<<2; /* X */ case XK_v: return 1ull<<3; /* Y */
-    case XK_Shift_L: case XK_Shift_R: return 1ull<<4; /* L3 */ case XK_f: return 1ull<<5; /* R3 (GitHub #32) */
-    case XK_q: return 1ull<<6; /* L */ case XK_e: return 1ull<<7; /* R */ case XK_1: return 1ull<<8; /* ZL */ case XK_3: return 1ull<<9; /* ZR */
-    case XK_Return: case XK_KP_Enter: return 1ull<<10; /* + */ case XK_BackSpace: return 1ull<<11; /* - */
-    case XK_Left: return 1ull<<12; case XK_Up: return 1ull<<13; case XK_Right: return 1ull<<14; case XK_Down: return 1ull<<15;
-    /* stick keys, turned into axes later */
-    case XK_a: return 1ull<<40; case XK_w: return 1ull<<41; case XK_d: return 1ull<<42; case XK_s: return 1ull<<43;
-    case XK_j: return 1ull<<44; case XK_i: return 1ull<<45; case XK_l: return 1ull<<46; case XK_k: return 1ull<<47; }
-  return 0; }
+/* keyboard_map (main.c): 24 entries, buttons 0..15 then the stick keys 40..47 (turned into axes later), each up to
+   two Windows key codes joined by '+', 0 = none, as backend_win32.c; X11 keys become those codes in x11_vk.h. Esc, Tab
+   and the F keys are handled before this table. The default is backend_win32.c's (KP Enter is Enter there too) */
+extern char g_opt_kb_map[256];
+static const char KB_DEFAULT[]="88+32,90,67,86,16,70,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
+static u64 keymap(KeySym ks){
+  static u64 t[256]; static char built[256]; static int ready;
+  if(!ready || strcmp(built,g_opt_kb_map)){
+    u64 n[256]; memset(n,0,sizeof n); int ok=1;
+    for(int pass=0;pass<2;pass++){
+      const char* p= pass? KB_DEFAULT : g_opt_kb_map; if(!pass && !*p) continue;
+      memset(n,0,sizeof n); ok=1;
+      for(int i=0;i<24 && ok;i++){
+        int bit= i<16? i : 40+(i-16);
+        for(;;){ char* e; long v=strtol(p,&e,10); if(e==p || v<0 || v>255){ ok=0; break; }
+          if(v) n[v]|=1ull<<bit; p=e; if(*p=='+'){ p++; continue; } break; }
+        if(ok && i<23){ if(*p!=',') ok=0; else p++; }
+      }
+      if(ok && *p) ok=0;
+      if(ok) break;
+      if(!pass){ static int said; if(!said){ said=1; LOG("input: keyboard_map is not valid, using the default keys\n"); } }
+    }
+    memcpy(t,n,sizeof t); snprintf(built,sizeof built,"%s",g_opt_kb_map); ready=1;
+  }
+  return t[x11_vk(ks)&255]; }
 
 /* one-shot keys act on the first press only, not on auto-repeat */
 static int key_once(KeySym k, int down){
@@ -253,6 +313,7 @@ static void key_down(XKeyEvent* e){
   switch(k){
     case XK_Escape: g_quit=1; return;
     case XK_F11: if(once) set_fullscreen(!g_fullscreen); return;
+    case XK_Tab: case XK_ISO_Left_Tab: if(once){ extern volatile int g_ff_presses; g_ff_presses++; } return;   /* fast forward toggle (fast_forward=1) */
     case XK_F3: if(once) g_shot_req=1; return;
     case XK_F7: if(once) LOG("F7 video recording is only available on Windows\n"); return;
     case XK_F8: if(once){ extern volatile int g_shot8_req; g_shot8_req=1; } return;
@@ -310,16 +371,63 @@ static void test_frame_hooks(void){
   if((stop && (u64)g_frames>=strtoull(stop,NULL,10)) || (stop_ms && test_clock_start && (plat_ns()-test_clock_start)/1000000ull>=strtoull(stop_ms,NULL,10))){ LOG("test complete: frame=%d\n",g_frames); extern void save_hints(void); save_hints(); log_flush(); fflush(NULL); _exit(0); }
 }
 
+/* Mouse free aim, as backend_win32.c: while the mouse button set to l (right by default) is held, the mouse moves a
+   virtual left stick, which turns Dread's free aim. It starts centred, the mouse pushes it and it stays where it was
+   pushed: ~150 counts at 100% sensitivity swing it from centre to the edge. The other mouse buttons press their
+   Switch buttons */
+static int g_mb_bit[5]={-2,-2,-2,-2,-2};   /* -2 not parsed yet, -1 none */
+void mouse_map_reset(void){ g_mb_bit[0]=-2; }
+static void mouse_map(void){
+  if(g_mb_bit[0]!=-2) return;
+  extern char g_opt_mouse_buttons[]; static const struct { const char* n; int bit; } N[]={{"a",0},{"b",1},{"x",2},{"y",3},
+    {"lstick",4},{"rstick",5},{"l",6},{"r",7},{"zl",8},{"zr",9},{"plus",10},{"minus",11}};
+  const char* p=g_opt_mouse_buttons;
+  for(int i=0;i<5;i++){ char t[16]; int k=0; while(*p==' ') p++; while(*p && *p!=',' && k<15) t[k++]=(char)tolower((unsigned char)*p++); t[k]=0; if(*p==',') p++;
+    g_mb_bit[i]=-1; for(size_t j=0;j<sizeof N/sizeof *N;j++) if(!strcmp(t,N[j].n)) g_mb_bit[i]=N[j].bit; } }
+int mouse_aim_button(void){ mouse_map(); int m=0; for(int i=0;i<5;i++) if(g_mb_bit[i]==6) m|=1<<i; return m; }   /* the mouse buttons set to l */
+/* test only: SWR_TEST_MOUSE="FRAME:DX,DY,BUTTONS;..." adds that movement at that guest frame and holds those buttons
+   (hex, 1 left 2 right 4 middle) from there to the next entry */
+static void mouse_test(double* dx, double* dy, int* btn){
+  static const char* s; static int init, held; if(!init){ init=1; s=getenv("SWR_TEST_MOUSE"); }
+  if(!s) return;
+  while(*s){ char* e; long f=strtol(s,&e,10); if(e==s || *e!=':' || g_frames<f) break;
+    long x=strtol(e+1,&e,10); if(*e==',') e++; long y=strtol(e,&e,10); if(*e==',') e++; long b=strtol(e,&e,16);
+    *dx+=x; *dy+=y; held=(int)b; s= *e==';'? e+1 : e; }
+  *btn|=held; }
+static void mouse_apply(u64* b, i32* lx, i32* ly){
+  extern int g_opt_mouse_aim, g_opt_mouse_sens, g_opt_mouse_toggle;
+  double dx=g_mdx, dy=g_mdy; int btn=g_mbtn|g_mtap; g_mdx=g_mdy=0; g_mtap=0;   /* a tap holds its button for one poll */
+  static float vx, vy; static int was;
+  mouse_test(&dx,&dy,&btn);
+  if(!g_opt_mouse_aim){ was=0; return; }
+  mouse_map();
+  if(g_opt_mouse_toggle){ btn&=~mouse_aim_button(); if(g_aim_on) btn|=mouse_aim_button(); }   /* l held while aiming is on */
+  for(int i=0;i<5;i++) if((btn>>i&1) && g_mb_bit[i]>=0) *b|=1ull<<g_mb_bit[i];
+  int aiming=(btn & mouse_aim_button())!=0;
+  if(aiming){
+    if(!was) vx=vy=0;
+    float s=(float)g_opt_mouse_sens/100.0f/150.0f;
+    vx+=(float)dx*s; vy-=(float)dy*s;   /* screen y is down, the stick's up */
+    float m=sqrtf(vx*vx+vy*vy); if(m>1.0f){ vx/=m; vy/=m; m=1.0f; }
+    if(m>=0.25f){ *lx=(i32)(vx/m*32767.0f); *ly=(i32)(vy/m*32767.0f); } else *lx=*ly=0;   /* aimed: full tilt that way */
+    { static int said; if(!said){ said=1; LOG("input: mouse free aim in use\n"); } } }
+  was=aiming; }
+
 void video_poll(void){
   { int r=g_fs_req; if(r>=0){ g_fs_req=-1; set_fullscreen(r); } }
   cursor_sync();
   while(XPending(dpy)){ XEvent e; XNextEvent(dpy,&e);
     if(e.type==KeyPress) key_down(&e.xkey);
     else if(e.type==KeyRelease){ KeySym k=XLookupKeysym(&e.xkey,0); key_once(k,0); keys_held&=~keymap(k); if(ov_is_open()) ov_input_key(ovk_from_keysym(k),0); }
-    else if(e.type==MotionNotify){ ov_input_mouse((float)e.xmotion.x,(float)e.xmotion.y); }
+    else if(e.type==MotionNotify){ ov_input_mouse((float)e.xmotion.x,(float)e.xmotion.y);
+      if(!xi_opcode){ if(g_mlast){ g_mdx+=e.xmotion.x-g_mlx; g_mdy+=e.xmotion.y-g_mly; } g_mlx=e.xmotion.x; g_mly=e.xmotion.y; g_mlast=1;
+        { static int said; if(!said && (g_mdx || g_mdy)){ said=1; LOG("input: first mouse movement seen (cursor)\n"); } } } }
+    else if(e.type==GenericEvent) xi_event(&e);
     else if(e.type==ButtonPress || e.type==ButtonRelease){ unsigned bt=e.xbutton.button; ov_input_mouse((float)e.xbutton.x,(float)e.xbutton.y);
+      mouse_button(bt,e.type==ButtonPress);
       if(bt==1 || bt==3) ov_input_button(bt==1? 0 : 1, e.type==ButtonPress); else if(e.type==ButtonPress && (bt==4 || bt==5)) ov_input_wheel(bt==4? 1.0f : -1.0f); }
-    else if(e.type==FocusOut) keys_held=0;
+    else if(e.type==FocusIn) g_focus=1;
+    else if(e.type==FocusOut){ keys_held=0; g_mbtn=g_mtap=g_aim_on=0; g_mdx=g_mdy=0; g_focus=0; g_mlast=0; XUngrabPointer(dpy,CurrentTime); }
     else if(e.type==ConfigureNotify){ g_ww=e.xconfigure.width>0? e.xconfigure.width : 1; g_wh=e.xconfigure.height>0? e.xconfigure.height : 1; }
     else if(e.type==ClientMessage && (Atom)e.xclient.data.l[0]==wm_delete){ LOG("window: closed by the user\n"); g_quit=1; } }
   u64 k=keys_held, b=0;
@@ -339,6 +447,7 @@ void video_poll(void){
   { extern volatile u64 g_cheat_keys; g_cheat_keys=b; }   /* cheats.c keypress conditions */
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; }   /* the menu has the controller (and the game neutral input) */
+  if(!ov_is_open()) mouse_apply(&b,&lx,&ly); else g_mtap=0;   /* the menu uses the mouse itself while open */
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }

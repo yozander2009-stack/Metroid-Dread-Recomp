@@ -23,7 +23,8 @@ static HANDLE g_fe_done, g_video_go; static int g_fe_result, g_win_started;
 static HWND g_fe_hwnd;
 /* mouse free aim: raw movement since the last poll (WM_INPUT, any thread adds, the input thread takes), and the buttons
    held (1 left, 2 right, 4 middle, 8 back, 16 forward) */
-static volatile LONG g_mdx, g_mdy, g_mbtn;   /* the front end's window, retired at Play (its messages go to DefWindowProc) */
+static volatile LONG g_mdx, g_mdy, g_mbtn;
+static volatile LONG g_mtap, g_aim_on;   /* buttons pressed since the last poll (a touchpad tap presses and releases at once); mouse_aim_toggle: aiming */   /* the front end's window, retired at Play (its messages go to DefWindowProc) */
 #define PAD_HOME (1ull<<30)   /* Home / Guide / PS: physical only, opens the in-game menu, never reaches the game */
 extern int g_opt_fps;
 
@@ -296,7 +297,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
       SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d (not saved)\n",g_opt_fps); return 0; }
     keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
   case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
-  case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); ClipCursor(NULL); ReleaseCapture(); return 0;
+  case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); InterlockedExchange(&g_mtap,0); InterlockedExchange(&g_aim_on,0); ClipCursor(NULL); ReleaseCapture(); return 0;
   case WM_APP+8: { char t[300]; if(w) snprintf(t,sizeof t,"%s  |  RECORDING (F7 to stop)",g_title); else snprintf(t,sizeof t,"%s  |  Video saved in the recordings folder",g_title); SetWindowTextA(h,t); return 0; }
   case WM_APP+10: { char t[400]; char* s=(char*)l; if(s){ snprintf(t,sizeof t,"%s  |  %s",g_title,s); free(s); } else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }   /* backend_status_win */
   case WM_APP+9: { char t[160]; if(w) snprintf(t,sizeof t,"%s  |  FAST FORWARD x%d (Tab or L3+R3)",g_title,(int)l); else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }
@@ -310,11 +311,14 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
       LONG bit= (m==WM_LBUTTONDOWN||m==WM_LBUTTONUP)? 1 : (m==WM_RBUTTONDOWN||m==WM_RBUTTONUP)? 2 : (m==WM_MBUTTONDOWN||m==WM_MBUTTONUP)? 4
               : (HIWORD(w)==XBUTTON1? 8 : 16);
       int down= m==WM_LBUTTONDOWN||m==WM_RBUTTONDOWN||m==WM_MBUTTONDOWN||m==WM_XBUTTONDOWN;
-      LONG now= down? (g_mbtn|bit) : (g_mbtn&~bit); InterlockedExchange(&g_mbtn,now);
-      extern int mouse_aim_button(void);
+      LONG now= down? (g_mbtn|bit) : (g_mbtn&~bit); InterlockedExchange(&g_mbtn,now); if(down) InterlockedOr(&g_mtap,bit);
+      extern int mouse_aim_button(void); extern int g_opt_mouse_toggle;
       if(now && GetCapture()!=h) SetCapture(h); else if(!now) ReleaseCapture();   /* releases still arrive outside the window */
-      if(down && (bit&mouse_aim_button())){ RECT c; GetClientRect(h,&c); MapWindowPoints(h,NULL,(POINT*)&c,2); ClipCursor(&c); }   /* aiming: the cursor stays in */
-      else if(!down && (bit&mouse_aim_button())) ClipCursor(NULL);
+      if(bit&mouse_aim_button()){   /* with mouse_aim_toggle a press turns aiming on or off: a touchpad can't hold a button while the finger moves */
+        if(g_opt_mouse_toggle && down) InterlockedExchange(&g_aim_on,!g_aim_on);
+        if(g_opt_mouse_toggle && !down){}   /* a toggle's release changes nothing */
+        else if(g_opt_mouse_toggle? g_aim_on : down){ RECT c; GetClientRect(h,&c); MapWindowPoints(h,NULL,(POINT*)&c,2); ClipCursor(&c); }   /* aiming: the cursor stays in */
+        else ClipCursor(NULL); }
       return (m==WM_XBUTTONDOWN||m==WM_XBUTTONUP)? TRUE : 0; }
   case WM_SETCURSOR: if(LOWORD(l)==HTCLIENT && ov_is_open()){ SetCursor(LoadCursor(NULL,IDC_ARROW)); return TRUE; }
     { extern int g_opt_mouse_aim; if(g_opt_mouse_aim && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; } }   /* free aim: no cursor over the game */
@@ -554,12 +558,13 @@ static void mouse_test(LONG* dx, LONG* dy, LONG* btn){
     *dx+=x; *dy+=y; held=(int)b; s= *e==';'? e+1 : e; }
   *btn|=held; }
 static void mouse_apply(u64* b, i32* lx, i32* ly){
-  extern int g_opt_mouse_aim, g_opt_mouse_sens;
-  LONG dx=InterlockedExchange(&g_mdx,0), dy=InterlockedExchange(&g_mdy,0), btn=g_mbtn;
+  extern int g_opt_mouse_aim, g_opt_mouse_sens, g_opt_mouse_toggle;
+  LONG dx=InterlockedExchange(&g_mdx,0), dy=InterlockedExchange(&g_mdy,0), btn=g_mbtn|InterlockedExchange(&g_mtap,0);   /* a tap holds its button for one poll */
   static float vx, vy; static int was;
   mouse_test(&dx,&dy,&btn);
   if(!g_opt_mouse_aim){ was=0; return; }
   mouse_map();
+  if(g_opt_mouse_toggle){ btn&=~mouse_aim_button(); if(g_aim_on) btn|=mouse_aim_button(); }   /* l held while aiming is on */
   for(int i=0;i<5;i++) if((btn>>i&1) && g_mb_bit[i]>=0) *b|=1ull<<g_mb_bit[i];
   int aiming=(btn & mouse_aim_button())!=0;
   if(aiming){
@@ -604,7 +609,7 @@ void video_poll(void){
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* dread_ui/ov.cpp: 1 = the menu has the controller */
     if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; } }
-  if(!ov_is_open()) mouse_apply(&b,&lx,&ly);   /* the menu uses the mouse itself while open */
+  if(!ov_is_open()) mouse_apply(&b,&lx,&ly); else InterlockedExchange(&g_mtap,0);   /* the menu uses the mouse itself while open */
   { /* rumble (svc_hid.c hid_rumble_get) to the pads input comes from: on a change, else refreshed every 100 ms
        (SDL's rumble runs for the duration given, so it stops by itself when the game stops sending) */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);

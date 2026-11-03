@@ -91,7 +91,7 @@ char g_opt_pad_map[128]="";   /* physical-position button remapping, empty = ide
 char g_opt_kb_map[256]="";    /* keyboard keys per game button (backend_win32.c keymap), empty = default */
 int g_opt_ctrl_api=0, g_opt_ctrl_index=0, g_opt_deadzone=7000;
 char g_opt_button_icons[16]="auto";
-int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backend_win32.c mouse_apply) */
+int g_opt_mouse_aim=1, g_opt_mouse_sens=100, g_opt_mouse_toggle=0;   /* [Input] mouse free aim (backend_win32.c / backend_x11.c mouse_apply) */
 char g_opt_mouse_buttons[64]="y,l,r,-,-";   /* left, right, middle, back, forward -> Switch buttons */   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
 int g_opt_diag=0;
 int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt_drs=0;
@@ -311,6 +311,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"menu_buttons")){ extern int g_opt_menu_swap; g_opt_menu_swap= !strcmp(v,"swap"); }
     else if(!strcmp(k,"keyboard_map")){ snprintf(g_opt_kb_map,sizeof g_opt_kb_map,"%s",v); }
     else if(!strcmp(k,"mouse_aim")) g_opt_mouse_aim=atoi(v)!=0;
+    else if(!strcmp(k,"mouse_aim_toggle")) g_opt_mouse_toggle=atoi(v)!=0;
     else if(!strcmp(k,"mouse_sensitivity")){ g_opt_mouse_sens=atoi(v); if(g_opt_mouse_sens<10) g_opt_mouse_sens=10; if(g_opt_mouse_sens>1000) g_opt_mouse_sens=1000; }
     else if(!strcmp(k,"mouse_buttons")){ snprintf(g_opt_mouse_buttons,sizeof g_opt_mouse_buttons,"%s",v); extern void mouse_map_reset(void); mouse_map_reset(); }
     else if(!strcmp(k,"button_icons")) snprintf(g_opt_button_icons,sizeof g_opt_button_icons,"%s",v);
@@ -439,6 +440,7 @@ static const IniOpt INI_INPUT[]={
   {"menu_buttons","game","game = the buttons as the game has them; swap = A and B exchanged while a menu is open\n;   (pause, map, options, dialogs, Game Over, title and file select): confirm on the bottom button like on Xbox and\n;   PlayStation, gameplay unchanged"},
   {"keyboard_map","","keyboard keys for A B X Y L3 R3 L R ZL ZR + - D-pad left up right down, then left stick left up right\n;   down and right stick left up right down: 24 comma-separated Windows key codes, two keys joined by + (88+32),\n;   0 = none. Empty = default (the Play screen's Controls page sets it)"},
   {"mouse_aim","1","1 = mouse free aim: hold the right mouse button (the game's L, free aim) and move the mouse to aim\n;   in any direction; left click shoots (Y), middle click arms missiles (R). The cursor hides over the game"},
+  {"mouse_aim_toggle","0","1 = the aim button (right) turns free aim on and off instead of being held: for touchpads, where a\n;   button can't be held while the finger moves"},
   {"mouse_sensitivity","100","mouse free aim: how far the mouse moves for a full turn of the aim, in percent (10-1000)"},
   {"mouse_buttons","y,l,r,-,-","mouse buttons left, right, middle, back, forward as Switch buttons: a b x y l r zl zr plus\n;   minus lstick rstick, - for none. The one set to l aims with the mouse while held"},
   {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Needs the icon packs in Metroid Dread_data\\mods (the Play screen downloads them: Controls > Button icons)"},

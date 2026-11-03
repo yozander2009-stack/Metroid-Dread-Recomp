@@ -530,6 +530,8 @@ static std::vector<Opt> build_options() {
     // Controls
     B("mouse_aim", "Input", "Controls", "Mouse free aim", LIVE_YES, "1",
       "Hold the right mouse button and move the mouse to aim in any direction. Left click shoots, middle click arms missiles.");
+    B("mouse_aim_toggle", "Input", "Controls", "Aim button toggles (touchpads)", LIVE_YES, "0",
+      "A right click turns free aim on, the next one off, so a touchpad aims with one finger and taps to shoot.");
     I("mouse_sensitivity", "Input", "Controls", "Mouse aim sensitivity", LIVE_YES, "100", 25, 400, 5, "Percent: higher turns the aim with less mouse movement.");
     C("button_icons", "Input", "Controls", "Button icons", LIVE_RESTART, "auto",
       {{"auto", "Automatic"}, {"switch", "Switch (original)"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}},

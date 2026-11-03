@@ -33,6 +33,9 @@
 #endif
 #include "ui.h"
 #include "fe.h"
+#ifndef _WIN32
+#include "../x11_vk.h"   // X11 keys as Windows key codes, for keyboard_map
+#endif
 
 #ifdef _WIN32
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -521,8 +524,8 @@ static void page_audio() {
 
 static const char* const GAME_BUTTONS[17] = {"A", "B", "X", "Y", "Left stick click", "Right stick click", "L", "R", "ZL", "ZR", "+ (pause)", "- (map)",
     "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Disabled"};
-#ifdef _WIN32   // Windows key codes (the X11 backend has its own fixed keys)
-// keyboard_map (main.c, backend_win32.c keymap): 24 actions, each up to two Windows key codes
+// keyboard_map (main.c, backend_win32.c / backend_x11.c keymap): 24 actions, each up to two Windows key codes (X11 keys
+// are turned into them by x11_vk.h)
 static const char KB_DEFAULT[] = "88+32,90,67,86,16,70,81,69,49,51,13,8,37,38,39,40,65,87,68,83,74,73,76,75";
 static const char* const KB_ACTIONS[24] = {"A", "B (jump)", "X", "Y (shoot)", "Left stick click", "Right stick click", "L (free aim)", "R (missiles)", "ZL", "ZR",
     "+ (pause)", "- (map)", "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Move left", "Move up", "Move right", "Move down",
@@ -544,6 +547,7 @@ static std::string kb_string(int k[24][2]) {
     std::string v; for (int i = 0; i < 24; i++) { if (i) v += ","; v += std::to_string(k[i][0]); if (k[i][1]) v += "+" + std::to_string(k[i][1]); }
     return v;
 }
+#ifdef _WIN32
 static std::string key_name(int vk) {
     switch (vk) { case 0: return "-"; case VK_SPACE: return "Space"; case VK_RETURN: return "Enter"; case VK_BACK: return "Backspace";
         case VK_LEFT: return "Left arrow"; case VK_RIGHT: return "Right arrow"; case VK_UP: return "Up arrow"; case VK_DOWN: return "Down arrow";
@@ -554,6 +558,10 @@ static std::string key_name(int vk) {
     return fmt("Key %d", vk);
 }
 static bool kb_reserved(int vk) { return vk == VK_ESCAPE || vk == VK_TAB || (vk >= VK_F1 && vk <= VK_F24) || vk == VK_LWIN || vk == VK_RWIN; }
+#else
+static std::string key_name(int vk) { char b[32]; return x11_vk_name(vk, b, sizeof b); }
+static bool kb_reserved(int vk) { return vk == 27 || vk == 9 || (vk >= 0x70 && vk <= 0x87) || vk == 0x5B || vk == 0x5C; }   // Esc, Tab, F keys, Super
+#endif
 static void kb_assign(int vk) {
     int k[24][2]; kb_parse(get("keyboard_map"), k); std::string moved;
     for (int i = 0; i < 24; i++) for (int j = 0; j < 2; j++) if (i != g_kb_capture && k[i][j] == vk) {   // a key does one thing
@@ -564,7 +572,6 @@ static void kb_assign(int vk) {
                         : fmt("%s = %s (taken from %s)", KB_ACTIONS[g_kb_capture], key_name(vk).c_str(), moved.c_str()));
     g_kb_capture = -1;
 }
-#endif
 
 static void page_controls() {
 #ifdef _WIN32
@@ -578,12 +585,13 @@ static void page_controls() {
         std::string f = pick_file(g_hwnd, "Choose SDL2.dll", L"SDL2", L"SDL2.dll");
         if (!f.empty()) { if (CopyFileW(wide(f).c_str(), wide(join(P.exedir, "SDL2.dll")).c_str(), FALSE)) flash("SDL2.dll installed: restart the launcher to use it"); else flash("Copy failed"); }
     }
-    section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) draw_opt("mouse_sensitivity");
-#else   // controllers come from the system's SDL2 (backend_x11.c); the game mouse is Windows-only
+    section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) { draw_opt("mouse_aim_toggle"); draw_opt("mouse_sensitivity"); }
+#else   // controllers come from the system's SDL2 (backend_x11.c)
     page_title("CONTROLS", "Pair Bluetooth controllers in your desktop's settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
                "DualSense, 8BitDo, Xbox and Steam Deck controls over USB or Bluetooth.");
     section("CONTROLLER SUPPORT");
     row_text("SDL2", pads_sdl_loaded() ? "Found on this system" : "Not found: install SDL2 (libSDL2-2.0.so.0) for controllers", pads_sdl_loaded() ? C_OK : C_WARN);
+    section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) { draw_opt("mouse_aim_toggle"); draw_opt("mouse_sensitivity"); }
 #endif
     section("BUTTON ICONS");
     draw_opt("button_icons");
@@ -656,7 +664,6 @@ static void page_controls() {
               else { memcpy(g_nav.bind, b, sizeof b); flash("Two actions share a button: pick a different one (not saved until each action has its own)"); } }
     if (row_button("##nr", "Reset menu buttons", "RESET")) { for (int i = 0; i < NAV_COUNT; i++) g_nav.bind[i] = NAV_DEFAULT[i]; set("launcher_bindings", bindings_to_string(g_nav.bind)); flash("Menu buttons reset"); }
     help_text("Locked out? Hold + and - together for 3 seconds on any screen, or use the keyboard (arrows, Enter, Esc) or the mouse.");
-#ifdef _WIN32
     section("KEYBOARD");
     help_text("Press SET, then the key. A key does one thing: giving it to another action takes it from the old one. Esc cancels. Esc, Tab and the F keys keep their jobs.");
     { int k[24][2]; kb_parse(get("keyboard_map"), k);
@@ -666,11 +673,11 @@ static void page_controls() {
               g_kb_capture = g_kb_capture == i ? -1 : i;
       }
       if (row_button("##kbr", "Default keys (WASD, X/Space, Z, C, V, Shift, F, arrows)", "RESET")) { set("keyboard_map", ""); g_kb_capture = -1; flash("Keyboard reset to the default keys"); } }
-#else
-    section("KEYBOARD");
-#endif
     const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8 full resolution)"},
-                           {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"}, {"Fast forward", "Tab"}, {"Quit", "Esc"},
+#ifdef _WIN32   // the F7 recorder is Media Foundation
+                           {"Record video", "F7"},
+#endif
+                           {"Fullscreen", "F11 or Alt+Enter"}, {"Fast forward", "Tab"}, {"Quit", "Esc"},
                            {"Free aim (L)", "Hold right mouse button, move the mouse"}, {"Shoot (Y)", "Left mouse button"}, {"Missiles (R)", "Middle mouse button"}};
     for (auto& r : kb) row_text(r[0], r[1]);
 }
@@ -1121,6 +1128,14 @@ static void x_events() {
         switch (e.type) {
         case KeyPress: case KeyRelease: {
             bool down = e.type == KeyPress; unsigned st = e.xkey.state;
+            if (g_kb_capture >= 0) {   // Controls > Keyboard: SET waits for a key (fe_wndproc on Windows)
+                if (!down) break;
+                int vk = x11_vk(XLookupKeysym(&e.xkey, 0));
+                if (vk == 27) { g_kb_capture = -1; flash("Not changed"); }
+                else if (!vk) flash("This key can't be used: pick another key");
+                else if (kb_reserved(vk)) flash(fmt("%s is reserved: pick another key", key_name(vk).c_str()));
+                else kb_assign(vk);
+                break; }
             io.AddKeyEvent(ImGuiMod_Ctrl, (st & ControlMask) != 0); io.AddKeyEvent(ImGuiMod_Shift, (st & ShiftMask) != 0); io.AddKeyEvent(ImGuiMod_Alt, (st & Mod1Mask) != 0);
             KeySym k = XLookupKeysym(&e.xkey, 0);
             if (down && (k == XK_Return || k == XK_KP_Enter) && (st & Mod1Mask)) { bool fs = !x_fs_on; backend_fe_fullscreen(fs); set("fullscreen", fs ? "1" : "0"); break; }   // Alt+Enter, as in the game
