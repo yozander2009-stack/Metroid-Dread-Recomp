@@ -305,7 +305,7 @@
   },
   "code_017.c": {
    "pristine": "edff8041521b19ebad7c077414343c68aa513e72abf1f1bf65f73746e895270c",
-   "result": "c9b30e62ed3a7ec4ba77848dc9137e5388299b89fa63e102238b84aa078516e9",
+   "result": "0f1b59f6f7672a5222d5c3a8f27db9f9501f32451f1006af91a93783274fb447",
    "hunks": [
     [
      30139,
@@ -325,6 +325,37 @@
      30155,
      [
       " if(swr_horplus() && c->v[8].f[0]>16.0f/9.0f) c->v[8].f[0]=16.0f/9.0f;   /* SWR Hor+: the aspect capped at 16:9 */"
+     ]
+    ],
+    [
+     32291,
+     32291,
+     [
+      "/* SWR spawn view: F_821E588 is the game's \"is this point on screen\" check. A spawn point without bAllowSpawnInFrustum",
+      "   waits until it is off screen (F_912F558, code_148.c). At 16:10 (1440x900) the points this check sees land at exactly 0.9",
+      "   times their 16:9 (1600x900) pixels, so the 16:9 picture is its top 810 rows and the rows below are extra. A spawn point",
+      "   in those rows never spawned and Experiment No. Z-57 was gone after its intro (MEASURED: its spawn point at 16:9 is row 929",
+      "   of 900, off screen). While F_912F558 asks (swr_spawn_cpu is its thread's CPU, other threads are not affected), a point in",
+      "   a taller picture counts as on screen only in the rows 16:9 would show. Within 1% of 16:9 (rounding of the resolution",
+      "   scale), and on wider pictures, nothing changes. Everything else that asks still sees the whole picture */",
+      "void* swr_spawn_cpu;",
+      "static int swr_spawn_view(u32 py,u32 w,u32 h){",
+      "  if((u64)w*900<(u64)h*1584) return py<=(u32)((u64)w*9/16);",
+      "  return 1; }"
+     ]
+    ],
+    [
+     32353,
+     32353,
+     [
+      " u32 swr_w=(u32)c->x[10], swr_h=(u32)c->x[9];   /* SWR spawn view: the picture, before the compare below reuses them */"
+     ]
+    ],
+    [
+     32362,
+     32362,
+     [
+      " if(c->x[0] && swr_spawn_cpu==(void*)c) c->x[0]=(u64)(u32)swr_spawn_view(RD32((c->x[31]+40)),swr_w,swr_h);   /* SWR spawn view */"
      ]
     ]
    ]
@@ -387,6 +418,35 @@
      38321,
      [
       " if(((u32)c->x[0]!=0) || swr_skipcut()) goto L_906E330;"
+     ]
+    ]
+   ]
+  },
+  "code_148.c": {
+   "pristine": "39d599bb7082439bed01b005d2cf0a6cf95db4ace29283b43e39f55f72674195",
+   "result": "70823a43e102c62f4d15ea00df3581e7d2afb0c56d1d9016dbdc820aceba4a12",
+   "hunks": [
+    [
+     17278,
+     17278,
+     [
+      "/* SWR spawn view (see code_017.c F_821E588): the on-screen check below asks about the 16:9 part of the picture.",
+      "   [x19+276] is bAllowSpawnInFrustum */",
+      "extern void* swr_spawn_cpu;"
+     ]
+    ],
+    [
+     17683,
+     17683,
+     [
+      " swr_spawn_cpu=(void*)c;"
+     ]
+    ],
+    [
+     17685,
+     17685,
+     [
+      " swr_spawn_cpu=0;"
      ]
     ]
    ]
