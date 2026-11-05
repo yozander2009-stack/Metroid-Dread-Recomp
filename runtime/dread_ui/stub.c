@@ -7,6 +7,7 @@ int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l){ (void)h;
 int ov_is_open(void){ return 0; }
 int ov_pad(unsigned long long phys, int lx, int ly){ (void)phys; (void)lx; (void)ly; return 0; }
 void ov_gl_frame(void){}
+int ov_vk_frame(void* f){ (void)f; return 0; }   /* native Vulkan menu pass (snxvk ui.c): no menu in this build */
 /* no menu here: a second Esc within 2 seconds quits (#38) */
 void backend_request_quit(void); extern void (*g_backend_status)(const char*); unsigned long long plat_ns(void);
 void ov_escape(void){ static unsigned long long last; unsigned long long now=plat_ns(); if(last && now-last<2000000000ull){ backend_request_quit(); return; } last=now; if(g_backend_status) g_backend_status("Press Esc again to quit"); }

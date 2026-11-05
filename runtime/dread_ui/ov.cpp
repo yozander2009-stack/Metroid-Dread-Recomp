@@ -1,5 +1,6 @@
-// In-game menu: F1 (or the controller shortcut) opens it over the running game. Drawn with Dear ImGui's OpenGL3 backend on
-// the GL thread just before the swap (glq.c). The game keeps running at normal speed; while the menu is open it gets neutral
+// In-game menu: F1, Esc (or the controller shortcut) opens it over the running game. OpenGL: drawn with Dear ImGui's OpenGL3
+// backend on the GL thread just before the swap (glq.c). Native Vulkan: ov_vk_frame hands ImGui's triangles to the
+// renderer's menu pass (snxvk ui.c vk_ov_draw) at each present. The game keeps running at normal speed; while the menu is open it gets neutral
 // input, and after closing it gets input again only once every button is released (no stuck buttons).
 // Threads: window thread -> ov_wndproc (keyboard, mouse); main thread -> ov_pad (controller, open/close, settings snapshot);
 // GL thread -> ov_gl_frame (drawing). They meet in g_q under its mutex. The window side: ov_wndproc on Windows, the
@@ -211,18 +212,9 @@ void snapshot_settings() {   // main thread
 // ---------------------------------------------------------------- window thread
 extern "C" int ov_is_open(void) { return g_q.open ? 1 : 0; }
 /* the window side, any platform: F1 (toggle) and, while the menu is open, keys, characters and the mouse */
-extern "C" void ov_input_toggle(void) {
-    if (g_snxvk_on) { if (g_backend_status) g_backend_status("The in-game menu needs the OpenGL renderer for now (Play screen > Graphics)"); return; }
-    Lock k; g_q.want_toggle = true;
-}
-/* Esc (#38: it used to quit at once and lost unsaved progress): opens the in-game menu, whose QUIT asks again. Without
-   the menu (native Vulkan) a second Esc within 2 seconds quits */
-extern "C" void ov_escape(void) {
-    if (!g_snxvk_on) { Lock k; g_q.want_toggle = true; return; }
-    static std::chrono::steady_clock::time_point last; auto now = std::chrono::steady_clock::now();
-    if (last.time_since_epoch().count() && now - last < std::chrono::seconds(2)) { backend_request_quit(); return; }
-    last = now; if (g_backend_status) g_backend_status("Press Esc again to quit");
-}
+extern "C" void ov_input_toggle(void) { Lock k; g_q.want_toggle = true; }
+/* Esc (#38: it used to quit at once and lost unsaved progress): opens the in-game menu, whose QUIT asks again */
+extern "C" void ov_escape(void) { Lock k; g_q.want_toggle = true; }
 extern "C" void ov_input_key(int ovk, int down) { if (!g_q.open || !ovk) return; Lock k; g_q.ev.push_back({0, ovk, down != 0}); }
 extern "C" void ov_input_char(unsigned c) { if (!g_q.open) return; Lock k; g_q.ev.push_back({1, (int)c, 0}); }
 extern "C" void ov_input_mouse(float x, float y) { if (!g_q.open) return; Lock k; g_q.ev.push_back({2, 0, 0, x, y}); }
@@ -263,7 +255,6 @@ extern "C" int ov_pad(unsigned long long phys, int lx, int ly) {
     if (sc == "minus_plus" && (phys >> 10 & 1) && (phys >> 11 & 1) && ((pressed >> 10 & 1) || (pressed >> 11 & 1))) toggle = true;
     if (sc == "l3_r3") { bool both = (phys >> 4 & 1) && (phys >> 5 & 1); if (both) { if (!g_hold_t0) g_hold_t0 = now; else if (g_hold_t0 > 0 && now - g_hold_t0 >= 1.0) { toggle = true; g_hold_t0 = -1; } } else g_hold_t0 = 0; }
     g_prev_phys = phys;
-    if (toggle && g_snxvk_on) { if (g_backend_status) g_backend_status("The in-game menu needs the OpenGL renderer for now (Play screen > Graphics)"); toggle = false; }
     bool open;
     { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else g_q.open = false; } open = g_q.open; }
     if (open) {
@@ -301,8 +292,9 @@ static void test_window_shot() {
     gpu_gl_state_dirty();
 }
 
-extern "C" void ov_gl_frame(void) {
-    test_window_shot();
+/* one menu frame up to ImGui::Render, for either renderer: false = closed (nothing to draw). vk: native Vulkan draws
+   the result (ov_vk_frame below), else ImGui's OpenGL3 backend */
+static bool ov_begin(int w, int h, bool vk) {
     bool open; std::vector<Ev> ev; bool up, down, left, right, act[NAV_COUNT];
     {
         Lock k; open = g_q.open; ev.swap(g_q.ev);
@@ -312,17 +304,17 @@ extern "C" void ov_gl_frame(void) {
         if (open && g_vals.empty()) g_vals = g_q.vals;
     }
     static bool was_open;
-    if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; } return; }
+    if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; } return false; }
     if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; } }
     if (!g_ready) {
         IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr; io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         load_fonts(io); apply_style(1.0f);
-        if (!ImGui_ImplOpenGL3_Init(nullptr)) { ImGui::DestroyContext(); Lock k; g_q.open = false; return; }
+        if (vk) { io.BackendRendererName = "swr_vulkan"; io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures; }
+        else if (!ImGui_ImplOpenGL3_Init(nullptr)) { ImGui::DestroyContext(); Lock k; g_q.open = false; return false; }
         g_ready = true; g_t_open = ImGui::GetTime();
     }
     ImGuiIO& io = ImGui::GetIO();
-    int w = 1, h = 1; backend_window_size(&w, &h);
     io.DisplaySize = ImVec2((float)w, (float)h);
     static double last; double now = now_s();
     io.DeltaTime = last > 0 ? std::max(1e-4f, (float)(now - last)) : 1.0f / 60; last = now;
@@ -343,7 +335,8 @@ extern "C" void ov_gl_frame(void) {
         }
     }
     float sc = std::max(std::min(0.85f, w / 1500.0f), std::max(0.55f, std::min(2.2f, std::min(h / 1080.0f, w / 1700.0f))));   /* 720p: readable (#48) */ if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
-    ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
+    if (!vk) ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
     nav_frame_begin();
     g_row.pad_left = left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow); g_row.pad_right = right || ImGui::IsKeyPressed(ImGuiKey_RightArrow); g_row.confirm = act[NAV_CONFIRM];
     if (g_rev.active && act[NAV_CONFIRM]) { g_rev.active = false; g_row.confirm = false; }   // "Keep these display settings?": confirm keeps
@@ -354,6 +347,13 @@ extern "C" void ov_gl_frame(void) {
     draw_menu((float)w, (float)h, ImGui::GetTime());
     if (!g_rev.active) nav_move(down ? 1 : up ? -1 : 0);   // controller up/down (keyboard arrows use ImGui's own nav)
     ImGui::Render();
+    return true;
+}
+
+extern "C" void ov_gl_frame(void) {
+    test_window_shot();
+    int w = 1, h = 1; backend_window_size(&w, &h);
+    if (!ov_begin(w, h, false)) return;
     // draw into the window's framebuffer (with renderer=vulkan the runtime redirects framebuffer 0 to the image Vulkan presents)
     typedef void (APIENTRY * BindFB)(unsigned, unsigned); typedef void (APIENTRY * GetI)(unsigned, int*); typedef void (APIENTRY * Clip)(unsigned, unsigned);
     typedef void (APIENTRY * En)(unsigned); typedef unsigned char (APIENTRY * IsEn)(unsigned); typedef void (APIENTRY * VP)(int, int, int, int);
@@ -374,4 +374,72 @@ extern "C" void ov_gl_frame(void) {
         if (want && rp) { std::vector<unsigned char> px((size_t)w * h * 3); rp(0, 0, w, h, 0x1907, 0x1401, px.data());
           std::string path = fmt("%s-m%d.ppm", pre, n); FILE* f = fopen(path.c_str(), "wb");
           if (f) { fprintf(f, "P6\n%d %d\n255\n", w, h); for (int y = h - 1; y >= 0; y--) fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f); fclose(f); } } } }
+}
+
+// ---------------------------------------------------------------- native Vulkan (renderer's present, snxvk ui.c vk_ov_draw)
+// The menu's triangles for the Vulkan renderer: vertices as ImGui writes them (x, y, u, v, RGBA bytes: 20 bytes, the
+// layout of the renderer's own menu pass), 16-bit indices, one command per scissor/texture run. Textures go over whole,
+// premultiplied (the pass blends premultiplied), each time ImGui changes one (new glyphs, a new UI scale).
+extern "C" {
+typedef struct { float x0, y0, x1, y1; unsigned count, first_index; int vertex_offset, tex; } OvVkCmd;
+typedef struct { int slot, w, h; const unsigned char* px; } OvVkTex;
+typedef struct { float w, h; const void* vtx; int nvtx; const unsigned short* idx; int nidx; const OvVkCmd* cmd; int ncmd;
+                 const OvVkTex* tex; int ntex; } OvVkFrame;
+int ov_vk_frame(OvVkFrame* f);
+}
+namespace {
+const int OV_VK_SLOTS = 8;   // ImGui keeps one atlas (rarely two): slots 1..8, 0 = none
+std::vector<ImDrawVert> g_vv; std::vector<ImDrawIdx> g_vi; std::vector<OvVkCmd> g_vc; std::vector<OvVkTex> g_vt;
+std::vector<unsigned char> g_vpx[OV_VK_SLOTS + 1]; bool g_vslot_used[OV_VK_SLOTS + 1];
+void vk_textures(ImDrawData* dd) {
+    g_vt.clear();
+    if (!dd->Textures) return;
+    for (ImTextureData* t : *dd->Textures) {
+        if (t->Status == ImTextureStatus_OK) continue;
+        int slot = (int)t->GetTexID();
+        if (t->Status == ImTextureStatus_WantDestroy) {
+            if (slot > 0 && slot <= OV_VK_SLOTS) g_vslot_used[slot] = false;
+            t->SetTexID(ImTextureID_Invalid); t->SetStatus(ImTextureStatus_Destroyed); continue;
+        }
+        if (slot <= 0 || slot > OV_VK_SLOTS) {   // WantCreate
+            slot = 0; for (int i = 1; i <= OV_VK_SLOTS; i++) if (!g_vslot_used[i]) { slot = i; break; }
+            if (!slot) continue;   // no room: those glyphs don't show
+            g_vslot_used[slot] = true;
+        }
+        std::vector<unsigned char>& px = g_vpx[slot]; px.resize((size_t)t->Width * t->Height * 4);
+        const unsigned char* s = (const unsigned char*)t->GetPixels();
+        for (size_t i = 0, n = (size_t)t->Width * t->Height; i < n; i++) {
+            if (t->Format == ImTextureFormat_Alpha8) { unsigned char a = s[i]; px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = px[i * 4 + 3] = a; }
+            else { const unsigned char* p = s + i * 4; unsigned a = p[3];
+                   px[i * 4] = (unsigned char)((p[0] * a + 127) / 255); px[i * 4 + 1] = (unsigned char)((p[1] * a + 127) / 255);
+                   px[i * 4 + 2] = (unsigned char)((p[2] * a + 127) / 255); px[i * 4 + 3] = (unsigned char)a; }
+        }
+        g_vt.push_back({slot, t->Width, t->Height, px.data()});
+        t->SetTexID((ImTextureID)slot); t->SetStatus(ImTextureStatus_OK);
+    }
+}
+} // namespace
+
+/* the renderer's GPU thread, once per present: 1 = the menu is open and f says what to draw */
+extern "C" int ov_vk_frame(OvVkFrame* f) {
+    if (!g_q.open && !g_ready) return 0;
+    int w = 1, h = 1; backend_window_size(&w, &h);
+    if (!ov_begin(w, h, true)) return 0;
+    ImDrawData* dd = ImGui::GetDrawData();
+    vk_textures(dd);
+    g_vv.clear(); g_vi.clear(); g_vc.clear();
+    for (const ImDrawList* l : dd->CmdLists) {
+        int vb = (int)g_vv.size(), ib = (int)g_vi.size();
+        g_vv.insert(g_vv.end(), l->VtxBuffer.begin(), l->VtxBuffer.end());
+        g_vi.insert(g_vi.end(), l->IdxBuffer.begin(), l->IdxBuffer.end());
+        for (const ImDrawCmd& c : l->CmdBuffer) {
+            if (c.UserCallback || !c.ElemCount) continue;
+            ImVec2 o = dd->DisplayPos;
+            g_vc.push_back({c.ClipRect.x - o.x, c.ClipRect.y - o.y, c.ClipRect.z - o.x, c.ClipRect.w - o.y, c.ElemCount,
+                            (unsigned)ib + c.IdxOffset, vb + (int)c.VtxOffset, (int)c.GetTexID()});
+        }
+    }
+    *f = {(float)w, (float)h, g_vv.data(), (int)g_vv.size(), g_vi.data(), (int)g_vi.size(), g_vc.data(), (int)g_vc.size(),
+          g_vt.data(), (int)g_vt.size()};
+    return 1;
 }

@@ -82,8 +82,10 @@ static int layout_make(void) {
     return 1;
 }
 
-static int pipeline_make(VkFormat format) {
+/* SWR: the pipeline for one target format (the menu pass below may draw into an image of another format) */
+static VkPipeline pipe_create(VkFormat format) {
     VkShaderModule vs, fs;
+    VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo st[2] = {{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                               .stage = VK_SHADER_STAGE_VERTEX_BIT,
                                               .pName = "main"},
@@ -137,20 +139,22 @@ static int pipeline_make(VkFormat format) {
                                         .pColorBlendState = &cb,
                                         .pDynamicState = &ds,
                                         .layout = g_layout};
-    int ok;
-    if (g_pipe && g_pipe_format == format) return 1;
-    if (g_pipe) vkDestroyPipeline(g_vk.dev, g_pipe, NULL); /* vk_finish ran when the swapchain changed format */
-    g_pipe = VK_NULL_HANDLE;
     vs = vk_module_spv(snx_ui_vs_spv, sizeof snx_ui_vs_spv / 4);
     fs = vk_module_spv(snx_ui_fs_spv, sizeof snx_ui_fs_spv / 4);
     st[0].module = vs;
     st[1].module = fs;
-    ok = vs && fs && VK_OK(vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &g_pipe));
+    if (!(vs && fs && VK_OK(vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &pipe))))
+        pipe = VK_NULL_HANDLE;
     if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
     if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);
+    return pipe;
+}
+static int pipeline_make(VkFormat format) {
+    if (g_pipe && g_pipe_format == format) return 1;
+    if (g_pipe) vkDestroyPipeline(g_vk.dev, g_pipe, NULL); /* vk_finish ran when the swapchain changed format */
+    g_pipe = pipe_create(format);
     g_pipe_format = format;
-    if (!ok) g_pipe = VK_NULL_HANDLE;
-    return ok;
+    return g_pipe != VK_NULL_HANDLE;
 }
 
 /* the atlas to the GPU, once each time the frontend gives one (under ui_lock) */
@@ -418,4 +422,237 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
     vk_barrier(cb, sc, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+}
+
+/* ------------------------------------------------------------ SWR: the runtime's in-game menu (dread_ui ov.cpp)
+   ImGui's triangles through the same shaders as the pass above: its vertices have this pass's layout (x, y, u, v, RGBA
+   bytes), its textures come premultiplied. Drawn last, onto the image the window shows, so FXAA and sharpening don't touch
+   the text (on an HDR swapchain into the SDR image before the HDR step, which encodes it). Nothing is recorded while the
+   menu is closed */
+typedef struct {
+    float x0, y0, x1, y1;
+    u32 count, first_index;
+    i32 vertex_offset;
+    int tex;
+} OvVkCmd;
+typedef struct {
+    int slot, w, h;
+    const u8* px;
+} OvVkTex;
+typedef struct {
+    float w, h;
+    const void* vtx;
+    int nvtx;
+    const u16* idx;
+    int nidx;
+    const OvVkCmd* cmd;
+    int ncmd;
+    const OvVkTex* tex;
+    int ntex;
+} OvVkFrame;
+extern int ov_vk_frame(OvVkFrame* f);
+
+#define OV_SLOTS 8
+#define OV_RING 4 /* a re-uploaded texture gets the next set: the frames still in flight keep theirs */
+static struct {
+    VkImage img;
+    VmaAllocation mem;
+    VkImageView view;
+    int w, h, ring;
+    VkDescriptorSet sets[OV_RING];
+} g_ovt[OV_SLOTS + 1];
+static VkDescriptorPool g_ov_pool;
+static VkPipeline g_ov_pipe[2];
+static VkFormat g_ov_pipe_fmt[2];
+
+static VkPipeline ov_pipe(VkFormat f) {
+    int i;
+    for (i = 0; i < 2; ++i)
+        if (g_ov_pipe[i] && g_ov_pipe_fmt[i] == f) return g_ov_pipe[i];
+    for (i = 0; i < 2; ++i)
+        if (!g_ov_pipe[i]) {
+            g_ov_pipe[i] = pipe_create(f);
+            g_ov_pipe_fmt[i] = f;
+            return g_ov_pipe[i];
+        }
+    return VK_NULL_HANDLE; /* a third format: never (swapchain + the HDR step's SDR image) */
+}
+
+static int ov_sets_make(void) {
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, OV_SLOTS * OV_RING};
+    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets = OV_SLOTS * OV_RING,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes = &size};
+    VkDescriptorSetLayout layouts[OV_RING];
+    VkDescriptorSetAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = OV_RING, .pSetLayouts = layouts};
+    int i;
+    if (g_ov_pool) return 1;
+    if (!VK_OK(vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_ov_pool))) return 0;
+    for (i = 0; i < OV_RING; ++i) layouts[i] = g_dsl;
+    ai.descriptorPool = g_ov_pool;
+    for (i = 1; i <= OV_SLOTS; ++i)
+        if (!VK_OK(vkAllocateDescriptorSets(g_vk.dev, &ai, g_ovt[i].sets))) return 0;
+    return 1;
+}
+
+/* one ImGui texture to the GPU in this frame's commands (whole: changes are rare) */
+static void ov_tex_upload(VkCommandBuffer cb, const OvVkTex* t) {
+    u64 n = (u64)t->w * (u64)t->h * 4, so;
+    VkBuffer sb;
+    u8* dst;
+    if (t->slot < 1 || t->slot > OV_SLOTS || t->w <= 0 || t->h <= 0) return;
+    if (g_ovt[t->slot].img && (g_ovt[t->slot].w != t->w || g_ovt[t->slot].h != t->h)) {
+        vk_defer_image(g_ovt[t->slot].img, g_ovt[t->slot].mem, g_ovt[t->slot].view, VK_NULL_HANDLE);
+        g_ovt[t->slot].img = VK_NULL_HANDLE;
+    }
+    if (!g_ovt[t->slot].img) {
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                .imageType = VK_IMAGE_TYPE_2D,
+                                .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                .extent = {(u32)t->w, (u32)t->h, 1},
+                                .mipLevels = 1,
+                                .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                     .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                     .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                     .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (!VK_OK(vmaCreateImage(g_vk.vma, &ii, &ai, &g_ovt[t->slot].img, &g_ovt[t->slot].mem, NULL))) {
+            g_ovt[t->slot].img = VK_NULL_HANDLE;
+            return;
+        }
+        vk_mem_track(g_ovt[t->slot].mem);
+        vci.image = g_ovt[t->slot].img;
+        if (!VK_OK(vkCreateImageView(g_vk.dev, &vci, NULL, &g_ovt[t->slot].view))) {
+            vk_mem_untrack(g_ovt[t->slot].mem);
+            vmaDestroyImage(g_vk.vma, g_ovt[t->slot].img, g_ovt[t->slot].mem);
+            g_ovt[t->slot].img = VK_NULL_HANDLE;
+            return;
+        }
+        g_ovt[t->slot].w = t->w;
+        g_ovt[t->slot].h = t->h;
+    }
+    dst = vk_stage(n, 16, &sb, &so);
+    if (!dst) return;
+    memcpy(dst, t->px, (size_t)n);
+    {
+        VkBufferImageCopy cp = {.bufferOffset = so,
+                                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageExtent = {(u32)t->w, (u32)t->h, 1}};
+        vk_barrier(cb, g_ovt[t->slot].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                   VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        rec_CmdCopyBufferToImage(cb, sb, g_ovt[t->slot].img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+        vk_barrier(cb, g_ovt[t->slot].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                   VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    {
+        VkDescriptorImageInfo di = {g_samplers[0], g_ovt[t->slot].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                   .pImageInfo = &di};
+        g_ovt[t->slot].ring = (g_ovt[t->slot].ring + 1) % OV_RING;
+        wr.dstSet = g_ovt[t->slot].sets[g_ovt[t->slot].ring];
+        vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
+    }
+}
+
+/* the menu onto img (the swapchain's image or the HDR step's SDR image, the swapchain's size), viewed as view (fmt;
+   srgb: an sRGB view). layout: the image's layout before and after */
+void vk_ov_draw(VkCommandBuffer cb, VkImage img, VkImageView view, VkFormat fmt, int srgb, VkImageLayout layout) {
+    OvVkFrame f;
+    VkPipeline pipe;
+    VkBuffer vb, ib;
+    u64 vo, io;
+    u8 *vd, *id;
+    int i;
+    u32 sw = g_vk.sc_extent.width, sh = g_vk.sc_extent.height;
+    float kx, ky;
+    struct {
+        float w, h;
+        u32 srgb, pad;
+    } pc;
+    if (!view || !ov_vk_frame(&f)) return;
+    if (!layout_make() || !ov_sets_make() || !(pipe = ov_pipe(fmt))) return;
+    for (i = 0; i < f.ntex; ++i) ov_tex_upload(cb, &f.tex[i]);
+    if (!f.ncmd || !f.nvtx || !f.nidx || f.w <= 0 || f.h <= 0) return;
+    vd = vk_stage((u64)f.nvtx * 20, 4, &vb, &vo);
+    id = vk_stage((u64)f.nidx * 2, 4, &ib, &io);
+    if (!vd || !id) return;
+    memcpy(vd, f.vtx, (size_t)f.nvtx * 20);
+    snx_le32_array(vd, (u32)f.nvtx * 5); /* the device reads the words little-endian */
+    memcpy(id, f.idx, (size_t)f.nidx * 2);
+    pc.w = f.w; /* ImGui works in window pixels; the image may be the swapchain's size */
+    pc.h = f.h;
+    pc.srgb = (u32)srgb;
+    pc.pad = 0;
+    kx = (float)sw / f.w;
+    ky = (float)sh / f.h;
+    vk_barrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+               VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, layout,
+               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    {
+        VkRenderingAttachmentInfo at = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                        .imageView = view,
+                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                              .renderArea = {{0, 0}, g_vk.sc_extent},
+                              .layerCount = 1,
+                              .colorAttachmentCount = 1,
+                              .pColorAttachments = &at};
+        VkViewport vp = {0, 0, (float)sw, (float)sh, 0, 1};
+        VkDeviceSize vbo = vo;
+        int bound = -1;
+        rec_CmdBeginRendering(cb, &ri);
+        vk_render_forget_state(); /* another pipeline and layout: a draw after it sets everything again */
+        rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        rec_CmdSetViewport(cb, 0, 1, &vp);
+        rec_CmdPushConstants(cb, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        rec_CmdBindVertexBuffers(cb, 0, 1, &vb, &vbo);
+        rec_CmdBindIndexBuffer(cb, ib, io, VK_INDEX_TYPE_UINT16);
+        for (i = 0; i < f.ncmd; ++i) {
+            const OvVkCmd* c = &f.cmd[i];
+            float x0 = c->x0 * kx, y0 = c->y0 * ky, x1 = c->x1 * kx, y1 = c->y1 * ky;
+            VkRect2D sci;
+            if (c->tex < 1 || c->tex > OV_SLOTS || !g_ovt[c->tex].img) continue;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > (float)sw) x1 = (float)sw;
+            if (y1 > (float)sh) y1 = (float)sh;
+            if (x1 <= x0 || y1 <= y0) continue;
+            sci.offset.x = (i32)x0;
+            sci.offset.y = (i32)y0;
+            sci.extent.width = (u32)(x1 - (float)(i32)x0 + 0.5f);
+            sci.extent.height = (u32)(y1 - (float)(i32)y0 + 0.5f);
+            rec_CmdSetScissor(cb, 0, 1, &sci);
+            if (bound != c->tex) {
+                rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1,
+                                          &g_ovt[c->tex].sets[g_ovt[c->tex].ring], 0, NULL);
+                bound = c->tex;
+            }
+            rec_CmdDrawIndexed(cb, c->count, 1, c->first_index, c->vertex_offset, 0);
+        }
+        rec_CmdEndRendering(cb);
+    }
+    vk_barrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+               layout);
+}
+/* the swapchain image's view this pass uses (the one ui.c keeps for it) */
+VkImageView vk_ov_sc_view(VkImage sc) {
+    return sc_view(sc);
 }

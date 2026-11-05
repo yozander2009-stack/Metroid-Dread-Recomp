@@ -471,15 +471,29 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                                  shr ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
             }
+            /* SWR: the runtime's in-game menu (ui.c vk_ov_draw), last, over what the window shows */
+            void vk_ov_draw(VkCommandBuffer cb, VkImage img, VkImageView view, VkFormat fmt, int srgb,
+                            VkImageLayout layout);
+            VkImageView vk_ov_sc_view(VkImage sc);
             if (sc == sc_out) {
                 int safe[4] = {(int)cx, (int)cy, (int)cw, (int)ch};
                 vk_ui_draw(cb, sc, safe);
+                vk_ov_draw(cb, sc, vk_ov_sc_view(sc), g_vk.sc_format, g_vk.sc_srgb,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             }
             if (sc != sc_out) {
                 void vk_hdr_resolve(VkCommandBuffer cb, VkImage sc);
+                VkImageView vk_hdr_mid_view(void);
+                extern int g_vk_sc_hdr;
+                if (g_vk_sc_hdr) /* HDR: into the SDR image, which the HDR step encodes */
+                    vk_ov_draw(cb, sc, vk_hdr_mid_view(), VK_FORMAT_R8G8B8A8_UNORM, 0,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 PH(7);
                 vk_hdr_resolve(cb, sc_out); /* SWR: the SDR image to the HDR swapchain image, left in PRESENT_SRC */
                 PH(8);
+                if (!g_vk_sc_hdr) /* after FXAA and sharpening: the text stays as drawn */
+                    vk_ov_draw(cb, sc_out, vk_ov_sc_view(sc_out), g_vk.sc_format, g_vk.sc_srgb,
+                               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
             } else
                 vk_barrier(cb, sc, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
