@@ -280,6 +280,10 @@ void crash_report(void* host_pc, void* fault, int sig){
     u64 best=0, ga2=0; for(u32 i=0;i<g_mod->nentries;i++){ u64 f=(u64)(size_t)g_mod->entry_fn[i]; if(f<=(u64)(size_t)host_pc && f>best){ best=f; ga2=g_mod->entry_addr[i]; } }
     if(best && (u64)(size_t)host_pc-best<0x100000) logf_(0,"  inside the recompiled code of game function %llx (+%llx on the host)\n",(unsigned long long)ga2,(unsigned long long)((u64)(size_t)host_pc-best)); }
   if(t){ logf_(0,"  thread %llu (%s)\n",(unsigned long long)t->id,t->name); kernel_dump_regs(&t->cpu); }
+#ifdef _WIN32
+  else { extern const char* plat_diag_role_get(void); const char* r=plat_diag_role_get(); logf_(0,"  runtime thread: %s\n", r? r : "unnamed"); }
+#endif
+  { extern void glq_crash_note(void); glq_crash_note(); }
   save_hints();
   fatal("The game crashed (invalid memory access). See the .log.");
 }

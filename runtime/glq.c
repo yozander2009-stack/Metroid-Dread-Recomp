@@ -164,8 +164,10 @@ void APIENTRY q_glDeleteSync(GLsync s){
   if(t_glq_direct){ if(v->real) r_glDeleteSync(v->real); free(v); return; }
   VF** p=glq_alloc(sizeof *p,0,e_ds); *p=v; glq_commit(); }
 
+static void* volatile g_crumb_cur; static void* volatile g_crumb[16]; static volatile u32 g_crumb_n; static volatile int g_crumb_poll;
 static void q_poll_fences(void){
-  for(VF* v=g_vf_list;v;v=v->next) if(!v->sig && v->real){ GLenum r=r_glClientWaitSync(v->real,0,0); if(r==GL_ALREADY_SIGNALED || r==GL_CONDITION_SATISFIED) __atomic_store_n(&v->sig,1,__ATOMIC_RELEASE); } }
+  g_crumb_poll=1; for(VF* v=g_vf_list;v;v=v->next) if(!v->sig && v->real){ GLenum r=r_glClientWaitSync(v->real,0,0); if(r==GL_ALREADY_SIGNALED || r==GL_CONDITION_SATISFIED) __atomic_store_n(&v->sig,1,__ATOMIC_RELEASE); }
+  g_crumb_poll=0; }
 
 /* ---------- swap */
 /* Bound the final precision wait to 0.5 ms; the longer portion sleeps. */
@@ -239,9 +241,26 @@ static void APIENTRY driver_debug_message(GLenum source,GLenum type,GLuint id,GL
   if(type==0x8251)return; /* omit informational buffer-placement messages */
   if(__atomic_fetch_add(&count,1,__ATOMIC_RELAXED)<256)LOG("GL driver debug: type=%x id=%u %.*s\n",type,id,length>1500?1500:length,message);
 }
+/* crash breadcrumbs (#39: AMD crashes inside the driver on the GL thread): the entry running now + the last 16 */
+static const char* crumb_name(void* x, char* b, int n){ if(x==(void*)e_swap) return "SwapBuffers"; if(x==(void*)e_ps) return "glPixelStorei"; if(x==(void*)e_bb) return "glBindBuffer";
+  if(x==(void*)e_fs) return "glFenceSync"; if(x==(void*)e_cws) return "glClientWaitSync"; if(x==(void*)e_ds) return "glDeleteSync";
+  for(const GlqEnt* e=g_glq_tab;e->name;e++) if(e->execute==x) return e->name;
+#ifdef _WIN32
+  { extern char __ImageBase; snprintf(b,(size_t)n,"custom entry at exe +%llx",(unsigned long long)((u64)(size_t)x-(u64)(size_t)&__ImageBase)); return b; }
+#else
+  snprintf(b,(size_t)n,"custom entry %p",x); return b;
+#endif
+}
+void glq_crash_note(void){ if(!g_active) return; char b[64];
+  if(g_crumb_poll) logf_(0,"  OpenGL thread: polling fences (glClientWaitSync)\n");
+  else logf_(0,"  OpenGL thread: running %s\n", g_crumb_cur? crumb_name(g_crumb_cur,b,sizeof b) : "nothing (between calls)");
+  char l[1200]; size_t k=0; u32 n=g_crumb_n; for(u32 i= n>16? n-16 : 0;i<n && k<sizeof l-80;i++) k+=(size_t)snprintf(l+k,sizeof l-k," %s",crumb_name(g_crumb[i&15],b,sizeof b));
+  l[k]=0; logf_(0,"  OpenGL thread, last calls (oldest first):%s\n",l); }
+static u64 g_test_crash, g_test_n;
 static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_driver=getenv("SWR_TRACE_GL_DRIVER")!=NULL;
   { extern void plat_thread_high_priority(void); plat_thread_high_priority(); }
   t_glq_direct=1;
+  { const char* tc=getenv("SWR_TEST_GL_CRASH"); if(tc) g_test_crash=strtoull(tc,NULL,10); }
   int ok= backend_gl_create() && swr_gl_load(backend_gl_proc);
   extern int swr_gl_is_gles(void);
   if(ok && swr_gl_is_gles()) ok=0;   /* not on GLES */
@@ -271,7 +290,9 @@ static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_
       QHdr* hd=(QHdr*)(g_q+t%Q_CAP); u32 sz=hd->size;
       void* executed=(void*)hd->ex;u64 operation_start=0;int upload_info[8]={0};int image_upload=0;
       if(trace_driver){if(hd->ex==q_sync_ex)executed=(void*)(*(QSync**)hd->data)->ex;if(executed==trace_upload_2d||executed==trace_compressed_2d){memcpy(upload_info,hd->data,sizeof upload_info);image_upload=1;}operation_start=plat_ns();}
-      hd->ex(hd->data);
+      { void* cx= hd->ex==q_sync_ex? (void*)(*(QSync**)hd->data)->ex : (void*)hd->ex; g_crumb[g_crumb_n++&15]=cx; g_crumb_cur=cx; }
+      if(g_test_crash && ++g_test_n==g_test_crash) *(volatile int*)(size_t)0x1001b=0;   /* SWR_TEST_GL_CRASH=N: tests the crash report */
+      hd->ex(hd->data); g_crumb_cur=NULL;
       if(trace_driver){u64 elapsed=plat_ns()-operation_start;static u32 logged;if(elapsed>10000000ull&&executed!=(void*)e_swap&&logged++<256){const char*name=hd->ex==e_swap?"SwapBuffers":"queue/custom";for(const GlqEnt*entry=g_glq_tab;entry->name;entry++)if(entry->execute==executed){name=entry->name;break;}LOG("glq driver: %s %.2f ms, queued bytes=%llu begin_ns=%llu end_ns=%llu\n",name,elapsed/1e6,(unsigned long long)(__atomic_load_n(&g_qh,__ATOMIC_ACQUIRE)-t),(unsigned long long)operation_start,(unsigned long long)(operation_start+elapsed));if(image_upload)LOG("glq upload detail: level=%d %dx%d format=%x %s=%x\n",upload_info[1],upload_info[4],upload_info[5],upload_info[6],executed==trace_compressed_2d?"bytes":"type",upload_info[7]);}}
       if(hd->big) free(hd->data);
       t+=sz; __atomic_store_n(&g_qt,t,__ATOMIC_RELEASE);

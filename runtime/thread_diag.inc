@@ -24,6 +24,7 @@ static TDThread* td_add(DWORD tid){
 }
 static void td_enumerate(void){HANDLE s=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(s==INVALID_HANDLE_VALUE)return;
  THREADENTRY32 e={0};e.dwSize=sizeof e;if(Thread32First(s,&e))do{if(e.th32OwnerProcessID==GetCurrentProcessId())td_add(e.th32ThreadID);}while(Thread32Next(s,&e));CloseHandle(s);}
+const char* plat_diag_role_get(void){ return td_self && td_self->role[0]? td_self->role : NULL; }   /* crash reports */
 void plat_diag_role(const char*name){if(!td_self)td_self=td_add(GetCurrentThreadId());if(td_self)snprintf(td_self->role,sizeof td_self->role,"%s",name);}
 void plat_diag_guest(KThread*t){plat_diag_role(t->is_main?"guest-main":"guest");if(td_self)td_self->guest=t;}
 static void td_wait_begin(int kind,u64 object,i64 requested,u64 caller){
