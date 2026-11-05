@@ -334,7 +334,7 @@ extern "C" void ov_gl_frame(void) {
         case 4: io.AddMouseWheelEvent(0, e.y); break;
         }
     }
-    float sc = std::max(0.55f, std::min(2.2f, std::min(h / 1080.0f, w / 1700.0f))); if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
+    float sc = std::max(std::min(0.85f, w / 1500.0f), std::max(0.55f, std::min(2.2f, std::min(h / 1080.0f, w / 1700.0f))));   /* 720p: readable (#48) */ if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
     nav_frame_begin();
     g_row.pad_left = left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow); g_row.pad_right = right || ImGui::IsKeyPressed(ImGuiKey_RightArrow); g_row.confirm = act[NAV_CONFIRM];

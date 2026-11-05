@@ -801,7 +801,8 @@ static void sidebar(ImVec2 a, ImVec2 b) {
 
 static void frame() {
     ImGuiIO& io = ImGui::GetIO(); float W = io.DisplaySize.x, H = io.DisplaySize.y;
-    float sc = std::max(0.55f, std::min(2.2f, std::min(H / 1080.0f, W / 1700.0f)));
+    // small screens (720p, Steam Deck): the height term alone made the text tiny (#48); the pages scroll, so let the width decide
+    float sc = std::max(std::min(0.85f, W / 1500.0f), std::max(0.55f, std::min(2.2f, std::min(H / 1080.0f, W / 1700.0f))));
     if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
     ImDrawList* bg = ImGui::GetBackgroundDrawList(); background(bg, {0, 0}, {W, H}, (float)ImGui::GetTime(), false);
     if (g_page == PG_SETUP) { if (g_page_changed) { g_focus_first = true; g_page_changed = false; } setup_screen({0, 0}, {W, H - S(70)}); }
