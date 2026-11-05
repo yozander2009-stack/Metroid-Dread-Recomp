@@ -107,7 +107,7 @@ int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt
 #define MEDIA_TURNS 0
 #endif
 int g_opt_media_turns=MEDIA_TURNS;   /* serialize_media_threads, read by kernel.c core0_member */
-int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
+int g_opt_fast_load=1;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
 static int aspect_given;   /* ini aspect= seen: ultrawide= no longer applies */
 int g_opt_hdr=0, g_opt_hdr_paper=200, g_opt_hdr_peak=0;   /* HDR output (native Vulkan): on, SDR white in nits, peak (0 = the display's) */
@@ -428,7 +428,7 @@ static const IniOpt INI_PERF[]={
   {"low_priority_shader_compiler","1","1 = compile shaders at low priority (less stutter on weak CPUs)"},
   {"fast_forward","0","1 = Tab (or both stick clicks, L3+R3) toggles fast forward: the game clock runs faster, e.g. to\n;   shorten elevator and train rides (their animations follow the clock). Turn it off again before playing"},
   {"fast_forward_speed","3","Fast forward speed, 2-8 times"},
-  {"fast_loading","0","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
+  {"fast_loading","1","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
   {"sleep_waits","1","1 = threads waiting on the OpenGL thread sleep instead of spinning (frees CPU on 2-4 core\n;   PCs and laptops); 0 = spin like older versions"},
   {"texture_threads","0","Threads that unpack texture loads: 0 = automatic (all cores), 1 = one thread like older versions"},
   {"serialize_media_threads",MEDIA_TURNS?"1":"0","1 = video/media threads that share a core on the Switch take turns like on the console\n;   (guards against a rare freeze when a video stops); 0 = run them fully in parallel"},

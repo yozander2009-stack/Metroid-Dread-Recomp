@@ -525,7 +525,7 @@ static std::vector<Opt> build_options() {
     B("skip_cutscenes", "Gameplay", "Gameplay", "Skip any cutscene", LIVE_YES, "0", "Hold - to skip a cutscene, even the first time you see it. A prompt shows in the top-left corner while you can.");
 #endif
     B("cutscenes_60fps", "Launcher", "Gameplay", "60 FPS cutscenes (theboy181)", LIVE_YES, "0", "Port of theboy181's 60fps patch: cinematics show a new picture every 1/60 s.");
-    B("fast_loading", "Performance", "Gameplay", "Fast loading", LIVE_YES, "0", "Shortens the game's fixed 60 ms pauses during loads (about 1 s faster first load).");
+    B("fast_loading", "Performance", "Gameplay", "Fast loading", LIVE_YES, "1", "Shortens the game's fixed 60 ms pauses during loads (about 1 s faster first load).");
     B("fast_forward", "Performance", "Gameplay", "Fast-forward toggle (Tab or L3+R3)", LIVE_YES, "0", "For elevator and train rides. Don't leave it on during play.");
     I("fast_forward_speed", "Performance", "Gameplay", "Fast-forward speed", LIVE_YES, "3", 2, 8, 1, "");
     // Audio
