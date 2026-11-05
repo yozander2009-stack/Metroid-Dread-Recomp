@@ -311,7 +311,7 @@ static void key_down(XKeyEvent* e){
     return; }
   if(k==XK_Return && (e->state&Mod1Mask)){ if(once) set_fullscreen(!g_fullscreen); return; }
   switch(k){
-    case XK_Escape: g_quit=1; return;
+    case XK_Escape: if(once){ extern void ov_escape(void); ov_escape(); } return;   /* menu, not an instant quit (#38) */
     case XK_F11: if(once) set_fullscreen(!g_fullscreen); return;
     case XK_Tab: case XK_ISO_Left_Tab: if(once){ extern volatile int g_ff_presses; g_ff_presses++; } return;   /* fast forward toggle (fast_forward=1) */
     case XK_F3: if(once) g_shot_req=1; return;

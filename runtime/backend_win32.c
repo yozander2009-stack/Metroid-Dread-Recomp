@@ -276,7 +276,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
     /* a held key auto-repeats (bit 30): the one-shot actions below only fire on the first press,
        or holding F7 would start and stop the recording every frame */
     if((l&(1<<30)) && (w==VK_ESCAPE||w==VK_F1||w==VK_F3||w==VK_F4||w==VK_F5||w==VK_F7||w==VK_F8||w==VK_F11)) return 0;
-    if(w==VK_ESCAPE){ g_quit=1; return 0; }
+    if(w==VK_ESCAPE){ extern void ov_escape(void); ov_escape(); return 0; }   /* menu, not an instant quit (#38) */
     if(w==VK_F11){ set_fullscreen(!g_fullscreen); return 0; }
     if(w==VK_F1){ return 0; }   /* the in-game menu (ov_wndproc) */
     if(0){ MessageBoxA(h,HELP,"Metroid Dread",MB_OK); }

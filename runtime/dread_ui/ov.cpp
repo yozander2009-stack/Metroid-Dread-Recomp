@@ -133,7 +133,7 @@ void tab_content(int t) {
     default: {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},
-                               {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Quit", "Esc"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
+                               {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Menu / quit", "Esc (quit: QUIT below)"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
                                {"L R ZL ZR", "Q  E  1  3"}, {"L3 / R3", "Shift / F"}, {"+ / -", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
         section("ABOUT"); help_text("Metroid Dread recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; 60 FPS cutscenes by theboy181; Dear ImGui; SDL2. Full credits on the Play screen.");
@@ -214,6 +214,14 @@ extern "C" int ov_is_open(void) { return g_q.open ? 1 : 0; }
 extern "C" void ov_input_toggle(void) {
     if (g_snxvk_on) { if (g_backend_status) g_backend_status("The in-game menu needs the OpenGL renderer for now (Play screen > Graphics)"); return; }
     Lock k; g_q.want_toggle = true;
+}
+/* Esc (#38: it used to quit at once and lost unsaved progress): opens the in-game menu, whose QUIT asks again. Without
+   the menu (native Vulkan) a second Esc within 2 seconds quits */
+extern "C" void ov_escape(void) {
+    if (!g_snxvk_on) { Lock k; g_q.want_toggle = true; return; }
+    static std::chrono::steady_clock::time_point last; auto now = std::chrono::steady_clock::now();
+    if (last.time_since_epoch().count() && now - last < std::chrono::seconds(2)) { backend_request_quit(); return; }
+    last = now; if (g_backend_status) g_backend_status("Press Esc again to quit");
 }
 extern "C" void ov_input_key(int ovk, int down) { if (!g_q.open || !ovk) return; Lock k; g_q.ev.push_back({0, ovk, down != 0}); }
 extern "C" void ov_input_char(unsigned c) { if (!g_q.open) return; Lock k; g_q.ev.push_back({1, (int)c, 0}); }
