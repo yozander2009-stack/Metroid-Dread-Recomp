@@ -13,6 +13,7 @@
 typedef struct { u32 off, size; u64 h; u8* pixels; u32 w,hgt,bytes; u64 cached_used; } V9F;
 typedef struct {
   const char* path; u8* data; u64 dlen; V9F* fr; u32 nfr, cap,cache_count; int cur,dec_cur,last_visible; int ctx_ok; vpx_codec_ctx_t ctx; u64 used;
+  void* sub;   /* a mod's video of another size, decoded in place of this one (#31) */
 } V9Vid;
 #define V9N 8           /* videos indexed at once; Dread plays up to 3 together and returns to older ones */
 static V9Vid g_v9[V9N]; static u64 g_v9clk; static V9Vid* g_v9act;
@@ -143,6 +144,7 @@ static int v9_retire(V9Vid*V){
 #endif
 
 static void v9_free(V9Vid* V){
+  if(V->sub){ V9Vid* S=(V9Vid*)V->sub; V->sub=NULL; for(u32 i=0;i<S->nfr;i++) v9_cache_drop(S,&S->fr[i]); if(S->ctx_ok) vpx_codec_destroy(&S->ctx); free((void*)S->path); free(S->data); free(S->fr); free(S); }
   if(V->ctx_ok){ vpx_codec_destroy(&V->ctx); V->ctx_ok=0; }
 #ifdef SWR_NATIVE_VIDEO_RETIRE
   if(v9_retire(V)){memset(V,0,sizeof *V);return;}
@@ -150,18 +152,25 @@ static void v9_free(V9Vid* V){
   for(u32 i=0;i<V->nfr;i++)v9_cache_drop(V,&V->fr[i]);
   free(V->data); free(V->fr); memset(V,0,sizeof *V); }
 
+static int v9_read(V9Vid* V, const char* path){
+  FILE* f=fopen(path,"rb"); if(!f){ LOG("video: cannot open %s\n",path); return 0; }
+  fseek(f,0,SEEK_END); long len=ftell(f); fseek(f,0,SEEK_SET);
+  if(len<64 || len>(300l<<20)){ fclose(f); return 0; }
+  V->data=malloc((size_t)len); if(!V->data || fread(V->data,1,(size_t)len,f)!=(size_t)len){ fclose(f); free(V->data); V->data=NULL; return 0; } fclose(f);
+  V->dlen=(u64)len;
+  V9P S; memset(&S,0,sizeof S); S.V=V; v9_walk(&S,V->data,V->data+V->dlen,0);
+  LOG("video: VP9 file %s: %u frames indexed (track %u)\n",path,V->nfr,(unsigned)S.vtrack);
+  return 1; }
 static V9Vid* v9_load(const char* path){
   u64 load_start=getenv("SWR_TRACE_VP9")?plat_ns():0;
   V9Vid* V=NULL; for(int i=0;i<V9N;i++){ if(!g_v9[i].path){ V=&g_v9[i]; break; } }
   if(!V){ V=&g_v9[0]; for(int i=1;i<V9N;i++) if(g_v9[i].used<V->used) V=&g_v9[i]; if(V==g_v9act) g_v9act=NULL; v9_unbind_video(V); v9_free(V); }
   V->path=path; V->cur=V->dec_cur=V->last_visible=-1; V->used=++g_v9clk;
-  FILE* f=fopen(path,"rb"); if(!f){ LOG("video: cannot open %s\n",path); return V; }
-  fseek(f,0,SEEK_END); long len=ftell(f); fseek(f,0,SEEK_SET);
-  if(len<64 || len>(300l<<20)){ fclose(f); return V; }
-  V->data=malloc((size_t)len); if(!V->data || fread(V->data,1,(size_t)len,f)!=(size_t)len){ fclose(f); free(V->data); V->data=NULL; return V; } fclose(f);
-  V->dlen=(u64)len;
-  V9P S; memset(&S,0,sizeof S); S.V=V; v9_walk(&S,V->data,V->data+V->dlen,0);
-  LOG("video: VP9 file %s: %u frames indexed (track %u)\n",path,V->nfr,(unsigned)S.vtrack);
+  if(!v9_read(V,path)) return V;
+  { const char* m=v9_sub_for(path); V9Vid* S= m? calloc(1,sizeof *S) : NULL;
+    if(S){ S->path=strdup(m); S->cur=S->dec_cur=S->last_visible=-1;
+      if(S->path && v9_read(S,S->path) && S->nfr){ V->sub=S; LOG("video: %s plays the mod's %s (%u frames for the game's %u)\n",path,m,S->nfr,V->nfr); }
+      else { free((void*)S->path); free(S->data); free(S->fr); free(S); } } }
   if(load_start)LOG("vp9 load: %s %.3f ms for %llu bytes\n",path,(plat_ns()-load_start)/1e6,(unsigned long long)V->dlen);
   return V; }
 
@@ -218,6 +227,8 @@ static void v9_keep(const vpx_image_t* im){
 /* decode frame n of the video (decoding from the previous key frame if we are not simply going forward) */
 static int v9_show(V9Vid* V, u32 n){
   if(n>=V->nfr) return 0;
+  if(V->sub){ V9Vid* S=(V9Vid*)V->sub; u32 m=(u32)(((u64)n*S->nfr+V->nfr/2)/V->nfr); if(m>=S->nfr) m=S->nfr-1;   /* the same position in the mod's video */
+    int r=v9_show(S,m); V->cur=V->dec_cur=(int)n; V->used=++g_v9clk; g_v9act=V; return r; }
   /* A partial cache may replay backward requests; forward playback still advances codec references so a later cache hole cannot accumulate decode work. */
   if(v9_cache_enabled()&&((V->dec_cur>=0&&n<=(u32)V->dec_cur)||V->cache_count==V->nfr)&&v9_cache_restore(&V->fr[n])){V->cur=(int)n;V->used=++g_v9clk;g_v9act=V;return 1;}
   u32 from=n;
@@ -275,7 +286,7 @@ static int vp9_job(u32* r, u32 codec){
   if(V && N>=0){
     v9_t_reset=v9_t_dec=v9_t_keep=v9_t_store=0;
     int trace=job_trace,previous=V->dec_cur;u32 decoded=g_vframes;u64 before=trace?plat_ns():0,hits=v9_cache_hits,calls=v9_decoder_calls;
-    int visible=v9_show(V,(u32)N);decoded_surface_save(r,(u64)(uintptr_t)V->path,(u32)N,!visible);
+    int visible=v9_show(V,(u32)N);g_pic_sub=V->sub!=NULL;decoded_surface_save(r,(u64)(uintptr_t)V->path,(u32)N,!visible);
     {static int checked;static FILE*csv;if(!checked){checked=1;const char*e=getenv("SWR_VP9_JOB_CSV");if(e&&*e){csv=fopen(e,"w");if(csv)fprintf(csv,"ns,job,path,previous,requested,bitstream_bytes,packet_bytes,full_match,visible,fed,elapsed_ms\n");}}
       if(csv){V9F*f=&V->fr[N];u8*b=slen?iova_ptr(bs_iova,slen):NULL;int exact=b&&slen==f->size&&!memcmp(b,V->data+f->off,slen);
         fprintf(csv,"%llu,%u,%s,%d,%d,%u,%u,%d,%d,%llu,%.6f\n",(unsigned long long)plat_ns(),njobs,V->path,previous,N,slen,f->size,exact,visible,(unsigned long long)(v9_decoder_calls-calls),(plat_ns()-before)/1e6);if(njobs%60==0)fflush(csv);}}

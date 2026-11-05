@@ -35,6 +35,35 @@ void vp9_note_file(const char* path){
   g_v9_recent[0]=path; pm_unlock(&g_hlk);
   if(getenv("SWR_TRACE_VP9")) LOG("vp9 note: game opened %s\n",path); }
 
+/* Mod videos at another size than the game's (GitHub #31). The game's own decoder is set up for the size it ships with
+   and never starts on a different one (the game then waits forever or calls through NULL). So the game keeps reading
+   its own file (svc_fs.c overlay_scan) and the runtime decodes the mod's file instead, frame for frame by position,
+   scaled into the game's picture (vic_execute) */
+static int webm_walk_size(const u8* p, const u8* e, u32* w, u32* h, int depth){
+  while(p<e && depth<6){
+    u8 b=p[0]; int il=1; u8 m=0x80; while(il<=4 && !(b&m)){ il++; m>>=1; } if(il>4 || p+il>e) return 0;
+    u32 id=0; for(int i=0;i<il;i++) id=(id<<8)|p[i]; p+=il; if(p>=e) return 0;
+    b=p[0]; int sl=1; m=0x80; while(sl<=8 && !(b&m)){ sl++; m>>=1; } if(sl>8 || p+sl>e) return 0;
+    u64 sz=b&(m-1); for(int i=1;i<sl;i++) sz=(sz<<8)|p[i]; p+=sl;
+    const u8* q= sz>(u64)(e-p)? e : p+sz;
+    if(id==0x18538067 || id==0x1654AE6B || id==0xAE || id==0xE0){ if(webm_walk_size(p,q,w,h,depth+1)) return 1; }   /* Segment, Tracks, TrackEntry, Video */
+    else if(id==0xB0 || id==0xBA){ u32 v=0; for(const u8* t=p;t<q;t++) v=(v<<8)|*t; if(id==0xB0) *w=v; else *h=v; if(*w && *h) return 1; }
+    else if(id==0x1F43B675) return 0;   /* first Cluster: no track header before it */
+    p=q; }
+  return 0; }
+int vp9_webm_size(const char* path, u32* w, u32* h){
+  *w=*h=0; FILE* f=fopen(path,"rb"); if(!f) return 0;
+  static u8 buf[65536]; size_t n=fread(buf,1,sizeof buf,f); fclose(f);
+  return webm_walk_size(buf,buf+n,w,h,0); }
+#define V9_SUBS 64
+static struct { char* game; char* mod; } g_v9sub[V9_SUBS];
+void vp9_substitute(const char* game_path, const char* mod_path){
+  for(int i=0;i<V9_SUBS;i++){ if(g_v9sub[i].game && !strcmp(g_v9sub[i].game,game_path)){ free(g_v9sub[i].mod); g_v9sub[i].mod=strdup(mod_path); return; }
+    if(!g_v9sub[i].game){ g_v9sub[i].game=strdup(game_path); g_v9sub[i].mod=strdup(mod_path); return; } } }
+static int g_pic_sub;   /* the last decoded picture is a substitute's */
+static const char* v9_sub_for(const char* game_path){
+  for(int i=0;i<V9_SUBS && g_v9sub[i].game;i++) if(!strcmp(g_v9sub[i].game,game_path)) return g_v9sub[i].mod; return NULL; }
+
 static u32 iova_map(u32 h){
   u64 a=nvmap_addr(h); if(!a) a=nvmap_addr_by_id(h); if(!a) return 0;
   int slot=-1;
@@ -288,6 +317,22 @@ static void vic_block_row(u8*base,const u8*src,u32 bytes,u32 y,u32 pitch,u32 hei
   for(;x<bytes;x+=16){u32 n=bytes-x<16?bytes-x:16;vic_put(base,bl_offset(x,y,0,pitch,height,bh,0),src+x,n,lim);}
 }
 
+/* a picture of another size than the surface (a mod video, #31): bilinear resample of the luma and the interleaved
+   chroma planes to the surface size, so the rest of vic_execute sees a picture of the game's size */
+static void vic_resample(const u8* sy, const u8* suv, u32 fw, u32 fh, u32 sw, u32 sh, u8** oy, u8** ouv){
+  static u8 *ry, *ruv; static u32 cap; u32 need=sw*sh+sw+16; if(cap<need){ free(ry); free(ruv); ry=malloc(need); ruv=malloc(need/2+sw+16); cap= (ry && ruv)? need : 0; }
+  if(!cap){ *oy=NULL; return; }
+  for(u32 y=0;y<sh;y++){ float fyf=((float)y+0.5f)*(float)fh/(float)sh-0.5f; if(fyf<0) fyf=0; u32 y0=(u32)fyf, y1= y0+1<fh? y0+1 : y0; u32 ty=(u32)((fyf-(float)y0)*256.0f);
+    const u8* a=sy+(u64)y0*fw; const u8* b=sy+(u64)y1*fw; u8* d=ry+(u64)y*sw;
+    for(u32 x=0;x<sw;x++){ float fxf=((float)x+0.5f)*(float)fw/(float)sw-0.5f; if(fxf<0) fxf=0; u32 x0=(u32)fxf, x1= x0+1<fw? x0+1 : x0; u32 tx=(u32)((fxf-(float)x0)*256.0f);
+      u32 t=(a[x0]*(256-tx)+a[x1]*tx), u=(b[x0]*(256-tx)+b[x1]*tx); d[x]=(u8)((t*(256-ty)+u*ty+32768)>>16); } }
+  u32 cw=fw/2, ch=fh/2, dw=sw/2, dh=(sh+1)/2; if(!cw || !ch){ *oy=NULL; return; }
+  for(u32 y=0;y<dh;y++){ float fyf=((float)y+0.5f)*(float)ch/(float)dh-0.5f; if(fyf<0) fyf=0; u32 y0=(u32)fyf, y1= y0+1<ch? y0+1 : y0; u32 ty=(u32)((fyf-(float)y0)*256.0f);
+    const u8* a=suv+(u64)y0*fw; const u8* b=suv+(u64)y1*fw; u8* d=ruv+(u64)y*sw;
+    for(u32 x=0;x<dw;x++){ float fxf=((float)x+0.5f)*(float)cw/(float)dw-0.5f; if(fxf<0) fxf=0; u32 x0=(u32)fxf, x1= x0+1<cw? x0+1 : x0; u32 tx=(u32)((fxf-(float)x0)*256.0f);
+      for(int c=0;c<2;c++){ u32 t=(a[2*x0+c]*(256-tx)+a[2*x1+c]*tx), u=(b[2*x0+c]*(256-tx)+b[2*x1+c]*tx); d[2*x+c]=(u8)((t*(256-ty)+u*ty+32768)>>16); } } }
+  *oy=ry; *ouv=ruv; }
+
 static void vic_execute(u32* r){
   if(!g_vframes) return;
   u8*fy=g_fy,*fuv=g_fuv;u32 fw=g_fw,fh=g_fh;
@@ -305,6 +350,9 @@ static void vic_execute(u32* r){
       fprintf(csv,"%llu,%llu,%s,%d,%llu,%s,%d,%llu,%u,%u\n",(unsigned long long)plat_ns(),(unsigned long long)input,picture&&picture->owner?(const char*)(uintptr_t)picture->owner:"",picture?(int)picture->frame:-1,(unsigned long long)(picture?picture->used:0),exact&&exact->owner?(const char*)(uintptr_t)exact->owner:"",exact?(int)exact->frame:-1,(unsigned long long)(exact?exact->used:0),fw,fh);fflush(csv);}}
 
   if(getenv("SWR_VIC_FMT")) fmt=(u32)strtoul(getenv("SWR_VIC_FMT"),0,0);
+  if(cs && fw && fh && (picture? (picture->owner && v9_sub_for((const char*)(uintptr_t)picture->owner)) : g_pic_sub) && sw>=16 && sh>=16 && sw<=4096 && sh<=4096 && (fw>sw+16 || fh>sh+16 || fw+16<sw || fh+16<sh)){   /* a mod video of another size (#31) */
+    u8 *ry=NULL, *ruv=NULL; vic_resample(fy,fuv,fw,fh,sw,sh,&ry,&ruv);
+    if(ry){ { static int said; if(said<2){ said++; LOG("video: picture %ux%u scaled to the game's %ux%u\n",fw,fh,sw,sh); } } fy=ry; fuv=ruv; fw=sw; fh=sh; } }
   u32 w=fw<sw? fw : sw, h=fh<sh? fh : sh;
   if(getenv("SWR_TRACE_VIC")){static u64 seen[128];static u32 ns;u8*dst=iova_ptr(ly,1);u64 key=ly^cfg;int k;for(k=0;k<ns;k++)if(seen[k]==key)break;
     if(k==ns&&ns<128){seen[ns++]=key;u8*all=iova_ptr(cfg_iova,0x610);u32 enabled=0;char slots[700]={0};int used=0;

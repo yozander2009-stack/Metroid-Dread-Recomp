@@ -96,7 +96,13 @@ static void overlay_scan(const char* host, int di){
       int c=find_child_dir(di,nm); if(c<0){ c=add_dir(nm,di); dn[c].next_sib=dn[di].first_child; dn[di].first_child=c; }
       overlay_scan(p,c); }
     else { int f=find_file_in(di,d.name);
-      if(f>=0){ free(fn[f].host); fn[f].host=strdup(p); fn[f].size=d.size; g_mod_replaced++; }
+      if(f>=0){ size_t nl=strlen(d.name); u32 gw=0,gh=0,mw=0,mh=0; extern int vp9_webm_size(const char*,u32*,u32*); extern void vp9_substitute(const char*,const char*);
+        if(nl>5 && !strcmp(d.name+nl-5,".webm") && vp9_webm_size(fn[f].host,&gw,&gh) && vp9_webm_size(p,&mw,&mh) && (gw!=mw || gh!=mh)){
+          /* a video of another size: the game's decoder only takes its own size, so the game keeps its file and the
+             runtime shows the mod's in its place (#31) */
+          vp9_substitute(fn[f].host,p); g_mod_replaced++;
+          LOG("mods: %s is %ux%u, the game's is %ux%u: shown scaled to %ux%u\n",d.name,mw,mh,gw,gh,gw,gh); }
+        else { free(fn[f].host); fn[f].host=strdup(p); fn[f].size=d.size; g_mod_replaced++; } }
       else { f=add_file(d.name,di,d.size,p); fn[f].next_sib=dn[di].first_file; dn[di].first_file=f; g_mod_added++; } } }
   plat_dir_close(&d); }
 static void romfs_apply_mod(const char* root, const char* name){
