@@ -80,7 +80,13 @@ int backend_pad_family(void){
     int t= sdl_gctype? sdl_gctype(i) : 0;
     return t==4||t==3? 2 : t==7? 3 : t==5||t==11||t==12||t==13? 4 : 1; }
   return 0; }
-static i32 dz(i32 v){ return (v>-7000 && v<7000)? 0 : v; }
+/* stick_deadzone (main.c), round, as on Windows: inside it 0, outside rescaled from its edge in the stick's own direction.
+   The old per-axis dead zone was a cross that snapped aiming onto the axes (#40) */
+static void stick_dz(i32* x, i32* y){
+  extern int g_opt_deadzone; float dzv=(float)g_opt_deadzone, fx=(float)*x, fy=(float)*y, m=sqrtf(fx*fx+fy*fy);
+  if(m<=dzv || m<1.0f){ *x=*y=0; return; }
+  float out=(m-dzv)/(32767.0f-dzv); if(out>1.0f) out=1.0f;
+  float k=out*32767.0f/m; *x=(i32)lrintf(fx*k); *y=(i32)lrintf(fy*k); }
 
 static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   if(!sdl.Init) return;
@@ -99,7 +105,8 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   /* SDL's Y axes point down, the Switch's up */
   i32 x=sdl.Axis(g,0), y=-(i32)sdl.Axis(g,1), x2=sdl.Axis(g,2), y2=-(i32)sdl.Axis(g,3);
   if(y>32767) y=32767; if(y2>32767) y2=32767;
-  if(!*lx && !*ly){ *lx=dz(x); *ly=dz(y); } if(!*rx && !*ry){ *rx=dz(x2); *ry=dz(y2); }
+  stick_dz(&x,&y); stick_dz(&x2,&y2);
+  if(!*lx && !*ly){ *lx=x; *ly=y; } if(!*rx && !*ry){ *rx=x2; *ry=y2; }
   if(sdl_rumble){ /* rumble (svc_hid.c hid_rumble_get): on a change, else refreshed every 100 ms; on a Steam Deck
                      Steam Input passes it to the haptics */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
