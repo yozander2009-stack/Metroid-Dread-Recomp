@@ -124,7 +124,7 @@ static void apply_env(const IniFile& ini) {
     if (!getenv("SWR_FE_TEST")) for (auto& d : drop) env(d.c_str(), false);
     env("SWR_SYNC_SHADERS", ini.get("wait_for_shaders", "1") == "1");
     env("SWR_LOADING_60", ini.get("loading_60fps", "1") == "1");
-    env("SWR_CUTSCENES_60FPS", ini.get("cutscenes_60fps", "0") == "1");
+    env("SWR_CUTSCENES_60FPS", ini.get("cutscenes_60fps", "1") == "1");
     env("SWR_SKIP_CUTSCENES", ini.get("skip_cutscenes", "0") == "1");
 }
 
@@ -968,6 +968,8 @@ static void fe_prepare() {
     g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
     // pt-BR (17) is the menu's Portuguese (9): the fan translation applies with either (svc_fs.c), the list shows 9
     { std::string l = g_ini.get("language", ""); if (l == "17") { set("language", "9"); g_ini.save(); g_ini_dirty = false; } }
+    // once: cutscenes at the frame-rate limit and fast loading became the defaults (older versions wrote both as 0)
+    if (g_ini.get("scene_defaults", "") == "") { set("cutscenes_60fps", "1"); set("fast_loading", "1"); set("scene_defaults", "1"); g_ini.save(); g_ini_dirty = false; }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
     GameCheck gc = check_installed(); g_page = (gc.code_ok && gc.data_ok) ? PG_PLAY : PG_SETUP; g_first_install = !gc.code_ok;

@@ -466,7 +466,7 @@ static const IniOpt INI_AUDIO[]={
 static const IniOpt INI_LAUNCHER[]={
   {"wait_for_shaders","1","1 = wait for new shaders before drawing (no missing objects, a short stutter the first time);\n;   0 = compile them in the background (no stutter, objects can pop in). Applies on the next start"},
   {"loading_60fps","1","1 = draw elevator, train and loading screens at 60 FPS (the game draws them at 30)"},
-  {"cutscenes_60fps","0","1 = 60 FPS cutscenes (port of theboy181's 60fps patch for Dread v2.1.0)"},
+  {"cutscenes_60fps","1","1 = cutscenes at the frame-rate limit (port of theboy181's 60fps patch for Dread v2.1.0);\n;   0 = the game's own 30 FPS"},
   {"skip_launcher","0","1 = start the game directly, without the Play screen"},
   {"menu_shortcut","home","Controller button that opens the in-game menu (F1 on the keyboard always works):\n;   home = Home / Guide / PS button, minus_plus = - and + together, l3_r3 = both stick clicks held 1 second"},
   {"launcher_nav","1","1 = navigate the Play screen and menus with a controller"},
@@ -891,7 +891,7 @@ int swr_main(int argc, char** argv){
 #if !defined(_WIN32)
   { /* no Play screen here (Linux; on Windows the Play screen sets them, or the old Python launcher does): the [Launcher] choices the game reads as switches, as fe.cpp sets them on Windows.
        A switch already in the environment (tests, a launch script) is left as it is */
-    static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"},{"loading_60fps","SWR_LOADING_60","1"},{"cutscenes_60fps","SWR_CUTSCENES_60FPS","0"}};
+    static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"},{"loading_60fps","SWR_LOADING_60","1"},{"cutscenes_60fps","SWR_CUTSCENES_60FPS","1"}};
     if(!getenv("SWR_TEST_SCRIPT") && !getenv("SWR_TEST_EXIT_FRAME"))
       for(int i=0;i<3;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
 #endif
