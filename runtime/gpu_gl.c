@@ -1213,6 +1213,7 @@ static Tex* rt_vol(Tex* t, u32 dep, int is3d){
   return v; }
 /* current g_fbo attachments; skip reattaching if unchanged, every change makes the driver revalidate */
 static GLuint g_fb_sig[10]; static int g_fb_lay[8]; static int g_fb_sig_ok; static u64 st_fb_skip; static int g_clear_layer=-1;
+static void gp_mark_rt(void); static void gp_mark(const char* what);   /* GPU time per pass (SWR_GL_GPU_PROF=1) */
 
 static void bind_framebuffer(GpuChannel* ch){
   u32* r=ch->r3d;
@@ -1243,6 +1244,7 @@ static void bind_framebuffer(GpuChannel* ch){
   GLenum att= g_zt? (g_zt->f.fmt==GL_DEPTH_STENCIL? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT) : GL_DEPTH_STENCIL_ATTACHMENT;
   sig[8]= g_zt? g_zt->id : 0; sig[9]=att;
   if(g_fb_sig_ok && !memcmp(sig,g_fb_sig,sizeof sig) && !memcmp(lay,g_fb_lay,sizeof lay)){ st_fb_skip++; return; }
+  gp_mark_rt();
   g_tmap_gen++;
   GLenum bufs[8];
   for(u32 i=0;i<8;i++){ if(!g_fb_sig_ok || g_fb_sig[i]!=sig[i] || g_fb_lay[i]!=lay[i]){
@@ -1832,6 +1834,54 @@ static void e_tf(void* p){   /* on the GL thread, where the driver hands out the
 static void dmv_tf(int begin){   /* begin/end transform feedback: not in the queue's table, a custom entry on the GL thread */
   if(!glq_active()){ e_tf(&begin); return; }
   int* q=(int*)glq_alloc(sizeof(int),0,e_tf); *q=begin; glq_commit(); }
+/* ---- GPU time per pass (test: SWR_GL_GPU_PROF=1). A GL timestamp at every render-target change and at our own passes,
+   read back 3 frames later on the GL thread; the time between two stamps goes to the pass that started at the first.
+   Every 300 frames: the passes that take the most GPU time per frame. Off: nothing is queued */
+#define GP_Q 768
+#define GP_LAB 256
+typedef void (APIENTRY* PFN_GQ)(GLsizei, GLuint*); typedef void (APIENTRY* PFN_QC)(GLuint, GLenum);
+typedef void (APIENTRY* PFN_QOU64)(GLuint, GLenum, unsigned long long*); typedef void (APIENTRY* PFN_QOI)(GLuint, GLenum, GLint*);
+static struct { int on; char lab[GP_LAB][48]; int nlab; u32 slot, pos; } g_gp;          /* GPU-submit thread */
+static struct { PFN_GQ gen; PFN_QC qc; PFN_QOU64 get; PFN_QOI geti; GLuint q[4][GP_Q]; u16 lab[4][GP_Q]; u32 n[4];
+  double ns[GP_LAB]; double frame_ns; u32 frames, cnt[GP_LAB]; int ok; } g_gpg;                /* GL thread */
+static int gp_on(void){ if(!g_gp.on){ const char* e=getenv("SWR_GL_GPU_PROF"); g_gp.on= e&&e[0]=='1'? 1 : -1; } return g_gp.on>0; }
+typedef struct { u32 slot, pos, lab, end; } GpEntry;
+static void e_gp(void* p){   /* GL thread: a stamp, or the end of a frame (read the frame 3 back) */
+  GpEntry* e=(GpEntry*)p;
+  if(!g_gpg.ok){ g_gpg.gen=(PFN_GQ)backend_gl_proc("glGenQueries"); g_gpg.qc=(PFN_QC)backend_gl_proc("glQueryCounter");
+    g_gpg.get=(PFN_QOU64)backend_gl_proc("glGetQueryObjectui64v"); g_gpg.geti=(PFN_QOI)backend_gl_proc("glGetQueryObjectiv");
+    if(!g_gpg.gen || !g_gpg.qc || !g_gpg.get || !g_gpg.geti){ g_gpg.ok=-1; LOG("gpu prof: no timer queries\n"); return; }
+    for(int s=0;s<4;s++) g_gpg.gen(GP_Q,g_gpg.q[s]); g_gpg.ok=1; }
+  if(g_gpg.ok<0) return;
+  if(e->pos<GP_Q){ g_gpg.qc(g_gpg.q[e->slot][e->pos],0x8E28 /* GL_TIMESTAMP */); g_gpg.lab[e->slot][e->pos]=(u16)e->lab; g_gpg.n[e->slot]=e->pos+1; }
+  if(!e->end) return;
+  u32 rs=(e->slot+1)&3, n=g_gpg.n[rs]; if(n<2) return;   /* the oldest of the 4: 3 frames back */
+  GLint av=0; g_gpg.geti(g_gpg.q[rs][n-1],0x8867 /* GL_QUERY_RESULT_AVAILABLE */,&av); if(!av) return;
+  unsigned long long t0=0, a=0, b=0; g_gpg.get(g_gpg.q[rs][0],0x8866 /* GL_QUERY_RESULT */,&t0); a=t0;
+  for(u32 i=1;i<n;i++){ g_gpg.get(g_gpg.q[rs][i],0x8866,&b); u16 l=g_gpg.lab[rs][i-1]; if(b>a){ g_gpg.ns[l]+=(double)(b-a); g_gpg.cnt[l]++; } a=b; }
+  g_gpg.frame_ns+=(double)(a-t0); g_gpg.n[rs]=0;
+  if(++g_gpg.frames>=300){ int idx[GP_LAB]; int nl=g_gp.nlab; for(int i=0;i<nl;i++) idx[i]=i;
+    for(int i=0;i<nl;i++) for(int j=i+1;j<nl;j++) if(g_gpg.ns[idx[j]]>g_gpg.ns[idx[i]]){ int t=idx[i]; idx[i]=idx[j]; idx[j]=t; }
+    LOG("gpu prof: %.2f ms GPU per frame (stamped span), top passes per frame:\n",g_gpg.frame_ns/1e6/g_gpg.frames);
+    for(int i=0;i<nl && i<18;i++){ int l=idx[i]; if(g_gpg.ns[l]<=0) break;
+      LOG("   %6.3f ms  %5.1f%%  x%-4.1f  %s\n",g_gpg.ns[l]/1e6/g_gpg.frames,100.0*g_gpg.ns[l]/(g_gpg.frame_ns>0? g_gpg.frame_ns : 1),(double)g_gpg.cnt[l]/g_gpg.frames,g_gp.lab[l]); }
+    memset(g_gpg.ns,0,sizeof g_gpg.ns); memset(g_gpg.cnt,0,sizeof g_gpg.cnt); g_gpg.frame_ns=0; g_gpg.frames=0; } }
+static int gp_label(const char* s){ for(int i=0;i<g_gp.nlab;i++) if(!strcmp(g_gp.lab[i],s)) return i;
+  if(g_gp.nlab>=GP_LAB-1){ if(!g_gp.lab[GP_LAB-1][0]) snprintf(g_gp.lab[GP_LAB-1],48,"(other)"); return GP_LAB-1; }
+  snprintf(g_gp.lab[g_gp.nlab],48,"%s",s); return g_gp.nlab++; }
+static void gp_push(int lab, int end){
+  if(!glq_active()) return;
+  GpEntry* q=(GpEntry*)glq_alloc(sizeof(GpEntry),0,e_gp); q->slot=g_gp.slot; q->pos=g_gp.pos++; q->lab=(u32)lab; q->end=end; glq_commit();
+  if(end){ g_gp.slot=(g_gp.slot+1)&3; g_gp.pos=0; } }
+static void gp_mark(const char* what){ if(gp_on()) gp_push(gp_label(what),0); }
+static void gp_mark_rt(void){   /* a new render target: label by its size, format and address */
+  if(!gp_on()) return;
+  char s[48]; Tex* t= g_nrt? g_rt[0] : NULL;
+  if(t) snprintf(s,sizeof s,"rt %ux%u f%x %s @%05llx",RW(t),RH(t),t->fkey&0xFFFF,g_zt? "+z" : "",(unsigned long long)(t->gva>>12)&0xFFFFF);
+  else if(g_zt) snprintf(s,sizeof s,"depth only %ux%u @%05llx",RW(g_zt),RH(g_zt),(unsigned long long)(g_zt->gva>>12)&0xFFFFF);
+  else snprintf(s,sizeof s,"no target");
+  gp_push(gp_label(s),0); }
+static void gp_frame(void){ if(gp_on()) gp_push(gp_label("present / between frames"),1); }
 static float halton(u32 i, u32 b){ float f=1, r=0; for(;i;i/=b){ f/=(float)b; r+=f*(float)(i%b); } return r; }
 static int dlg_scene_draw(void){ return dlg_aa() &&!g_dmv.failed && g_dlg.chosen && !g_dlg.done && g_zt && g_zt->gva==g_dlg.chosen_z; }
 /* r3d_draw_gl, before apply_state: this draw's jitter */
@@ -1958,7 +2008,7 @@ static const char* TAA_FS="#version 430 core\n"
   "    vec3 h=clamp(ycc(hs(uv)),m1-1.25*sd,m1+1.25*sd); o=mix(rgb(h),c0,info.z); }\n"
   "  o=clamp(o,vec3(0.0),vec3(0.999));   /* the clip box in YCoCg can reach outside RGB */\n"
   "  oh=vec4(o,1.0); oc=vec4(itm(o),1.0); }\n";
-static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
+static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){ gp_mark("ours: TAA");
   if(g_dmv.failed){ g_taa_failed=1; LOG("taa (OpenGL): no motion vectors on this driver: TAA off\n"); return 0; }
   if(!g_taa.prog){
     char err[1024]; err[0]=0; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,TAA_FS,err,sizeof err) : 0;
@@ -2104,7 +2154,7 @@ static void ao_tex(GLuint* t, GLenum f, u32 w, u32 h, int levels){
   glGenTextures(1,t); glBindTexture(GL_TEXTURE_2D,*t); glTexStorage2D(GL_TEXTURE_2D,levels,f,(GLsizei)w,(GLsizei)h);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,levels>1? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE); }
-static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){
+static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
   if(!g_proj.ok){ static int said; if(!said){ said=1; LOG("ao: no camera projection found yet: AO waits\n"); } return 0; }
   if(z->target!=GL_TEXTURE_2D) return 0;
   if(!g_ao.pre){
@@ -2202,7 +2252,11 @@ static void dlg_frame(void){
    linear blit, at most 2:1. SWR_NO_RT_PREFILTER=1 turns it off */
 static u64 st_prefilter;
 static int g_pf_blit;   /* a blit used the framebuffers and the scissor: bind_textures' caller sets its draw's state again */
-static GLuint rt_prefiltered(Tex* t){
+static GLuint rt_prefiltered_(Tex* t);
+static GLuint rt_prefiltered(Tex* t){   /* GPU profile: its copies and blits as their own pass, then the game's pass again */
+  if(!gp_on()) return rt_prefiltered_(t);
+  gp_mark("ours: light filter (prefilter)"); GLuint r=rt_prefiltered_(t); gp_mark_rt(); return r; }
+static GLuint rt_prefiltered_(Tex* t){
   int lv=0; for(float k=2.0f; k<=g_scale+0.01f; k*=2.0f) lv++;
   int frac= g_scale>(float)(1<<lv)*1.01f;
   if(!lv && !frac) return 0;
@@ -2863,7 +2917,9 @@ static const char* DOWN_FS="#version 430 core\nin vec2 uv; out vec4 o; layout(bi
   "vec3 cas(vec3 c,vec3 n,vec3 s,vec3 e,vec3 w,float k){ vec3 mn=min(c,min(min(n,s),min(e,w))), mx=max(c,max(max(n,s),max(e,w)));\n"
   " vec3 a=sqrt(clamp(min(mn,1.0-mx)/max(mx,vec3(1e-4)),0.0,1.0)); vec3 wt=-a*mix(0.125,0.2,k); return clamp((c+(n+s+e+w)*wt)/(1.0+4.0*wt),0.0,1.0); }\n"
   "vec3 pick(vec2 p){ vec2 r=px.xy*vec2(textureSize(t,0)); if(max(r.x,r.y)<=1.05) return texture(t,p).rgb;\n"
-  " vec3 c=vec3(0.0); for(int j=0;j<4;j++) for(int i=0;i<4;i++) c+=texture(t,p+((vec2(i,j)+0.5)*0.25-0.5)*px.xy).rgb; return c*(1.0/16.0); }\n"
+  " vec3 c=vec3(0.0);\n"
+  " if(max(r.x,r.y)<=2.05){ for(int j=0;j<2;j++) for(int i=0;i<2;i++) c+=texture(t,p+((vec2(i,j)+0.5)*0.5-0.5)*px.xy).rgb; return c*0.25; }   /* up to 2:1, 4 bilinear taps cover it */\n"
+  " for(int j=0;j<4;j++) for(int i=0;i<4;i++) c+=texture(t,p+((vec2(i,j)+0.5)*0.25-0.5)*px.xy).rgb; return c*(1.0/16.0); }\n"
   "void main(){ vec2 r=px.xy*vec2(textureSize(t,0)); bool one=max(r.x,r.y)<=1.05;\n"
   " vec3 c= one&&px.z>0.5? fxaa(uv) : pick(uv);\n"
   " if(px.w>0.0){ vec2 d=one? 1.0/vec2(textureSize(t,0)) : px.xy;\n"
@@ -3054,7 +3110,7 @@ static void shot8_capture(GLuint tex, const float* xf, int tw, int th){
   g_s8_sync=p_s8fs(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush(); }
 
 /* blit a texture to the window, 16:9 letterboxed. xf = uv transform (crop/flip) */
-static void screen_quad(GLuint tex, const float* xf, int tw, int th){
+static void screen_quad(GLuint tex, const float* xf, int tw, int th){ gp_mark("ours: final pass (scale, FXAA, sharpen)");
   int ww,wh; backend_window_size(&ww,&wh);
   glBindFramebuffer(GL_FRAMEBUFFER,0); glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST);
   glDisable(GL_FRAMEBUFFER_SRGB);
@@ -3068,7 +3124,7 @@ static void screen_quad(GLuint tex, const float* xf, int tw, int th){
   { static const GLint idm[4]={GL_RED,GL_GREEN,GL_BLUE,GL_ALPHA}; glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_RGBA,idm); }
   if(g_down_prog){ glUniform4fv(g_down_xf,1,xf); float pxv[4]={ fabsf_(xf[2])/(float)(dw>0? dw : 1), fabsf_(xf[3])/(float)(dh>0? dh : 1), g_opt_aa? 1.0f : 0.0f, swr_sharp()>0? (float)swr_sharp()/100.0f : 0.0f }; glUniform4fv(g_down_px,1,pxv); }
   else { static GLint xl=-2; static GLuint xp; if(xl==-2 || xp!=g_blit_prog){ xl=glGetUniformLocation(g_blit_prog,"xf"); xp=g_blit_prog; } glUniform4fv(xl,1,xf); }
-  glBindVertexArray(g_scratch_vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  glBindVertexArray(g_scratch_vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4); gp_mark("present (swap and waits)");
   { /* test only: SWR_TEST_BACKBUFFER=frame,frame,...:prefix writes the window's back buffer (what goes on screen,
        after the window pass) as prefix<frame>.ppm. Desktop grabs need the game in front; this does not */
     static int cfg; static const char* list; static char pre[512]; extern int g_frames; static int last=-1;
@@ -3680,7 +3736,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       case WK_SUBMIT: g_submit_epoch++; ww_poll(); { extern volatile u64 g_gpu_sub_ns; static u32 fr=~0u; if(fr!=g_frame || !g_gpu_sub_ns){ fr=g_frame; g_gpu_sub_ns=w.sub_ns; } }   /* stamp the whole frame with the time of its first submit */ gpu_submit_now(w.ent,w.n,w.syncpt); cs_kick_async(); free(w.ent); cs_submit_done(w.syncpt,w.incs); break;
       case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_PRESENT_ADDR: if(!present_addr(w.addr,w.w,w.h)){ extern void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
-          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; dlg_frame(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; dlg_frame(); gp_frame(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_SYNC: pm_lock(&g_ql);__atomic_store_n(w.done,1,__ATOMIC_RELEASE);pc_broadcast(&g_frame_consumed_cv);pm_unlock(&g_ql);break;
       case WK_DUMP: dump_rts(); g_tr_arm=1; break;
       case WK_SHOT: do_screenshot(w.path[0]? w.path : NULL); __atomic_store_n(&g_shot_done,w.n,__ATOMIC_SEQ_CST); break;

@@ -772,8 +772,11 @@ static void swr_svc_(CPU* c, u32 imm){
        Matched by return address (F_80860B0 tail-calls, so the caller's return address is in x30 or the first frames). */
     { extern int g_opt_fast_load; static int env=-1; if(env<0){ const char* e=getenv("SWR_FAST_LOADING"); env= e&&e[0]? e[0]=='1' : -2; }
       int on= env==-2? g_opt_fast_load : env;
-#if !defined(_WIN32)   /* Steam Deck: with it the boot video stalled 8 of 8 times (2026-11-05, cause not found): off on Linux */
-      if(on && env!=1){ static int said; if(!said){ said=1; LOG("fast loading: not on Linux yet (the boot video stalled with it on the Steam Deck)\n"); } on=0; }
+#if !defined(_WIN32)   /* Steam Deck: on from boot, the intro video stalled 8 of 8 times (2026-11-05, cause not found). It
+                          only shortens loads once a save has been loaded (room loads, death and reload) */
+      if(on && env!=1 && ns==60000000){ extern int swr_scenario_seen(void);
+        if(!swr_scenario_seen()) on=0;
+        else { static int said; if(!said){ said=1; LOG("fast loading: on from here (on Linux it waits until a save is loaded)\n"); } } }
 #endif
       if(on && ns==60000000){ static const u64 sites[3]={0x821E1F4ull,0x81D6F04ull,0x821E908ull}; int hit=0;
         u64 ra=x[30], fp=x[29];
@@ -781,6 +784,16 @@ static void swr_svc_(CPU* c, u32 imm){
           if(hit || !fp) break; MemBlock b; mem_query(fp,&b); if(!(b.perm&PERM_R) || fp<b.addr || fp+16>b.addr+b.size) break;
           ra=gr64(fp+8); u64 nfp=gr64(fp); if(nfp<=fp) break; fp=nfp; }
         if(hit){ static u64 n; if(!n++) LOG("fast loading: the game's fixed 60 ms load pauses are shortened to 1 ms\n"); ns=1000000; } } }
+    /* loading screens at the frame cap: with loading_60fps on, the loading-screen render loop (F_81CCD80; elevators,
+       trains, area loads) sleeps 16 ms a frame (the code_014.c patch). Above a 60 FPS cap that sleep lasts one frame at the
+       cap instead, so loading screens run at the cap too (the pacing guard's lower rate when particles pile up included:
+       g_pace_fps). Matched by return address like fast loading. SWR_NO_LOADING_AT_CAP=1 = 60 */
+    if(ns==16000000){ extern volatile int g_pace_fps; static int off=-1; if(off<0) off=getenv("SWR_NO_LOADING_AT_CAP")!=NULL;
+      int fps=g_pace_fps; if(!off && fps>60){ int hit=0; u64 ra=x[30], fp=x[29];
+        for(int k=0;k<4 && !hit;k++){ if(ra==0x81CCE30ull) hit=1;
+          if(hit || !fp) break; MemBlock b; mem_query(fp,&b); if(!(b.perm&PERM_R) || fp<b.addr || fp+16>b.addr+b.size) break;
+          ra=gr64(fp+8); u64 nfp=gr64(fp); if(nfp<=fp) break; fp=nfp; }
+        if(hit){ static u64 n; if(!n++) LOG("loading screens: at the frame cap (%d FPS)\n",fps); ns=1000000000ll/fps; } } }
     if(ns<=0)plat_yield();else plat_sleep_ns(ns);
     trace_main_call(t,c,imm,x[30],wait_start,(u64)ns);
     if(t->is_main&&x[30]==0x82252bcull){__atomic_add_fetch(&g_guest_poll_ns,plat_ns()-wait_start,__ATOMIC_RELAXED);__atomic_add_fetch(&g_guest_poll_calls,1,__ATOMIC_RELAXED);}

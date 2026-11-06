@@ -127,6 +127,16 @@ void hid_rumble_get(float* lo, float* hi){
   *lo= l>1? 1 : l; *hi= h>1? 1 : h;
   { static int said; if(!said && (*lo>0 || *hi>0)){ said=1; LOG("input: first rumble to the pad (%.2f low / %.2f high)\n",*lo,*hi); } } }
 
+/* HD rumble (rumble_hd.c): player 1's left and right {low amp, low Hz, high amp, high Hz} as the game sent them, the
+   strength setting applied, a side not refreshed for 200 ms silent. 1 = something plays */
+int hid_rumble_hd(float v[2][4]){
+  u64 now=plat_ns(); float s= g_opt_rumble>0? g_opt_rumble/100.0f : 0; int on=0;
+  for(int d=0;d<2;d++){ int p= g_vib_ns[8][d]>g_vib_ns[0][d]? 8 : 0;
+    if(!g_vib_ns[p][d] || now-g_vib_ns[p][d]>200000000ull){ v[d][0]=v[d][2]=0; v[d][1]=160; v[d][3]=320; continue; }
+    for(int i=0;i<4;i++) v[d][i]=g_vib[p][d][i];
+    v[d][0]*=s; v[d][2]*=s; if(v[d][0]>0.001f || v[d][2]>0.001f) on=1; }
+  return on; }
+
 static int hid_disp(SvcObj* o, IpcCtx* c){
   switch(c->cmd){
     case 0: out_obj(c,svcobj_new("IAppletResource",hid_applet_res,0)); return 0;

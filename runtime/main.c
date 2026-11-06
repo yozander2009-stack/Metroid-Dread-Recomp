@@ -329,6 +329,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"button_icons")) snprintf(g_opt_button_icons,sizeof g_opt_button_icons,"%s",v);
     else if(!strcmp(k,"controller_api")) g_opt_ctrl_api= !strcmp(v,"sdl")? 1 : !strcmp(v,"xinput")? 2 : 0;
     else if(!strcmp(k,"controller_index")){ g_opt_ctrl_index=atoi(v); if(g_opt_ctrl_index<0) g_opt_ctrl_index=0; }
+    else if(!strcmp(k,"hd_rumble")){ extern int g_opt_hd_rumble; g_opt_hd_rumble=atoi(v)!=0; }   /* rumble_hd.c */
     else if(!strcmp(k,"rumble")){ extern int g_opt_rumble; g_opt_rumble=atoi(v); if(g_opt_rumble<0) g_opt_rumble=0; if(g_opt_rumble>200) g_opt_rumble=200; }   /* svc_hid.c */
     else if(!strcmp(k,"stick_deadzone")){ g_opt_deadzone=atoi(v); if(g_opt_deadzone<0) g_opt_deadzone=0; if(g_opt_deadzone>30000) g_opt_deadzone=30000; }
     else if(!strcmp(k,"language")) g_opt_lang=atoi(v);
@@ -464,6 +465,7 @@ static const IniOpt INI_INPUT[]={
   {"controller_index","0","0 = first connected controller, 1.. = that controller (in connection order) is player 1"},
   {"stick_deadzone","7000","stick dead zone (0..30000, out of 32767)"},
   {"rumble","100","controller rumble strength in percent (0 = off, up to 200): the game's HD rumble on the pad's two motors"},
+  {"hd_rumble","1","1 = HD rumble on Nintendo controllers (Switch Pro Controller, Joy-Con): the game's own vibration frequencies,\n;   left and right (needs SDL2 2.0.18+). Other pads always use their two motors"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_AUDIO[]={
   {"volume","100","Master volume in percent (0-200, applies live)"},
@@ -853,6 +855,14 @@ u64 swr_menu_buttons(u64 b){
     if(menu!=active){ active=menu; static int said; if(said<4){ said++; LOG("input: menu buttons %s\n",menu? "swapped (menu)" : "as in the game"); } } }
   if(active) b=(b&~3ull)|((b&1)<<1)|((b>>1)&1);
   return b; }
+
+/* a save has been loaded at least once this run (game object +0x220, the scenario, is 0 at boot, the title and file
+   select). Linux fast loading waits for it: with it on from boot the intro video stalled on the Steam Deck */
+int swr_scenario_seen(void){
+  static volatile int seen;
+  if(!seen){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
+    if(o && o<(1ull<<40) && *(volatile u64*)GP(o+0x220)!=0) seen=1; }
+  return seen; }
 
 void services_init(void){
   extern void svc_core_init(void), svc_hid_init(void), svc_fs_init(void), svc_vi_init(void), svc_pl_init(void), svc_launcher_init(void);

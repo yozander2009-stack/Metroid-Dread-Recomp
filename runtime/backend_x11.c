@@ -56,6 +56,9 @@ static SDLGC* g_pad_gc; static u64 g_pad_scan;
 static int (*sdl_rumble)(SDLGC*, u16, u16, u32);
 
 static int (*sdl_gctype)(int);   /* SDL_GameControllerTypeForIndex, SDL 2.0.12+ (optional) */
+static int (*sdl_gcgettype)(SDLGC*);   /* SDL_GameControllerGetType (optional): HD rumble skips SDL rumble on Nintendo pads */
+static void* g_sdl_h;
+static void* sdl_sym(const char* n){ return g_sdl_h? dlsym(g_sdl_h,n) : NULL; }   /* rumble_hd.c */
 static void sdl_load(void){
   static int done; if(done) return; done=1;   /* also called early by backend_pad_family */
   void* h=dlopen("libSDL2-2.0.so.0",RTLD_NOW|RTLD_LOCAL); if(!h) h=dlopen("libSDL2.so",RTLD_NOW|RTLD_LOCAL);
@@ -67,6 +70,8 @@ static void sdl_load(void){
   for(int i=0;i<11;i++){ *f[i]=dlsym(h,n[i]); if(!*f[i]){ memset(&sdl,0,sizeof sdl); return; } }
   *(void**)&sdl_rumble=dlsym(h,"SDL_GameControllerRumble");   /* SDL 2.0.9+; optional */
   *(void**)&sdl_gctype=dlsym(h,"SDL_GameControllerTypeForIndex");
+  *(void**)&sdl_gcgettype=dlsym(h,"SDL_GameControllerGetType"); g_sdl_h=h;
+  { extern void hd_rumble_selftest(void); hd_rumble_selftest(); }
   /* buttons by position like on Windows, also for Nintendo controllers that SDL would map by label */
   sdl.SetHint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS","0");
   sdl.SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS","1");
@@ -112,6 +117,9 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
                      Steam Input passes it to the haptics */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
     static u16 plo=1, phi=1; static u64 last; u64 now=plat_ns(); u16 ulo=(u16)(lo*65535.0f), uhi=(u16)(hi*65535.0f);
+    { extern int hd_rumble_open(void* (*)(const char*)); extern void hd_rumble_send(void); extern int hd_rumble_active(void);
+      hd_rumble_open(sdl_sym); hd_rumble_send();   /* Nintendo pads: HD rumble (rumble_hd.c) */
+      int t= sdl_gcgettype? sdl_gcgettype(g) : 0; if(hd_rumble_active() && (t==5||t==11||t==12||t==13)) return; }
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now; sdl_rumble(g,ulo,uhi,ulo||uhi? 250 : 0); } }
 }
 

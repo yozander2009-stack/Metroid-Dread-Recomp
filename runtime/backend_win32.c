@@ -79,6 +79,9 @@ static void (*sdl_pump)(void);
 static int (*sdl_gcrumble)(SDLGC,unsigned short,unsigned short,unsigned);
 static int sdl_ok; static SDLGC sdl_pad[8]; static int sdl_npad; static u64 sdl_rescan;
 static int (*sdl_gctype)(int);   /* SDL_GameControllerTypeForIndex, SDL 2.0.12+ (optional) */
+static int (*sdl_gcgettype)(SDLGC);   /* SDL_GameControllerGetType (optional): HD rumble skips SDL rumble on Nintendo pads */
+static HMODULE g_sdl_h;
+static void* sdl_sym(const char* n){ return g_sdl_h? (void*)GetProcAddress(g_sdl_h,n) : NULL; }   /* rumble_hd.c */
 static void sdl_load(void){
   static int done; if(done) return; done=1;   /* also called early by backend_pad_family */
   extern int g_opt_ctrl_api; if(g_opt_ctrl_api==2) return;
@@ -93,6 +96,8 @@ static void sdl_load(void){
 #undef SDLF
   *(FARPROC*)&sdl_gcrumble=GetProcAddress(h,"SDL_GameControllerRumble");
   *(FARPROC*)&sdl_gctype=GetProcAddress(h,"SDL_GameControllerTypeForIndex");   /* SDL 2.0.9+; optional: no rumble without it */
+  *(FARPROC*)&sdl_gcgettype=GetProcAddress(h,"SDL_GameControllerGetType"); g_sdl_h=h;
+  { extern void hd_rumble_selftest(void); hd_rumble_selftest(); }
   sdl_sethint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS","0");   /* positions, not printed labels */
   sdl_sethint("SDL_JOYSTICK_HIDAPI_PS4","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_PS5","1");
   /* PS4/PS5 pads rumble over Bluetooth only with these (SDL2 keeps their simple report mode otherwise): a DualSense
@@ -613,12 +618,18 @@ void video_poll(void){
   { /* rumble (svc_hid.c hid_rumble_get) to the pads input comes from: on a change, else refreshed every 100 ms
        (SDL's rumble runs for the duration given, so it stops by itself when the game stops sending) */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
+    { extern int hd_rumble_open(void* (*)(const char*)); extern void hd_rumble_send(void);   /* Nintendo pads: HD rumble */
+      if(sdl_ok && sdl_npad>0) hd_rumble_open(sdl_sym);
+      hd_rumble_send(); }
     static unsigned short plo=1, phi=1; static u64 last; u64 now=plat_ns();
     unsigned short ulo=(unsigned short)(lo*65535.0f), uhi=(unsigned short)(hi*65535.0f);
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now;
       extern int g_opt_ctrl_index;
+      extern int hd_rumble_active(void);
       if(sdl_ok && sdl_gcrumble){ int first= g_opt_ctrl_index>0? g_opt_ctrl_index-1 : 0, lastp= g_opt_ctrl_index>0? g_opt_ctrl_index : sdl_npad;
-        for(int i=first;i<lastp && i<sdl_npad;i++) sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); }
+        for(int i=first;i<lastp && i<sdl_npad;i++){ int t= sdl_gcgettype? sdl_gcgettype(sdl_pad[i]) : 0;
+          if(hd_rumble_active() && (t==5||t==11||t==12||t==13)) continue;   /* a Nintendo pad: HD rumble (rumble_hd.c) plays it */
+          sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); } }
       if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); } } }
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
@@ -649,7 +660,7 @@ void frontend_frame(void){
     }
 
     {static int changed;const char*target=getenv("SWR_TEST_FPS_AFTER_LOAD");
-      if(target&&!changed&&g_frames>=2300){int fps=atoi(target);if(fps!=0&&fps!=60&&fps!=120&&fps!=240){WARN("test FPS: invalid target\n");ExitProcess(2);}
+      if(target&&!changed&&g_frames>=2300){int fps=atoi(target);if(fps<0||(fps>0&&fps<30)||fps>360){WARN("test FPS: invalid target\n");ExitProcess(2);}
         changed=1;g_opt_fps=fps;LOG("test FPS: selected=%d frame=%d ns=%llu\n",fps,g_frames,(unsigned long long)plat_ns());
       }
     }
