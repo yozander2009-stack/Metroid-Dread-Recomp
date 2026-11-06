@@ -330,6 +330,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"controller_api")) g_opt_ctrl_api= !strcmp(v,"sdl")? 1 : !strcmp(v,"xinput")? 2 : 0;
     else if(!strcmp(k,"controller_index")){ g_opt_ctrl_index=atoi(v); if(g_opt_ctrl_index<0) g_opt_ctrl_index=0; }
     else if(!strcmp(k,"hd_rumble")){ extern int g_opt_hd_rumble; g_opt_hd_rumble=atoi(v)!=0; }   /* rumble_hd.c */
+    else if(!strcmp(k,"deck_trackpad_rumble")){ extern int g_opt_deck_pads; g_opt_deck_pads=atoi(v)!=0; }   /* rumble_hd.c */
     else if(!strcmp(k,"rumble")){ extern int g_opt_rumble; g_opt_rumble=atoi(v); if(g_opt_rumble<0) g_opt_rumble=0; if(g_opt_rumble>200) g_opt_rumble=200; }   /* svc_hid.c */
     else if(!strcmp(k,"stick_deadzone")){ g_opt_deadzone=atoi(v); if(g_opt_deadzone<0) g_opt_deadzone=0; if(g_opt_deadzone>30000) g_opt_deadzone=30000; }
     else if(!strcmp(k,"language")) g_opt_lang=atoi(v);
@@ -465,7 +466,8 @@ static const IniOpt INI_INPUT[]={
   {"controller_index","0","0 = first connected controller, 1.. = that controller (in connection order) is player 1"},
   {"stick_deadzone","7000","stick dead zone (0..30000, out of 32767)"},
   {"rumble","100","controller rumble strength in percent (0 = off, up to 200): the game's HD rumble on the pad's two motors"},
-  {"hd_rumble","1","1 = HD rumble on Nintendo controllers (Switch Pro Controller, Joy-Con): the game's own vibration frequencies,\n;   left and right (needs SDL2 2.0.18+). Other pads always use their two motors"},
+  {"hd_rumble","1","1 = HD rumble on Switch Pro Controller, Joy-Con and DualSense: the game's own vibration frequencies,\n;   left and right (needs SDL2 2.0.18+). Other pads always use their two motors"},
+  {"deck_trackpad_rumble","0","1 = on a Steam Deck the trackpads also play the game's vibration frequencies, on top of the grip motors"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_AUDIO[]={
   {"volume","100","Master volume in percent (0-200, applies live)"},

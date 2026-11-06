@@ -129,7 +129,7 @@ void tab_content(int t) {
             section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
     case 3: section("OUTPUT"); opt_row("volume"); section("SPEAKERS"); opt_row("audio_channels"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
     case 4: section("MENUS"); opt_row("menu_buttons"); section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_aim_toggle"); opt_row("mouse_sensitivity");
-            section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("hd_rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
+            section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("hd_rumble"); opt_row("deck_trackpad_rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
             help_text("Controller buttons, keyboard keys and menu navigation are set on the Play screen's Controls page."); break;
     default: {
         section("KEYS");

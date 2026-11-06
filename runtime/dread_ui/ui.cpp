@@ -552,7 +552,8 @@ static std::vector<Opt> build_options() {
     I("controller_index", "Input", "Controls", "Player 1 controller", LIVE_YES, "0", 0, 8, 1, "0 = any connected controller.", false);
     I("stick_deadzone", "Input", "Controls", "Stick dead zone", LIVE_YES, "7000", 0, 20000, 500, "");
     I("rumble", "Input", "Controls", "Rumble strength", LIVE_YES, "100", 0, 200, 10, "0 = off. Up to 200% boosts soft effects.");
-    B("hd_rumble", "Input", "Controls", "HD rumble", LIVE_RESTART, "1", "Switch Pro Controller, Joy-Con, DualSense and the Steam Deck's trackpads play the game's own vibration, left and right, like on the Switch.");
+    B("hd_rumble", "Input", "Controls", "HD rumble", LIVE_RESTART, "1", "Switch Pro Controller, Joy-Con and DualSense play the game's own vibration, left and right, like on the Switch.");
+    B("deck_trackpad_rumble", "Input", "Controls", "Steam Deck trackpad rumble", LIVE_RESTART, "0", "On a Steam Deck the trackpads also play the game's vibration frequencies, on top of the normal grip rumble.");
     // Advanced
     B("wait_for_shaders", "Launcher", "Advanced", "Wait for new shaders", LIVE_RESTART, "1", "On: no missing objects, a short stutter the first time an effect appears. Off: no stutter, objects can pop in.");
     B("prebuild_shaders", "Graphics", "Advanced", "Build all shaders before playing", LIVE_RESTART, "1",

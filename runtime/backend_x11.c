@@ -118,7 +118,7 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
                      Steam Input passes it to the haptics */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
     static u16 plo=1, phi=1; static u64 last; u64 now=plat_ns(); u16 ulo=(u16)(lo*65535.0f), uhi=(u16)(hi*65535.0f);
-    { extern int hd_rumble_covers(int,const char*);   /* Nintendo pads, DualSense, Steam Deck: HD rumble plays it */
+    { extern int hd_rumble_covers(int,const char*);   /* Nintendo pads, DualSense: HD rumble plays it */
       int t= sdl_gcgettype? sdl_gcgettype(g) : 0; if(hd_rumble_covers(t,sdl.Name(g))) return; }
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now; sdl_rumble(g,ulo,uhi,ulo||uhi? 250 : 0); } }
 }

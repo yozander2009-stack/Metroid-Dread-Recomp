@@ -9,8 +9,9 @@
    - DualSense (PS5): its voice coils are driven as sound, two sine waves per side. Over USB through the controller's
      4-channel 48 kHz audio device (channels 3 and 4); over Bluetooth through output report 0x32 (32 stereo frames of
      signed 8-bit samples at 3 kHz per report, CRC32 seeded with 0xA2; layout as documented by egormanga's SAxense).
-   - Steam Deck: its trackpad actuators play tones on command (feature report 0xEA, MsgTriggerHaptic "tone", per
-     side; SDL's steam/controller_structs.h): the stronger band of each side.
+   - Steam Deck, with [Input] deck_trackpad_rumble=1 (off by default): its trackpad actuators play tones on command
+     (feature report 0xEA, MsgTriggerHaptic "tone", per side; SDL's steam/controller_structs.h), the stronger band of
+     each side, on top of the grip motors, which keep SDL's normal rumble.
    Pacing, peak merging, the "crisp notes" accent and the DualSense synthesis (x^0.5 curve, 0.8 ceiling, 4 ms
    smoothing, 256-frame slots) follow the measurements and design of RenHDrum by Three-Dola
    (https://github.com/trzz1214/RenHDrum, research notes CC BY 4.0); this is our own C, no RenHDrum code is copied.
@@ -44,6 +45,7 @@ static u32 (*sa_open)(const char*, int, const SdlSpec*, SdlSpec*, int);
 static void (*sa_pause)(u32, int);
 
 int g_opt_hd_rumble = 1;   /* ini [Input] hd_rumble */
+int g_opt_deck_pads = 0;   /* ini [Input] deck_trackpad_rumble: Steam Deck trackpads on top of the grip motors */
 typedef struct { float al, fl, ah, fh; } Side;
 enum { K_SWITCH, K_DS_BT, K_DS_USB, K_DECK };
 #define HD_MAX 6
@@ -307,7 +309,7 @@ static void scan(void) {
         int kind = -1; unsigned short v = i->vendor_id, p = i->product_id;
         if (v == 0x057E && (p == 0x2009 || p == 0x2006 || p == 0x2007)) kind = K_SWITCH;            /* Pro Controller, Joy-Con L / R */
         else if (v == 0x054C && (p == 0x0CE6 || p == 0x0DF2)) kind = path_bt(i) ? K_DS_BT : K_DS_USB;   /* DualSense, DualSense Edge */
-        else if (v == 0x28DE && p == 0x1205 && i->interface_number == 2 && hdr_feature) kind = K_DECK;  /* Steam Deck controls */
+        else if (v == 0x28DE && p == 0x1205 && i->interface_number == 2 && hdr_feature && g_opt_deck_pads) kind = K_DECK;  /* Steam Deck */
         if (kind < 0 || !i->path || known(i->path)) continue;
         if (kind == K_DS_USB && !ds_usb_open()) continue;
         void* h = kind == K_DS_USB ? NULL : hdr_open(i->path, 0);
@@ -366,13 +368,12 @@ int hd_rumble_open(void* (*sym)(const char*)) {
 }
 void hd_rumble_send(void) {}   /* the thread does it */
 int hd_rumble_active(void) { return g_cover != 0; }
-/* 1 = HD rumble plays this SDL pad (SDL_GameControllerType; the name for Steam Input's pads on a Steam Deck), so the
-   backend sends it no SDL rumble */
+/* 1 = HD rumble plays this SDL pad (SDL_GameControllerType), so the backend sends it no SDL rumble. The Steam Deck's
+   grip motors always keep SDL's rumble: its trackpads only add to it */
 int hd_rumble_covers(int type, const char* name) {
-    int c = g_cover;
+    (void)name; int c = g_cover;
     if ((c & 1) && (type == 5 || type == 11 || type == 12 || type == 13)) return 1;
     if ((c & 2) && type == 7) return 1;
-    if ((c & 4) && name && strstr(name, "Steam")) return 1;
     return 0;
 }
 
