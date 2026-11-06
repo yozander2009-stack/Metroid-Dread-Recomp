@@ -2054,7 +2054,8 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
 static u8* g_stage_buf; static size_t g_stage_cap;
 /* buffer cache keyed by guest range, validated once per submit */
 u32 g_submit_epoch;
-typedef struct VbC { u64 start, len, hash, cpu, write_gen; u32 epoch, used; GLuint id; struct VbC* next; u32 stable, chk_epoch; int dirty; u32 csseen; u64 shash; u32 schk; } VbC;
+typedef struct VbC { u64 start, len, hash, cpu, write_gen; u32 epoch, used; GLuint id; struct VbC* next; u32 stable, chk_epoch; int dirty; u32 csseen; u64 shash; u32 schk;
+  u64 imax_hash; u32 imax, imax_rs; u8 imax_ok; } VbC;
 /* 64K blocks (by gpu va, hashed) that got compute output, with a generation. a cached buffer on one of them
    gets reread. avoids walking the whole cache on every compute result */
 static u32 g_csblk[65536], g_csgen;
@@ -2093,6 +2094,19 @@ static int g_nosample=-1;
 static int cs_gpu_src(u64 a, u64 n, GLuint* buf, u32* off);
 static u64 st_cs_gpucopy, st_cs_sync, st_cs_sync_ns;
 
+/* the highest vertex an indexed draw reads (primitive restart values skipped); ~0u = unknown. Cached in the index
+   range's buffer entry while its contents (hash) stay the same, so static meshes are scanned once */
+static u32 index_max(VbC* e, u64 ia, u32 count, u32 isz, u32 restart){
+  if(!e) return ~0u;
+  if(e->imax_ok && e->imax_hash==e->hash && e->imax_rs==restart) return e->imax;
+  u8* ip=gmem_ptr(ia,(u64)count*isz); if(!ip) return ~0u;
+  u32 mx=0;   /* restart: the primitive restart index when restart is on (that value isn't a vertex), else ~0u */
+  if(isz==1){ for(u32 k=0;k<count;k++) if(ip[k]>mx && ip[k]!=restart) mx=ip[k]; }
+  else if(isz==2){ const u16* q=(const u16*)ip; for(u32 k=0;k<count;k++) if(q[k]>mx && q[k]!=restart) mx=q[k]; }
+  else { const u32* q=(const u32*)ip; for(u32 k=0;k<count;k++) if(q[k]>mx && q[k]!=restart) mx=q[k]; }
+  e->imax=mx; e->imax_hash=e->hash; e->imax_rs=restart; e->imax_ok=1; return mx; }
+static int g_vb_full=-1;   /* SWR_VB_FULL_RANGE=1: upload the vertex buffers' whole declared range (the old way) */
+
 /* SWR_TRACE_VB=1 (diagnostic): every 5 s, the vertex buffers that cost the most: declared range, bytes hashed and
    uploaded, draws, and the highest byte the draws actually read (from first/count, instances, or the indices) */
 typedef struct { u64 start, len, hashed, up, need, draws, idraws; u32 stride; } VbTr;
@@ -2109,7 +2123,10 @@ static void vbt_report(void){
     t->hashed=0; }
   memset(g_vbt,0,sizeof g_vbt); }
 
-static GLuint buf_cached(GLenum target, u64 start, u64 len){
+static VbC* g_vbc_last;   /* the entry buf_cached used last, NULL when the data came from a compute result on the GPU */
+static GLuint buf_cached_(GLenum target, u64 start, u64 len);
+static GLuint buf_cached(GLenum target, u64 start, u64 len){ g_vbc_last=NULL; return buf_cached_(target,start,len); }
+static GLuint buf_cached_(GLenum target, u64 start, u64 len){
   if(g_cs_any){ GLuint sb; u32 so;
     if(cs_gpu_src(start,len,&sb,&so)){
       u32 k=(u32)((start>>6)^(start>>20)^len)&2047;
@@ -2132,20 +2149,20 @@ static GLuint buf_cached(GLenum target, u64 start, u64 len){
   /* Small vertex/index streams include full-screen postprocessing quads.
      CPU writes are not tracked by the GPU write log; validate their bytes
      even when a command submission or write-watch page stays unchanged. */
-  if(e && len>4096 && e->epoch==g_submit_epoch){ glBindBuffer(target,e->id); return e->id; }
+  if(e && len>4096 && e->epoch==g_submit_epoch){ glBindBuffer(target,e->id); g_vbc_last=e; return e->id; }
   /* nobody touched it since last time (still rechecked every 240 submits) */
   if(e && len>4096 && g_ww>0 && e->cpu && g_submit_epoch-e->chk_epoch<240 && gmmu_translate(start)==e->cpu && !ww_dirty(e->cpu,len,e->chk_epoch)){
-    e->epoch=g_submit_epoch; st_ww_skip++; glBindBuffer(target,e->id); return e->id; }
+    e->epoch=g_submit_epoch; st_ww_skip++; glBindBuffer(target,e->id); g_vbc_last=e; return e->id; }
   /* big buffers that never changed (static geometry): check every 8 submits */
-  if(e && len>4096 && g_ww<=0 && e->stable>=16 && len>=(64u<<10) && g_submit_epoch-e->chk_epoch<8){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); return e->id; }
-  if(e && len>4096 && g_ww<=0 && e->stable>=32 && len<(64u<<10) && g_submit_epoch-e->chk_epoch<4){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); return e->id; }
+  if(e && len>4096 && g_ww<=0 && e->stable>=16 && len>=(64u<<10) && g_submit_epoch-e->chk_epoch<8){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); g_vbc_last=e; return e->id; }
+  if(e && len>4096 && g_ww<=0 && e->stable>=32 && len<(64u<<10) && g_submit_epoch-e->chk_epoch<4){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); g_vbc_last=e; return e->id; }
   /* long-stable buffers: full check every 64/240 submits, sampled every 4 in between.
      no write tracking on Proton/Linux, without this the Deck hashed ~9 MB of vertices a frame */
   if(g_nosample<0) g_nosample=getenv("SWR_NO_SAMPLE_CHECK")!=NULL;
   if(e && len>4096 && g_ww<=0 && !g_nosample && e->stable>=64 && len>=4096 && g_submit_epoch-e->chk_epoch<(e->stable>=256? 240u : 64u)){
-    if(g_submit_epoch-e->schk<4){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); return e->id; }
+    if(g_submit_epoch-e->schk<4){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); g_vbc_last=e; return e->id; }
     u64 sh=sample_hash(start,len); e->schk=g_submit_epoch; st_vb_hashed+=2048;
-    if(sh==e->shash){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); return e->id; } }
+    if(sh==e->shash){ e->epoch=g_submit_epoch; glBindBuffer(target,e->id); g_vbc_last=e; return e->id; } }
   u8* src=gmem_ptr(start,len); u64 cpu= src? (u64)(src-g_mem) : 0;
   if(!src){ if(g_stage_cap<len){ u8* nb=realloc(g_stage_buf,len); if(!nb) return 0; g_stage_buf=nb; g_stage_cap=len; } gmem_read(start,g_stage_buf,len); src=g_stage_buf; }
   u64 h=fast_hash(src,len,0); st_vb_hashed+=len;
@@ -2157,7 +2174,7 @@ static GLuint buf_cached(GLenum target, u64 start, u64 len){
   if(e->hash!=h){ e->hash=h; glBufferData(target,(GLsizeiptr)len,src,GL_STATIC_DRAW); st_vb_up+=len; e->stable=0; if(vt_) vt_->up+=len; } else if(e->stable<100000) e->stable++;
   if(e->stable>=63 && len>=4096){ e->shash=sample_hash(start,len); e->schk=g_submit_epoch; }
   e->write_gen=g_gw_gen;
-  e->cpu=cpu; e->epoch=g_submit_epoch; e->chk_epoch=g_submit_epoch; return e->id; }
+  e->cpu=cpu; e->epoch=g_submit_epoch; e->chk_epoch=g_submit_epoch; g_vbc_last=e; return e->id; }
 /* ============================================================ F5 frame trace */
 static int g_tr_arm, g_tr_on, g_tr_n, g_tr_img; static FILE* g_tr;
 static Tex* g_tr_tex[2048]; static int g_tr_ntex;
@@ -2396,6 +2413,17 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   u64 tb0_=plat_ns();
   glBindVertexArray(g_vao);
   u32 used=vs->si.in_mask;
+  /* Vertex range actually read (2026-10-29, the acid enemy; 2026-11-05 for 240 FPS: 2-5.5 MB uploaded per frame in the
+     regression route's combat): each attribute buffer used to be hashed and uploaded over its whole declared range
+     (start..limit). Particles rewrite a 144 KB buffer, bound as 3 streams, every frame while the draws read 1-2 KB of
+     it. Now the range ends at the last vertex/instance the draw reads, rounded up to a power of two (from 4 KB) so a
+     changing count reuses a few cached GL buffers instead of making one per size. (The crashes first blamed on this
+     were the game's particle pool overflowing at high FPS: main.c pool guard.) SWR_VB_FULL_RANGE=1 = old */
+  if(g_vb_full<0) g_vb_full=getenv("SWR_VB_FULL_RANGE")!=NULL;
+  u32 imx=~0u; int idx_bound=0; GLuint idx_id=0;
+  if(indexed && topology!=7){ u32 fmt=r[0x5F6]; u32 isz= fmt==0? 1 : fmt==1? 2 : 4; u64 ia=((u64)r[0x5F2]<<32)|r[0x5F3];
+    idx_id=buf_cached(GL_ELEMENT_ARRAY_BUFFER,ia+(u64)first*isz,(u64)count*isz); idx_bound=1;   /* just this draw's range */
+    if(!g_vb_full) imx=index_max(g_vbc_last,ia+(u64)first*isz,count,isz,r[0x591]? r[0x592] : ~0u); }
   /* attrib state cache for g_vao */
   static u32 va_en; static u32 va_key[16][8]; static int va_const[16];
   if(g_va_inval){ g_va_inval=0; memset(va_key,0,sizeof va_key); }
@@ -2408,12 +2436,19 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     u64 start=((u64)va[1]<<32)|va[2]; u64 lim=((u64)r[0x7C0+buf*2]<<32)|r[0x7C1+buf*2]; u32 stride=va[0]&0xFFF;
     u64 len= lim>=start? lim-start+1 : 0; if(len>64u<<20) len=64u<<20;
     if(!len) { VA_OFF(i); continue; }
+    if(!g_vb_full){ u32 dv= r[0x620+buf]? (va[3]? va[3] : 1) : 0; u64 hi=~0ull;
+      if(dv) hi=(u64)base_instance+((u64)instances+dv-1)/dv;   /* instanced: GL reads element base_instance + instance/divisor */
+      else if(!indexed) hi=(u64)first+count;
+      else if(topology!=7 && imx!=~0u && (int)base_vertex>=0) hi=(u64)imx+base_vertex+1;
+      if(hi!=~0ull){ hi=hi*stride+off+16;   /* past the last element read (an attribute is at most 16 bytes) */
+        u64 b=4096; while(b<hi) b<<=1;
+        if(b<len) len=b; } }
     GLuint vbid=buf_cached(GL_ARRAY_BUFFER,start,len);
     if(g_vbt_on<0) g_vbt_on=getenv("SWR_TRACE_VB")!=NULL;
     if(g_vbt_on>0){ VbTr* t=vbt_get(start,len);
       if(t){ u32 dv= r[0x620+buf]? (va[3]? va[3] : 1) : 0; u64 hi;
         t->draws++; t->stride=stride; if(indexed) t->idraws++;
-        if(dv) hi=((u64)base_instance+instances+dv-1)/dv*stride;
+        if(dv) hi=((u64)base_instance+((u64)instances+dv-1)/dv)*stride;
         else if(!indexed) hi=((u64)first+count)*stride;
         else { u32 fmt=r[0x5F6]; u32 isz= fmt==0? 1 : fmt==1? 2 : 4; u64 ia=((u64)r[0x5F2]<<32)|r[0x5F3]; u32 mx=0;
           u8* ip=gmem_ptr(ia+(u64)first*isz,(u64)count*isz);
@@ -2455,7 +2490,8 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
       glBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)nq*24,idx,GL_STREAM_DRAW); free(idx);
       glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES,nq*6,GL_UNSIGNED_INT,0,instances,(GLint)base_vertex,base_instance);
     } else {
-      buf_cached(GL_ELEMENT_ARRAY_BUFFER,ia+(u64)first*isz,(u64)count*isz);   /* just this draw's range */
+      if(idx_bound) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,idx_id);   /* read and uploaded before the attributes */
+      else buf_cached(GL_ELEMENT_ARRAY_BUFFER,ia+(u64)first*isz,(u64)count*isz);   /* just this draw's range */
       int cap=dlg_capture_begin(r,vs,mode,(int)topology,1,first,count,base_vertex,instances);
       glDrawElementsInstancedBaseVertexBaseInstance(mode,count,it,(void*)0,instances,(GLint)base_vertex,base_instance);
       if(cap) dlg_capture_end();
