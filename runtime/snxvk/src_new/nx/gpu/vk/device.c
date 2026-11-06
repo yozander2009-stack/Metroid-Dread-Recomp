@@ -302,6 +302,8 @@ static int create_device(void) {
         g_vk.has_local_read = snx_vk_extensions_has(&e, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
         has_cond = snx_vk_extensions_has(&e, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
         has_provoking = snx_vk_extensions_has(&e, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+        g_vk.has_dyn_vi = snx_vk_extensions_has(&e, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) &&
+                          !getenv("SWR_VK_NO_DYN_VI");
         has_pipeline_robustness = snx_vk_extensions_has(&e, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
         has_robustness2 = snx_vk_extensions_has(&e, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
         /* the driver's budget for each heap, the other processes' use taken out, for VMA: without it VMA took
@@ -371,8 +373,11 @@ static int create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
     /* with the subset enabled, each of its features is off until the device asks for it: a view's swizzle, for one */
     PortabilityFeatures qport = {.sType = PORTABILITY_FEATURES_STYPE};
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT qdvi = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
     int robustness = has_pipeline_robustness && has_robustness2;
     void* const query[] = {&f2,
+                           g_vk.has_dyn_vi ? &qdvi : NULL,
                            &q11,
                            &q12,
                            g_vk.has_divisor ? &fdiv : NULL,
@@ -393,6 +398,7 @@ static int create_device(void) {
     g_vk.has_vertex_robustness2 = qpipeline.pipelineRobustness && qrobust.robustBufferAccess2;
     g_vk.has_cond_render = has_cond && qcond.conditionalRendering;
     g_vk.has_provoking_last = has_provoking && qprov.provokingVertexLast;
+    g_vk.has_dyn_vi = g_vk.has_dyn_vi && qdvi.vertexInputDynamicState;
     /* the dynamic state and the barriers within a pass only serve feedback loops */
     g_vk.has_feedback = g_vk.has_feedback && qloop.attachmentFeedbackLoopLayout;
     g_vk.has_feedback_dynamic =
@@ -536,6 +542,14 @@ static int create_device(void) {
         ext[next++] = VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME;
         ext[next++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     }
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fdvi = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = chain,
+        .vertexInputDynamicState = VK_TRUE};
+    if (g_vk.has_dyn_vi) {
+        chain = &fdvi;
+        ext[next++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+    }
     u32 nq = g_vk.compute_family == g_vk.gfx_family ? 1 : 2;
     if (g_vk.video_family != ~0u)
         qci[nq++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -593,6 +607,8 @@ static int create_device(void) {
     else
         LOG("vulkan: draws that sample a color target they render to read a copy of it (no attachment feedback "
             "loops)\n");
+    LOG("vulkan: vertex layouts %s\n", g_vk.has_dyn_vi ? "set per draw (dynamic vertex input): pipelines don't depend on them"
+                                                       : "part of each pipeline (no dynamic vertex input)");
     return 1;
 }
 

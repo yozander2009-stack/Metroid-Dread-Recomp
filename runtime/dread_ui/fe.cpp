@@ -715,6 +715,37 @@ static void page_mods() {
     help_text("A mod is a folder with a 'romfs' inside, laid out like the game's own RomFS. Atmosphere-style zips (atmosphere/contents/010093801237C000/romfs) are recognised.");
 }
 
+static FILE* ufopen(const std::string& p, const char* m) {
+#ifdef _WIN32
+    return _wfopen(wide(p).c_str(), wide(m).c_str());
+#else
+    return fopen(p.c_str(), m);
+#endif
+}
+/* A yuzu-family pipeline cache (vulkan.bin of Metroid Dread) copied to vulkan_native/import_cache.bin: Native Vulkan
+   converts it into pipeline recipes at its next start (pipeline.c yz_import) and renames it .done. Only the 2021 format
+   (cache version 5) is read so far; the shaders come from the player's own game files, the cache only names them */
+static bool vk_cache_import(const std::string& src, std::string* msg) {
+    FILE* f = ufopen(src, "rb");
+    if (!f) { *msg = "Couldn't open that file"; return false; }
+    unsigned char h[12] = {0};
+    size_t got = fread(h, 1, sizeof h, f);
+    unsigned ver = h[8] | h[9] << 8 | h[10] << 16 | (unsigned)h[11] << 24;
+    if (got != sizeof h || memcmp(h, "yuzucach", 8)) { fclose(f); *msg = "That isn't a yuzu-style pipeline cache (vulkan.bin)"; return false; }
+    if (ver != 5) { fclose(f); *msg = fmt("That cache is format %u: only format 5 (yuzu, 2021-2022) can be read so far", ver); return false; }
+    std::string dir = join(P.exedir, "vulkan_native");
+    make_dirs(dir);
+    FILE* o = ufopen(join(dir, "import_cache.bin"), "wb");
+    if (!o) { fclose(f); *msg = "Couldn't write to the vulkan_native folder"; return false; }
+    fseek(f, 0, SEEK_SET);
+    char buf[65536]; size_t n; bool ok = true;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) if (fwrite(buf, 1, n, o) != n) { ok = false; break; }
+    fclose(f);
+    if (fclose(o)) ok = false;
+    *msg = ok ? "Cache imported: Native Vulkan builds its pipelines at the next start" : "Couldn't copy the cache";
+    return ok;
+}
+
 static void page_advanced() {
     page_title("ADVANCED", "Shaders, CPU, memory, diagnostics and recommendations.");
     section("RECOMMENDED FOR THIS PC");
@@ -727,6 +758,13 @@ static void page_advanced() {
         if (!r.note.empty()) help_text(r.note.c_str());
     }
     section("SHADERS"); draw_opt("wait_for_shaders"); draw_opt("prebuild_shaders"); draw_opt("low_priority_shader_compiler");
+    help_text("Native Vulkan comes with the game's pipelines listed, and builds them in the background at start. "
+              "You can add your own pipeline cache from yuzu (vulkan.bin in its shader folder for Metroid Dread): only "
+              "the list is used, the shaders always come from your game files.");
+    if (row_button("##vkimp", "Import a yuzu pipeline cache (vulkan.bin)", "CHOOSE")) {
+        std::string f = pick_file(g_hwnd, "Choose a yuzu pipeline cache (vulkan.bin)", L"Pipeline cache", L"*.bin");
+        if (!f.empty()) { std::string m; vk_cache_import(f, &m); flash(m); }
+    }
     section("CPU"); draw_opt("sleep_waits"); draw_opt("texture_threads");
     section("MEMORY"); draw_opt("memory_gb");
 #ifdef _WIN32   // the F7 recorder is Media Foundation
@@ -935,6 +973,12 @@ static void test_tick() {
         std::string err; bool ok = pt_pack_import(getenv("SWR_FE_PT_IMPORT"), &err);
         const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
         if (f) { fprintf(f, "pt_import ok=%d installed=%d err=%s\n", ok, pt_pack_installed(), err.c_str()); fclose(f); }
+        g_quit = true;
+    }
+    if (getenv("SWR_FE_VK_IMPORT") && g_frame_no == 30) {   // imports that pipeline cache as the button does, writes the result, quits
+        std::string m; bool ok = vk_cache_import(getenv("SWR_FE_VK_IMPORT"), &m);
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "vk_import ok=%d msg=%s\n", ok, m.c_str()); fclose(f); }
         g_quit = true;
     }
     if (getenv("SWR_FE_UNDO")) {   // presses UNDO once, writes what it said to the result file, then quits

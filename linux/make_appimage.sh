@@ -40,6 +40,7 @@ grep -qa "FIRST-TIME SETUP" "$RUNTIME" || { echo "error: the runtime was built w
 
 rm -rf "$A"; mkdir -p "$A/usr/bin" "$R/dread" "$R/runtime" "$R/linux" "$A/usr/share/metroid-dread/licenses"
 cp "$RUNTIME" "$A/usr/bin/metroid-dread"
+cp "$W/dread/pipeline_recipes_shipped.bin" "$A/usr/share/metroid-dread/"   # Native Vulkan's pipeline list (AppRun)
 # the recompiler, laid out as dread_setup.py expects it (as in the Windows release's recompiler folder)
 cp "$W"/{switchrecomp,codegen,a64,nxloader,metroid_perf}.py "$W/dread/dread_setup.py" "$R/"
 cp "$W/dread/dread_v210_patches.json" "$W/dread/romfs_v210.manifest" "$R/dread/"

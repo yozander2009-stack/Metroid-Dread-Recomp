@@ -873,7 +873,8 @@ static VkPipeline pipe_create(const Pipe* e) {
     if (g_vk.has_feedback_dynamic) dyn[ndyn++] = VK_DYNAMIC_STATE_ATTACHMENT_FEEDBACK_LOOP_ENABLE_EXT;
     /* the stride is set by vkCmdBindVertexBuffers2, which a draw without vertex buffers never calls: a pipeline without
        bindings leaves it out */
-    if (k->nbind && g_vk.has_dynamic_stride) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
+    if (g_vk.has_dyn_vi) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT; /* SWR: the draw sets the whole layout */
+    else if (k->nbind && g_vk.has_dynamic_stride) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                            .dynamicStateCount = ndyn,
                                            .pDynamicStates = dyn};
@@ -902,7 +903,7 @@ static VkPipeline pipe_create(const Pipe* e) {
                                            k->feedback ? VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT : 0,
                                        .stageCount = nst,
                                        .pStages = st,
-                                       .pVertexInputState = &vi,
+                                       .pVertexInputState = g_vk.has_dyn_vi ? NULL : &vi,
                                        .pInputAssemblyState = &ia,
                                        .pTessellationState = k->tes ? &ts : NULL,
                                        .pViewportState = &vp,
@@ -1092,6 +1093,13 @@ static Pipe* pipe_entry_in(const PipeKey* k, int* found) {
     g_pipeh[b] = p;
     g_pipes_new++;
     return p;
+}
+/* SWR: with dynamic vertex input a pipeline doesn't hold the vertex layout, so keys that differ only there are one */
+void vk_pipekey_strip_vi(PipeKey* k) {
+    if (!g_vk.has_dyn_vi) return;
+    k->nattr = k->nbind = 0;
+    memset(k->attr, 0, sizeof k->attr);
+    memset(k->bind, 0, sizeof k->bind);
 }
 /* the pipeline for k: made here when new, waited for when one of the file's is still being made */
 VkPipeline vk_pipeline_get(const PipeKey* k) {
@@ -1476,7 +1484,7 @@ static void pf_key(char* out, size_t n, size_t* guest) {
     size_t len = strlen(commit);
     char exe[64] = "", uuid[33];
     u32 caps[] = {(u32)g_vk.has_divisor,
-                  (u32)g_vk.has_dynamic_stride,
+                  (u32)g_vk.has_dynamic_stride + 2u * (u32)g_vk.has_dyn_vi,
                   (u32)g_vk.has_shader_draw_parameters,
                   (u32)g_vk.has_feedback,
                   (u32)g_vk.has_feedback_dynamic,
@@ -1711,11 +1719,21 @@ static char* rc_path(void) {
     if (!p[0]) snprintf(p, sizeof p, "%spipeline_recipes.bin", g_cachedir);
     return p;
 }
+/* SWR: name in g_cachedir (four calls' worth of buffers) */
+static char* rc_file(const char* name) {
+    static char p[4][1200];
+    static int i;
+    char* q = p[i++ & 3];
+    snprintf(q, 1200, "%s%s", g_cachedir, name);
+    return q;
+}
+static Recipe* rc_read_file(const char* path, u32* n);
 /* the recipes in the file (malloc'd, *n of them), NULL for none or another build's */
-static Recipe* rc_read(u32* n) {
+static Recipe* rc_read(u32* n) { return rc_read_file(rc_path(), n); }
+static Recipe* rc_read_file(const char* path, u32* n) {
     RcHead h;
     Recipe* r = NULL;
-    FILE* f = fopen(rc_path(), "rb");
+    FILE* f = fopen(path, "rb");
     *n = 0;
     if (!f) return NULL;
     if (fread(&h, sizeof h, 1, f) == 1 && h.magic == RC_MAGIC && h.keysize == sizeof(PipeKey) && h.count &&
@@ -1746,17 +1764,278 @@ static VkSh* rc_shader(const RcSh* c) {
     }
     return s;
 }
-/* on the GPU thread (vk_lock), at the first lookup after the shipped pass ended: the recipes' pipelines queued */
+/* r (n of them) written to path, through a temporary file: 1 when written */
+static int rc_write_file(const char* path, const Recipe* r, u32 n) {
+    RcHead h = {RC_MAGIC, (u32)sizeof(PipeKey), n};
+    char tmp[1300];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return 0;
+    int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(r, sizeof *r, n, f) == n;
+    if (fclose(f)) ok = 0;
+    if (ok) plat_replace_file(tmp, path);
+    else remove(tmp);
+    return ok;
+}
+
+/* ------------------------------------------------------------ SWR: yuzu-family pipeline caches
+   A yuzu pipeline cache (vulkan.bin; yuzu's forks keep the format) lists every pipeline a run of the game made: each
+   with its programs' code and the 3D engine's state that went into it. Converted here into recipes: the programs
+   hashed as the shipped pass hashes the game's own (so the code itself is only read, never kept), the state made
+   into a PipeKey as draw_key makes one. Its vertex layout isn't in the file when that PC had dynamic vertex input,
+   which is why the recipes need it here too (g_vk.has_dyn_vi). Cache version 5 (yuzu, late 2021) is the one read:
+   in it the key is the six programs' hashes, then the state: raw1 (bit 5 depth clamp off, 7-8 polygon mode, 19 logic
+   op on, 20-23 the op, 24-27 topology), raw2 (bit 5 depth on, 6-10 its format, 12 last vertex provokes), the eight
+   color target formats (the 3D engine's numbers, a byte each), two words, then each target's blend word (mask in bits
+   0-3, equations 4-6 / 7-9 and factors 10-14 / 15-19 / 20-24 / 25-29 in yuzu's packed order, enable bit 30). Tested
+   on a Metroid Dread cache: all of its 449 programs are the game's, byte for byte */
+static int ship_no_read(u32 idx, u32 off, u32* out);
+static u8* ship_window(const u8* p, size_t avail);
+typedef struct {
+    const u8* p;
+    size_t n, at;
+} YzRd;
+static int yz_take(YzRd* r, void* out, size_t n) {
+    if (n > r->n - r->at) return 0;
+    if (out) memcpy(out, r->p + r->at, n);
+    r->at += n;
+    return 1;
+}
+/* one program's environment: its hashes into *sh when hash, *stage ST_VS / ST_FS, or -1 for one not converted */
+static int yz_env(YzRd* r, int hash, RcSh* sh, int* stage) {
+    u64 cs, nt, nc;
+    u32 f[6];
+    if (!yz_take(r, &cs, 8) || !yz_take(r, &nt, 8) || !yz_take(r, &nc, 8) || !yz_take(r, f, sizeof f)) return 0;
+    if (!cs || cs > (1u << 20) || (cs & 7) || nt > 4096 || nc > 4096 || f[5] > 6) return 0;
+    const u8* code = r->p + r->at;
+    if (!yz_take(r, NULL, (size_t)cs) || !yz_take(r, NULL, (size_t)nt * 8) || !yz_take(r, NULL, (size_t)nc * 12) ||
+        !yz_take(r, NULL, f[5] == 5 ? 16 : 0x50))
+        return 0;
+    *stage = (f[5] == ST_VS || f[5] == ST_FS) && !nc ? (int)f[5] : -1; /* constant buffer reads: a draw's own */
+    if (*stage < 0 || !hash) return 1;
+    u8* w = ship_window(code, (size_t)cs);
+    if (!w) return 0;
+    u32 len = 0;
+    u64 h = vk_shader_hash(w, SH_CODE, &len, ship_no_read);
+    *sh = (RcSh){h, vk_hash(w, len), 0, len, 0, (u32)*stage, ship_clip(*stage)};
+    free(w);
+    return 1;
+}
+/* whether an entry (its count of environments, then them) starts at at */
+static int yz_entry_at(const u8* p, size_t n, size_t at) {
+    YzRd r = {p, n, at};
+    u32 ne;
+    int st;
+    RcSh sh;
+    if (!yz_take(&r, &ne, 4) || ne < 1 || ne > 6) return 0;
+    for (u32 i = 0; i < ne; i++)
+        if (!yz_env(&r, 0, &sh, &st)) return 0;
+    return 1;
+}
+/* the state after the key's program hashes, as a PipeKey a draw would make (the device's limits applied in rc_merge) */
+static int yz_key(const u8* s, size_t len, PipeKey* k) {
+    static const u8 fac[19] = {VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC_COLOR,
+                               VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, VK_BLEND_FACTOR_SRC_ALPHA,
+                               VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_DST_ALPHA,
+                               VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_DST_COLOR,
+                               VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_SRC_ALPHA_SATURATE,
+                               VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR,
+                               VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA,
+                               VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR,
+                               VK_BLEND_FACTOR_CONSTANT_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA};
+    static const u8 eq[5] = {VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN,
+                             VK_BLEND_OP_MAX};
+    u32 raw1, raw2, at[8];
+    u8 cf[8];
+    if (len < 56) return 0;
+    memcpy(&raw1, s, 4);
+    memcpy(&raw2, s + 4, 4);
+    memcpy(cf, s + 8, 8);
+    memcpy(at, s + 24, 32);
+    memset(k, 0, sizeof *k);
+    u32 topo = (raw1 >> 24) & 15, pm = (raw1 >> 7) & 3;
+    if (topo >= 10) return 0; /* adjacency and patches: geometry and tessellation draws, not converted */
+    k->topo_class = topo == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                    : topo <= 3 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                                : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    k->polygon = pm == 0 ? VK_POLYGON_MODE_POINT : pm == 1 ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    if ((raw1 >> 19) & 1) k->logic_op = ((raw1 >> 20) & 15) + 1;
+    k->depth_clamp = !((raw1 >> 5) & 1);
+    k->provoking_last = (raw2 >> 12) & 1;
+    for (u32 i = 0; i < 8; i++)
+        if (cf[i]) k->ncolor = i + 1;
+    for (u32 i = 0; i < k->ncolor; i++) {
+        if (!cf[i]) continue;
+        VkFmt f = vk_rt_format(cf[i]);
+        if (!f.bpp) return 0;
+        k->color[i] = f.vk;
+        u32 a = at[i], es = (a >> 4) & 7, ea = (a >> 7) & 7, fs = (a >> 10) & 31, fd = (a >> 15) & 31,
+            fsa = (a >> 20) & 31, fda = (a >> 25) & 31;
+        k->blend[i].mask = a & 15; /* R, G, B, A: the bits VK_COLOR_COMPONENT_* have */
+        if (!((a >> 30) & 1) || f.is_int) continue;
+        if (es > 4 || ea > 4 || fs > 18 || fd > 18 || fsa > 18 || fda > 18) return 0;
+        k->blend[i].en = 1;
+        k->blend[i].cop = eq[es];
+        k->blend[i].aop = eq[ea];
+        k->blend[i].sc = fac[fs];
+        k->blend[i].dc = fac[fd];
+        k->blend[i].sa = fac[fsa];
+        k->blend[i].da = fac[fda];
+    }
+    if ((raw2 >> 5) & 1) {
+        VkFmt z = vk_zt_format((raw2 >> 6) & 31);
+        if (!z.bpp) return 0;
+        k->depth = z.vk;
+        k->stencil = z.stencil ? z.vk : VK_FORMAT_UNDEFINED;
+    }
+    return 1;
+}
+/* the file at path as recipes (malloc'd, *n of them; *skipped the entries not converted), NULL when it isn't a
+   cache this reads */
+static Recipe* yz_convert(const char* path, u32* n, u32* skipped) {
+    FILE* f = fopen(path, "rb");
+    u8* p = NULL;
+    long sz = 0;
+    Recipe* out = NULL;
+    u32 cap = 0;
+    *n = *skipped = 0;
+    if (!f) return NULL;
+    if (!fseek(f, 0, SEEK_END) && (sz = ftell(f)) > 12 && sz < (256l << 20) && !fseek(f, 0, SEEK_SET) &&
+        (p = malloc((size_t)sz)) != NULL && fread(p, 1, (size_t)sz, f) != (size_t)sz) {
+        free(p);
+        p = NULL;
+    }
+    fclose(f);
+    if (!p) return NULL;
+    u32 ver = 0;
+    memcpy(&ver, p + 8, 4);
+    if (memcmp(p, "yuzucach", 8) || ver != 5) {
+        LOG("vulkan: %s is %s: not converted\n", path,
+            memcmp(p, "yuzucach", 8) ? "not a yuzu-family pipeline cache" : "a pipeline cache version this can't read yet");
+        free(p);
+        return NULL;
+    }
+    YzRd r = {p, (size_t)sz, 12};
+    while (r.at < r.n) {
+        u32 ne;
+        RcSh sh[5];
+        u32 present = 0;
+        int ok = 1;
+        memset(sh, 0, sizeof sh);
+        if (!yz_take(&r, &ne, 4) || ne < 1 || ne > 6) break;
+        for (u32 e = 0; e < ne; e++) {
+            RcSh s;
+            int st;
+            if (!yz_env(&r, 1, &s, &st)) goto done;
+            u32 slot = st == ST_VS ? 0 : 4;
+            if (st < 0 || (present >> slot & 1)) ok = 0;
+            else {
+                sh[slot] = s;
+                present |= 1u << slot;
+            }
+        }
+        /* the key: its length goes by the state's flags, so it ends where the next entry starts */
+        size_t klen = 0;
+        for (size_t t = 8; t <= 4096 && r.at + t <= r.n; t += 4)
+            if (r.at + t == r.n || yz_entry_at(p, r.n, r.at + t)) {
+                klen = t;
+                break;
+            }
+        if (!klen) break;
+        Recipe c;
+        memset(&c, 0, sizeof c);
+        if (ok && (present & 1) && klen > 48 && yz_key(p + r.at + 48, klen - 48, &c.k)) {
+            memcpy(c.sh, sh, sizeof sh);
+            c.present = present;
+            if (*n == cap) {
+                Recipe* g = realloc(out, (size_t)(cap = cap ? cap * 2 : 256) * sizeof *out);
+                if (!g) break;
+                out = g;
+            }
+            out[(*n)++] = c;
+        } else
+            (*skipped)++;
+        r.at += klen;
+    }
+done:
+    free(p);
+    return out;
+}
+/* g_cachedir's import_cache.bin (where the launcher puts a cache the player imports; SWR_VK_IMPORT_CACHE names
+   another, for tests) converted and added to pipeline_recipes_imported.bin, then renamed .done */
+static void yz_import(void) {
+    const char* env = getenv("SWR_VK_IMPORT_CACHE");
+    const char* src = env && *env ? env : rc_file("import_cache.bin");
+    u32 n = 0, skipped = 0, have = 0, added = 0;
+    FILE* f = fopen(src, "rb");
+    if (!f) return;
+    fclose(f);
+    Recipe* c = yz_convert(src, &n, &skipped);
+    if (c && n) {
+        const char* dst = rc_file("pipeline_recipes_imported.bin");
+        Recipe* r = rc_read_file(dst, &have);
+        Recipe* g = realloc(r, (size_t)(have + n) * sizeof *r);
+        if (g) {
+            r = g;
+            for (u32 i = 0; i < n; i++) {
+                int dup = 0;
+                for (u32 j = 0; j < have && !dup; j++) dup = !memcmp(&r[j], &c[i], sizeof *c);
+                if (!dup) {
+                    r[have++] = c[i];
+                    added++;
+                }
+            }
+            if (added && !rc_write_file(dst, r, have)) added = 0;
+        }
+        free(r);
+    }
+    LOG("vulkan: pipeline cache %s: %u pipelines converted (%u new), %u skipped\n", src, n, added, skipped);
+    free(c);
+    if (!(env && *env)) {
+        char done[1300];
+        snprintf(done, sizeof done, "%s", src);
+        char* dot = strrchr(done, '.');
+        if (dot) strcpy(dot, ".done");
+        remove(done);
+        rename(src, done);
+    }
+}
+/* on the GPU thread (vk_lock), at the first lookup after the shipped pass ended: the recipes' pipelines queued. They
+   come from this PC's own runs (pipeline_recipes.bin), the ones the game comes with (pipeline_recipes_shipped.bin) and
+   imported caches (pipeline_recipes_imported.bin) */
 static void rc_merge(void) {
-    u32 n, queued = 0, known = 0, lacked = 0;
-    Recipe* r;
+    u32 n = 0, queued = 0, known = 0, lacked = 0;
+    Recipe* r = NULL;
     u64 t0;
     if (g_rc_merged || !g_pf.on || !__atomic_load_n(&g_pf.ship_ready, __ATOMIC_ACQUIRE)) return;
     g_rc_merged = 1;
-    if (!(r = rc_read(&n))) return;
     t0 = plat_ns();
+    yz_import();
+    {
+        const char* files[3] = {rc_path(), rc_file("pipeline_recipes_shipped.bin"), rc_file("pipeline_recipes_imported.bin")};
+        for (int fi = 0; fi < 3; fi++) {
+            u32 m = 0;
+            Recipe* x = rc_read_file(files[fi], &m);
+            if (!x) continue;
+            Recipe* g = realloc(r, (size_t)(n + m) * sizeof *r);
+            if (g) {
+                r = g;
+                memcpy(r + n, x, (size_t)m * sizeof *x);
+                n += m;
+            }
+            free(x);
+        }
+    }
+    if (!r) return;
     for (u32 i = 0; i < n; i++) {
         PipeKey k = r[i].k;
+        vk_pipekey_strip_vi(&k); /* SWR: a recipe recorded with a layout serves any layout then */
+        /* what this device does differently (draw_key's checks): a recipe from another PC or a converted cache */
+        k.provoking_last = k.provoking_last && g_vk.has_provoking_last;
+        k.depth_clamp = k.depth_clamp && g_vk.feat.depthClamp;
+        if (!g_vk.feat.logicOp) k.logic_op = 0;
+        if (!g_vk.feat.fillModeNonSolid) k.polygon = VK_POLYGON_MODE_FILL;
+        k.arrays = 0;
         VkShaderModule* mod[5] = {&k.vs, &k.tcs, &k.tes, &k.gs, &k.fs};
         int ok = (r[i].present & 1) != 0, found;
         for (int s = 0; s < 5 && ok; s++) {
@@ -1764,7 +2043,10 @@ static void rc_merge(void) {
             if (!(r[i].present >> s & 1)) continue;
             VkSh* sh = rc_shader(&r[i].sh[s]);
             if (!sh || !sh->mod) ok = 0;
-            else *mod[s] = sh->mod;
+            else {
+                *mod[s] = sh->mod;
+                if (sh->indexed) k.arrays |= 1u << shader_vk_set(sh->stage);
+            }
         }
         if (!ok || k.nattr > 32 || k.nbind > 33 || k.ncolor > 8) {
             lacked++;
@@ -1790,7 +2072,7 @@ static void rc_merge(void) {
     g_pf.npipe += queued;
     __atomic_add_fetch(&g_pf.pipes_total, queued, __ATOMIC_RELAXED);
     LOG("vulkan: pipeline recipes: %u queued to be made, %u already there, %u without their shaders on this PC (%u in "
-        "%s, %llu ms)\n",
+        "%s and the shipped / imported files, %llu ms)\n",
         queued, known, lacked, n, rc_path(), (unsigned long long)((plat_ns() - t0) / 1000000));
 }
 /* at exit, SWR_VK_RECIPES_RECORD=1: this run's pipelines whose shaders the shipped pass would make (keys of zeros

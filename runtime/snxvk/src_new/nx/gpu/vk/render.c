@@ -401,6 +401,7 @@ static int clear_masked(u32 slot, u32 mask, const float* cc, VkRect2D rect, u32 
     if (!p) return 0;
     VkCommandBuffer cb = vk_cmd();
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    if (g_vk.has_dyn_vi) rec_CmdSetVertexInputEXT(cb, 0, NULL, 0, NULL); /* SWR: no vertex input */
     plain_state(cb, rect);
     u32 pc[8] = {0};
     pc[0] = layer;
@@ -1819,7 +1820,19 @@ static struct {
     u32 viewports;
     float lw, bias[3], bc[4];
     u32 sfront[7], sback[7];
+    /* SWR: the vertex layout set (dynamic vertex input) */
+    u32 vi_nb, vi_na;
+    VkVertexInputBindingDescription2EXT vib[33];
+    VkVertexInputAttributeDescription2EXT via[32];
 } g_dyn;
+/* SWR: the pipeline for a draw's key: with dynamic vertex input looked up without its vertex layout, which the draw
+   sets itself (draw_vertex_input) */
+static VkPipeline draw_pipeline(const PipeKey* k) {
+    if (!g_vk.has_dyn_vi) return vk_pipeline_get_deferred(k);
+    PipeKey s = *k;
+    vk_pipekey_strip_vi(&s);
+    return vk_pipeline_get_deferred(&s);
+}
 #define DYN(field, value, call)                                                                                        \
     do {                                                                                                               \
         if (fresh || g_dyn.field != (value)) {                                                                         \
@@ -2970,7 +2983,7 @@ retry:
     if (kept) {
         pipe = g_draw.pipe;
         if (g_draw.check) {
-            VkPipeline made = vk_pipeline_get_deferred(k);
+            VkPipeline made = draw_pipeline(k);
             if (vk_pipeline_ready(made) != vk_pipeline_ready(pipe)) {
                 draw_differs("pipeline");
                 kept = 0;
@@ -2980,7 +2993,7 @@ retry:
     } else if (g_draw.pipe && !memcmp(k, &g_draw.k, sizeof *k))
         pipe = g_draw.pipe;
     else
-        pipe = vk_pipeline_get_deferred(k);
+        pipe = draw_pipeline(k);
     if (!pipe) {
         draw_images_discard(&images);
         g_vk_skipped++;
@@ -3067,7 +3080,36 @@ retry:
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, (u32)b + 2, 1, &bset[b], 0, NULL);
         }
     if (k->nbind)
-        rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize, g_vk.has_dynamic_stride ? pl->stride : NULL);
+        rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize,
+                                  g_vk.has_dynamic_stride && !g_vk.has_dyn_vi ? pl->stride : NULL);
+    if (g_vk.has_dyn_vi) { /* SWR: the layout the key describes, set when it differs from the last draw's */
+        VkVertexInputBindingDescription2EXT vib[33];
+        VkVertexInputAttributeDescription2EXT via[32];
+        memset(vib, 0, sizeof vib);
+        memset(via, 0, sizeof via);
+        for (u32 i = 0; i < k->nbind; i++) {
+            vib[i].sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT;
+            vib[i].binding = i;
+            vib[i].stride = (u32)pl->stride[i];
+            vib[i].inputRate = k->bind[i].divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+            vib[i].divisor = k->bind[i].divisor ? k->bind[i].divisor : 1;
+        }
+        for (u32 i = 0; i < k->nattr; i++) {
+            via[i].sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT;
+            via[i].location = k->attr[i].loc;
+            via[i].binding = k->attr[i].binding;
+            via[i].format = (VkFormat)k->attr[i].format;
+            via[i].offset = k->attr[i].offset;
+        }
+        if (fresh || g_dyn.vi_nb != k->nbind || g_dyn.vi_na != k->nattr ||
+            memcmp(g_dyn.vib, vib, k->nbind * sizeof *vib) || memcmp(g_dyn.via, via, k->nattr * sizeof *via)) {
+            g_dyn.vi_nb = k->nbind;
+            g_dyn.vi_na = k->nattr;
+            memcpy(g_dyn.vib, vib, sizeof vib);
+            memcpy(g_dyn.via, via, sizeof via);
+            rec_CmdSetVertexInputEXT(cb, k->nbind, vib, k->nattr, via);
+        }
+    }
 
     VkViewport vp = vk_render_viewport(r);
     u32 viewports = last->si.writes_viewport ? GUEST_VIEWPORTS : 1;

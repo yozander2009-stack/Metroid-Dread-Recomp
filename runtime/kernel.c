@@ -783,7 +783,9 @@ static void swr_svc_(CPU* c, u32 imm){
         for(int k=0;k<4 && !hit;k++){ for(int s=0;s<3;s++) if(ra==sites[s]) hit=1;
           if(hit || !fp) break; MemBlock b; mem_query(fp,&b); if(!(b.perm&PERM_R) || fp<b.addr || fp+16>b.addr+b.size) break;
           ra=gr64(fp+8); u64 nfp=gr64(fp); if(nfp<=fp) break; fp=nfp; }
-        if(hit){ static u64 n; if(!n++) LOG("fast loading: the game's fixed 60 ms load pauses are shortened to 1 ms\n"); ns=1000000; } } }
+        if(hit){ static u64 n; if(!n++) LOG("fast loading: the game's fixed 60 ms load pauses are shortened to 1 ms\n"); ns=1000000; }
+        { static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_FASTLOAD")!=NULL;   /* test only: every 60 ms sleep, which site */
+          if(tr) LOG("fast loading: %s at %llx (lr %llx, thread %s)\n",hit?"hit":"other",(unsigned long long)ra,(unsigned long long)x[30],t&&t->name[0]?t->name:"?"); } } }
     /* loading screens at the frame cap: with loading_60fps on, the loading-screen render loop (F_81CCD80; elevators,
        trains, area loads) sleeps 16 ms a frame (the code_014.c patch). Above a 60 FPS cap that sleep lasts one frame at the
        cap instead, so loading screens run at the cap too (the pacing guard's lower rate when particles pile up included:

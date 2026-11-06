@@ -15,6 +15,12 @@ fi
 if [ -f "$HERE/usr/share/metroid-dread/update.txt" ] && ! cmp -s "$HERE/usr/share/metroid-dread/update.txt" "$GAME/update.txt"; then
   cp -f "$HERE/usr/share/metroid-dread/update.txt" "$GAME/update.txt"
 fi
+# Native Vulkan's pipeline list (no game code: shader hashes and pipeline state), refreshed like the program
+if [ -f "$HERE/usr/share/metroid-dread/pipeline_recipes_shipped.bin" ]; then
+  mkdir -p "$GAME/vulkan_native"
+  cmp -s "$HERE/usr/share/metroid-dread/pipeline_recipes_shipped.bin" "$GAME/vulkan_native/pipeline_recipes_shipped.bin" ||
+    cp -f "$HERE/usr/share/metroid-dread/pipeline_recipes_shipped.bin" "$GAME/vulkan_native/pipeline_recipes_shipped.bin"
+fi
 cmp -s "$HERE/metroid-dread.png" "$GAME/metroid-dread.png" || cp -f "$HERE/metroid-dread.png" "$GAME/metroid-dread.png" 2>/dev/null
 export SWR_RECOMPILER="$HERE/usr/share/metroid-dread/recompiler"
 cd "$GAME" || exit 1

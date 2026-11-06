@@ -155,6 +155,9 @@ def release(out, exe, version):
     cp(exe, os.path.join(dst, 'Metroid Dread.exe'))
     for f in ('zlib1.dll', 'SDL2.dll'):
         cp(redist(f), os.path.join(dst, f))
+    # Native Vulkan's pipeline list (shader hashes and pipeline state, no game code): its pipelines built at start
+    cp(os.path.join(ROOT, 'dread', 'pipeline_recipes_shipped.bin'),
+       os.path.join(dst, 'vulkan_native', 'pipeline_recipes_shipped.bin'))
     rc = os.path.join(dst, 'recompiler')
     for f in RECOMPILER_PY:
         cp(os.path.join(ROOT, f), os.path.join(rc, f))

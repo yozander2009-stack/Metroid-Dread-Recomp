@@ -556,6 +556,34 @@ void rec_CmdBindVertexBuffers(VkCommandBuffer cb, u32 first, u32 n, const VkBuff
     rec_CmdBindVertexBuffers2(cb, first, n, bufs, offs, NULL, NULL);
 }
 
+/* SWR: a draw's vertex layout as dynamic state (VK_EXT_vertex_input_dynamic_state): nb bindings, then na attributes,
+   after the arguments */
+typedef struct {
+    VkCommandBuffer cb;
+    u32 nb, na;
+} ViArgs;
+static void vi_run(const void* p) {
+    const ViArgs* x = p;
+    const u8* q = (const u8*)p + REC_AL(sizeof *x);
+    const VkVertexInputBindingDescription2EXT* b = (const void*)q;
+    const VkVertexInputAttributeDescription2EXT* a = (const void*)(q + REC_AL(x->nb * sizeof *b));
+    vkCmdSetVertexInputEXT(x->cb, x->nb, b, x->na, a);
+}
+void rec_CmdSetVertexInputEXT(VkCommandBuffer cb, u32 nb, const VkVertexInputBindingDescription2EXT* b, u32 na,
+                              const VkVertexInputAttributeDescription2EXT* a) {
+    if (!rec_on(cb)) {
+        vkCmdSetVertexInputEXT(cb, nb, b, na, a);
+        return;
+    }
+    u64 h = REC_AL(sizeof(ViArgs)), bn = REC_AL(nb * sizeof *b);
+    ViArgs* x = rec_push(vi_run, h + bn + na * sizeof *a);
+    u8* q = (u8*)x + h;
+    *x = (ViArgs){cb, nb, na};
+    if (nb) memcpy(q, b, nb * sizeof *b);
+    if (na) memcpy(q + bn, a, na * sizeof *a);
+    rec_commit();
+}
+
 /* transform feedback (VK_EXT_transform_feedback): the buffers with their offsets and sizes (bind), or the counter
    buffers begin resumes from and end writes (NULL: none), each an array of n after the arguments */
 typedef struct {
