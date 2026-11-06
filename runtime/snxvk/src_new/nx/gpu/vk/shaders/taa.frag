@@ -59,6 +59,7 @@ void main() {
         vec3 h = clamp(ycc(hs(uv)), m1 - 1.25 * sd, m1 + 1.25 * sd);
         o = mix(rgb(h), c0, pc.info.z);
     }
+    o = clamp(o, vec3(0.0), vec3(0.999)); // the clip box in YCoCg can reach outside RGB
     oh = vec4(o, 1.0);
     oc = vec4(itm(o), 1.0);
 }

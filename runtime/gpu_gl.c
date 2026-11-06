@@ -1952,6 +1952,7 @@ static const char* TAA_FS="#version 430 core\n"
   "  vec2 uv=(vec2(p)+0.5+mv)/vec2(sz); vec3 o=c0;\n"
   "  if(info.x>0.5 && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))){\n"
   "    vec3 h=clamp(ycc(hs(uv)),m1-1.25*sd,m1+1.25*sd); o=mix(rgb(h),c0,info.z); }\n"
+  "  o=clamp(o,vec3(0.0),vec3(0.999));   /* the clip box in YCoCg can reach outside RGB */\n"
   "  oh=vec4(o,1.0); oc=vec4(itm(o),1.0); }\n";
 static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
   if(g_dmv.failed){ g_taa_failed=1; LOG("taa (OpenGL): no motion vectors on this driver: TAA off\n"); return 0; }
