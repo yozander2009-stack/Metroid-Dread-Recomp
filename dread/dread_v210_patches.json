@@ -61,8 +61,69 @@
   },
   "code_011.c": {
    "pristine": "289e28642249d66884704e0e3d2710519b2af54578ecbbfc5a4447605dd8cf6a",
-   "result": "f4540122c0ee431a72cab5395e038923c0ab16e548fe7f69fcb81ce263fb328d",
+   "result": "f43e49c164e40240757a991ec5f9dff26de377ba0494d455b265a238f5d85794",
    "hunks": [
+    [
+     1339,
+     1339,
+     [
+      "/* SWR texture pool (2x texture packs): the GPU memory manager (F_8158350) carves fixed pools (300, 1008, 208 MB) out of",
+      "   a parent mspace that F_8158790 builds on a static 1583 MB block in the main module. On PC the",
+      "   parent is instead built on a new block mapped with svcMapPhysicalMemory in the alias region (Dread maps none there),",
+      "   grown by exactly what the pools gain, and the pools are 3x. If the mapping fails: the game's own sizes. */",
+      "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
+      "static int swr_moved;   /* the parent got its new block */",
+      "static unsigned swr_scale(void){ char b[8]; unsigned x=3;   /* PC default: 3x the console pools (2x texture packs need it) */",
+      "  if(GetEnvironmentVariableA(\"SWR_TEX_POOL_X\",b,sizeof b)>0 && b[0]>='1' && b[0]<='3') x=(unsigned)(b[0]-'0');   /* tests: 1 = console sizes */",
+      "  return x; }",
+      "static unsigned swr_pool(unsigned v){ return swr_moved ? v*swr_scale() : v; }   /* <= 1008 MB * 3: fits, low 16 bits stay 0 */"
+     ]
+    ],
+    [
+     1356,
+     1357,
+     [
+      " c->x[21]=(u64)((u32)((c->x[21]&0xFFFFFFFF0000FFFFull)|swr_pool(314572800u)));   /* SWR texture pool: 300 MB pool */"
+     ]
+    ],
+    [
+     1427,
+     1428,
+     [
+      " c->x[21]=(u64)((u32)((c->x[21]&0xFFFFFFFF0000FFFFull)|swr_pool(1056964608u)));   /* SWR texture pool: 1008 MB pool */"
+     ]
+    ],
+    [
+     1483,
+     1484,
+     [
+      " c->x[21]=(u64)((u32)((c->x[21]&0xFFFFFFFF0000FFFFull)|swr_pool(218103808u)));   /* SWR texture pool: 208 MB pool */"
+     ]
+    ],
+    [
+     1706,
+     1706,
+     [
+      "static unsigned long long swr_parent(unsigned long long v){ unsigned long long g=0, s[3]={314572800u,1056964608u,218103808u};",
+      "  if(!swr_moved) return v; for(int i=0;i<3;i++) g+=s[i]*(swr_scale()-1); return v+g; }",
+      "static u64 swr_parent_base(CPU* RESTRICT c, u64 orig){",
+      "  if(swr_scale()==1) return orig;",
+      "  u64 x0=c->x[0], x1=c->x[1], pc=c->pc, addr=0x380000000ull;   /* alias region 0x300000000 + 2 GB */",
+      "  swr_moved=1; u64 size=(swr_parent(1659895808ull)+0xFFFull)&~0xFFFull;",
+      "  c->x[0]=addr; c->x[1]=size; c->rt->svc(c,0x2C);   /* svcMapPhysicalMemory */",
+      "  int ok=c->x[0]==0; c->x[0]=x0; c->x[1]=x1; c->pc=pc;",
+      "  if(!ok){ swr_moved=0; return orig; }",
+      "  return addr; }"
+     ]
+    ],
+    [
+     1713,
+     1715,
+     [
+      " c->x[0]=(u64)(swr_parent_base(c,RD64((c->x[0]+2904))));   /* SWR texture pool: a bigger block when asked for */",
+      " c->x[1]=(u64)(swr_parent(1659895808ull));"
+     ]
+    ],
     [
      9581,
      9581,
@@ -80,6 +141,57 @@
      9593,
      [
       " if(c->z || swr_cut60()) goto L_815E47C;   /* SWR: 60 FPS cutscenes keep the interval */"
+     ]
+    ],
+    [
+     40073,
+     40074,
+     [
+      " c->x[20]=(u64)((u32)(1179648));   /* SWR particle staging: 8x the game's 144 KB per frame */"
+     ]
+    ],
+    [
+     40170,
+     40170,
+     [
+      "/* SWR particle pool: the game made 1024 particle vertex buffers (144 KB each) and took one per effect per frame,",
+      "   giving it back ~0.5 s later, with no bounds check: above 60 FPS more are in use at once and at 1025 it read past",
+      "   the pool and crashed. On PC: 2048 when the GPU memory pools are the PC sizes (swr_moved, texture pool above), with",
+      "   both pointer lists (free [GOT+1992], pending [GOT+2024]) moved to blocks of that size. The runtime reads",
+      "   swr_particle_pool for its pacing guard. */",
+      "SWR_EXPORT int swr_particle_pool = 1024;",
+      "static u64 swr_pool_n(void){ swr_particle_pool = swr_moved ? 2048 : 1024; return (u64)swr_particle_pool; }",
+      "static void swr_pool_list(CPU* RESTRICT c, u64 got){   /* a new list of swr_particle_pool slots for the GOT entry */",
+      "  c->x[0]=(u64)((u32)(swr_particle_pool*8)); c->x[1]=(u64)((u32)(48)); c->x[30]=135739732; F_8088BA0(c,134777760);",
+      "  if(c->x[0]){ u8* const M=c->mem; WR64(164409344ull+got,c->x[0]); } }"
+     ]
+    ],
+    [
+     40189,
+     40190,
+     [
+      " c->x[0]=(u64)((u32)(swr_pool_n()*16));   /* SWR particle pool: entries of 16 bytes */"
+     ]
+    ],
+    [
+     40193,
+     40194,
+     [
+      " c->x[8]=(u64)(c->x[0]+(u64)swr_particle_pool*16);"
+     ]
+    ],
+    [
+     40208,
+     40208,
+     [
+      " if(swr_particle_pool>1024){ u64 pool_=c->x[0]; swr_pool_list(c,1992); swr_pool_list(c,2024); c->x[0]=pool_; }   /* SWR particle pool: bigger lists */"
+     ]
+    ],
+    [
+     40290,
+     40291,
+     [
+      " (void)(subs64(c,c->x[25],(u64)swr_particle_pool*16));   /* SWR particle pool */"
      ]
     ]
    ]
@@ -203,6 +315,43 @@
      38321,
      [
       " if(((u32)c->x[0]!=0) || swr_skipcut()) goto L_906E330;"
+     ]
+    ]
+   ]
+  },
+  "code_149.c": {
+   "pristine": "88ea157cacf801ec9d096059a5da9088ff1f9c16e14741da4622267790dc79fc",
+   "result": "40500380041120080ded155490c1046083148fec6daf64ed8c90f89aaf6e0cd7",
+   "hunks": [
+    [
+     33588,
+     33588,
+     [
+      "/* SWR spawn limit: see F_9158D78 */",
+      "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
+      "typedef struct { u64 key, t; i64 credit; u32 frame; u8 ok; } SwrSpawn;",
+      "static SwrSpawn swr_spawn[4096];",
+      "static int swr_spawn_ok(CPU* RESTRICT c, u64 comp, u32 id){",
+      "  static int off=-1; if(off<0){ char b[4]; off= GetEnvironmentVariableA(\"SWR_NO_SPAWN_LIMIT\",b,sizeof b)>0 && b[0]=='1'; }",
+      "  if(off) return 1;",
+      "  u8* const M=c->mem; const i64 tick=320000;   /* 1/60 s at 19.2 MHz */",
+      "  u64 key=comp*0x9E3779B97F4A7C15ull ^ id; u32 s=(u32)(key>>52)&4095;",
+      "  u64 now=c->rt->ticks(); u64 fa=RD64(164409344ull+2008); u32 frame= fa? RD32(fa) : 0;",
+      "  SwrSpawn* e=0; for(int i=0;i<16;i++){ SwrSpawn* q=&swr_spawn[(s+i)&4095]; if(q->key==key){ e=q; break; } if(!e && (!q->key || now-q->t>19200000ull)) e=q; }",
+      "  if(!e) return 1;",
+      "  if(e->key!=key){ e->key=key; e->t=now; e->credit=0; e->frame=frame; e->ok=1; return 1; }",
+      "  if(e->frame==frame) return e->ok;",
+      "  i64 cr=e->credit+(i64)(now-e->t); if(cr>tick) cr=tick;",
+      "  e->t=now; e->frame=frame;",
+      "  if(cr>=tick/2){ e->credit=cr-tick; e->ok=1; } else { e->credit=cr; e->ok=0; }",
+      "  return e->ok; }"
+     ]
+    ],
+    [
+     33601,
+     33601,
+     [
+      " if(!swr_spawn_ok(c,c->x[0],RD32(c->x[1]+24))) goto L_915900C;   /* SWR spawn limit: 60 a second per source */"
      ]
     ]
    ]

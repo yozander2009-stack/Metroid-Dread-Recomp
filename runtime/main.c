@@ -592,6 +592,8 @@ void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt
    the legs and dies. With a cap above 60, slow-motion frames are paced at 60, where it works as on the Switch.
    g_pace_fps is the cap the pacers use; SWR_NO_SLOWMO_60=1 = old behaviour (tests). */
 volatile int g_pace_fps=1;
+static const volatile int* g_particle_pool;   /* swr_particle_pool in a patched code DLL: the game's particle vertex-buffer
+                                                 pool size, set when the game makes the pool (1024 or 2048) */
 static void pace_update(void){
   static int off=-1; if(off<0) off=getenv("SWR_NO_SLOWMO_60")!=NULL;
   int f=g_opt_fps;
@@ -607,13 +609,22 @@ static void pace_update(void){
      logger work-profiler/snxup/mk_patch_pool.py, acid replay): peaks at a 60 cap 72-109; at 240 560 (our renderer,
      ~100-190 FPS), 800-1040 with faster renderer variants. A guard at 768 came too late (one run went 900 -> 1025 in
      two frames). So: over 400 in use pace at 120, over 600 at 60, back to the cap under 200. A cap of 60 or less is
-     never touched; SWR_NO_POOL_GUARD=1 = off (tests) */
+     never touched; SWR_NO_POOL_GUARD=1 = off (tests).
+     The game patch in code_011.c (2026-11-06) makes the pool 2048 and exports swr_particle_pool (g_particle_pool). It
+     also enlarges the per-frame particle staging blocks: with the game's 144 KB they overflowed into the next allocation
+     at ~1500 in use, which is why the old limits had to stay so low. With the patch: 120 FPS over 1600, 60 over 1800,
+     back to the cap under 1200 (MEASURED unguarded peaks at 240 FPS: 1636-1914; 4096 entries do not fit the game's GPU
+     memory) */
   { static int off2=-1; if(off2<0) off2=getenv("SWR_NO_POOL_GUARD")!=NULL;
-    static int lvl; u32 n=0;
-    if(!off2 && (f>60 || f==0)){ u64 p=*(volatile u64*)GP(164409344ull+2000); if(p && p<(1ull<<40)) n=*(volatile u32*)GP(p); }
+    static int lvl; static u32 peak; u32 n=0, sz=1024;
+    if(g_particle_pool){ int v=*g_particle_pool; if(v>=1024 && v<=4096) sz=(u32)v; }
+    if(f>60 || f==0){ u64 p=*(volatile u64*)GP(164409344ull+2000); if(p && p<(1ull<<40)) n=*(volatile u32*)GP(p); }
     if(n>4096) n=0;   /* not the pool's count (before the game made it) */
-    int want= n>600? 2 : n>400? (lvl>1? 2 : 1) : n<200? 0 : lvl;
-    if(want!=lvl){ lvl=want; LOG("particle pool: %u of 1024 in use, pacing at %s\n",n,lvl==2?"60 FPS":lvl==1?"120 FPS":"the frame cap"); }
+    if(n>=256 && n>=peak+64){ peak=n; LOG("particle pool: %u of %u in use (highest so far)\n",n,sz); }
+    if(off2) n=0;
+    u32 hi= sz>=2048? sz-248 : 600, mid= sz>=2048? sz-448 : 400, lo= sz>=2048? sz-848 : 200;
+    int want= n>hi? 2 : n>mid? (lvl>1? 2 : 1) : n<lo? 0 : lvl;
+    if(want!=lvl){ lvl=want; LOG("particle pool: %u of %u in use, pacing at %s\n",n,sz,lvl==2?"60 FPS":lvl==1?"120 FPS":"the frame cap"); }
     if(lvl==2) f=60; else if(lvl==1 && (f>120 || f==0)) f=120; }
   /* Cinematics run at 30: the main loop sets its frame timer's target ([[GOT 0x9CBF0E8]] +64, float) to 30 and the game
      makes a new picture every ~33 ms, give or take 2 ms. Shown the moment each arrives, they stayed on screen 29 or 37 ms
@@ -706,6 +717,8 @@ static int load_code(void){
 #endif
     WARN("Cannot find the recompiled code: %s\n",p); return -1; }
   ModFn f=(ModFn)plat_dl_sym(h,"swr_module"); if(!f){ WARN("%s is not a SwitchRecomp module\n",p); return -1; }
+  g_particle_pool=(const volatile int*)plat_dl_sym(h,"swr_particle_pool");
+  if(g_particle_pool) LOG("code: particle pool size from the game patch\n");
 #if defined(_WIN32)
   { /* tell gcc from tcc builds by the PE linker version (ld 2.x vs tcc 6.0). tcc code is a lot slower */
     const u8* b=(const u8*)h; u32 lf; memcpy(&lf,b+0x3C,4); u8 mj=b[lf+24+2], mn=b[lf+24+3];
