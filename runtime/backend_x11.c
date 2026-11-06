@@ -97,6 +97,7 @@ static void stick_dz(i32* x, i32* y){
 static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   if(!sdl.Init) return;
   sdl.Update();
+  { extern int hd_rumble_open(void* (*)(const char*)); hd_rumble_open(sdl_sym); }   /* HD rumble (rumble_hd.c, its own thread) */
   if(g_pad_gc && !sdl.Attached(g_pad_gc)){ sdl.Close(g_pad_gc); g_pad_gc=NULL; LOG("controllers: disconnected\n"); }
   if(!g_pad_gc){ u64 now=plat_ns(); if(now-g_pad_scan<1000000000ull) return; g_pad_scan=now;
     for(int i=0;i<sdl.NumJoysticks() && !g_pad_gc;i++) if(sdl.IsGameController(i)) g_pad_gc=sdl.Open(i);
@@ -117,9 +118,8 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
                      Steam Input passes it to the haptics */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
     static u16 plo=1, phi=1; static u64 last; u64 now=plat_ns(); u16 ulo=(u16)(lo*65535.0f), uhi=(u16)(hi*65535.0f);
-    { extern int hd_rumble_open(void* (*)(const char*)); extern void hd_rumble_send(void); extern int hd_rumble_active(void);
-      hd_rumble_open(sdl_sym); hd_rumble_send();   /* Nintendo pads: HD rumble (rumble_hd.c) */
-      int t= sdl_gcgettype? sdl_gcgettype(g) : 0; if(hd_rumble_active() && (t==5||t==11||t==12||t==13)) return; }
+    { extern int hd_rumble_covers(int,const char*);   /* Nintendo pads, DualSense, Steam Deck: HD rumble plays it */
+      int t= sdl_gcgettype? sdl_gcgettype(g) : 0; if(hd_rumble_covers(t,sdl.Name(g))) return; }
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now; sdl_rumble(g,ulo,uhi,ulo||uhi? 250 : 0); } }
 }
 

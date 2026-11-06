@@ -618,17 +618,16 @@ void video_poll(void){
   { /* rumble (svc_hid.c hid_rumble_get) to the pads input comes from: on a change, else refreshed every 100 ms
        (SDL's rumble runs for the duration given, so it stops by itself when the game stops sending) */
     extern void hid_rumble_get(float*,float*); float lo, hi; hid_rumble_get(&lo,&hi);
-    { extern int hd_rumble_open(void* (*)(const char*)); extern void hd_rumble_send(void);   /* Nintendo pads: HD rumble */
-      if(sdl_ok && sdl_npad>0) hd_rumble_open(sdl_sym);
-      hd_rumble_send(); }
+    { extern int hd_rumble_open(void* (*)(const char*));   /* HD rumble (rumble_hd.c, its own thread) */
+      if(sdl_ok) hd_rumble_open(sdl_sym); }
     static unsigned short plo=1, phi=1; static u64 last; u64 now=plat_ns();
     unsigned short ulo=(unsigned short)(lo*65535.0f), uhi=(unsigned short)(hi*65535.0f);
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now;
       extern int g_opt_ctrl_index;
-      extern int hd_rumble_active(void);
+      extern int hd_rumble_covers(int,const char*);
       if(sdl_ok && sdl_gcrumble){ int first= g_opt_ctrl_index>0? g_opt_ctrl_index-1 : 0, lastp= g_opt_ctrl_index>0? g_opt_ctrl_index : sdl_npad;
         for(int i=first;i<lastp && i<sdl_npad;i++){ int t= sdl_gcgettype? sdl_gcgettype(sdl_pad[i]) : 0;
-          if(hd_rumble_active() && (t==5||t==11||t==12||t==13)) continue;   /* a Nintendo pad: HD rumble (rumble_hd.c) plays it */
+          if(hd_rumble_covers(t,NULL)) continue;   /* a Nintendo pad / DualSense: HD rumble (rumble_hd.c) plays it */
           sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); } }
       if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); } } }
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
