@@ -8,6 +8,7 @@ layout(set = 0, binding = 1) uniform sampler2D hist;
 layout(set = 0, binding = 2) uniform sampler2D mvt;
 layout(push_constant) uniform PC {
     vec4 info; // x history valid, y motion vectors, z weight of this frame
+    vec4 jit;  // xy: this frame's jitter in pixels (what was drawn at texel q belongs at q - jitter)
 } pc;
 layout(location = 0) out vec4 oh;
 layout(location = 1) out vec4 oc;
@@ -35,14 +36,20 @@ vec3 hs(vec2 uv) {
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     sz = textureSize(cur, 0);
-    vec3 c0 = tm(texelFetch(cur, p, 0).rgb);
+    vec3 c0 = vec3(0.0);
+    float cw = 0.0;
     vec3 m1 = vec3(0.0), m2 = vec3(0.0);
     vec2 mv = vec2(0.0);
     float best = -1.0;
     for (int y = -1; y <= 1; y++)
         for (int x = -1; x <= 1; x++) {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), sz - 1);
-            vec3 s = ycc(tm(texelFetch(cur, q, 0).rgb));
+            vec3 t = tm(texelFetch(cur, q, 0).rgb);
+            vec2 d = vec2(x, y) - pc.jit.xy;
+            float w = exp(-8.0 * dot(d, d)); // unjittered: narrow Gaussian at the true sample spots (measured sharpest)
+            c0 += t * w;
+            cw += w;
+            vec3 s = ycc(t);
             m1 += s;
             m2 += s * s;
             if (pc.info.y > 0.5) {
@@ -51,6 +58,7 @@ void main() {
                 if (l > best) { best = l; mv = v; }
             }
         }
+    c0 /= cw;
     m1 /= 9.0;
     vec3 sd = sqrt(max(m2 / 9.0 - m1 * m1, vec3(0.0)));
     vec2 uv = (vec2(p) + 0.5 + mv) / vec2(sz);

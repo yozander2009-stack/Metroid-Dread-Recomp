@@ -16,6 +16,7 @@ extern int g_opt_hdr, g_opt_hdr_paper, g_opt_hdr_peak, g_opt_aa, g_opt_sharp;   
 extern int backend_hdr_peak_nits(void);                  /* the display's peak, 0 if unknown */
 
 int vk_hdr_wanted(void) { return g_opt_hdr && g_vk_hdr_ext; }
+extern int swr_sharp(void);  /* gpu_gl.c: the setting, or light sharpening with TAA */
 extern int g_opt_show_fps;                               /* FPS counter (main.c fps_overlay_rects) */
 extern int fps_overlay_rects(int W, int H, int (*r)[5], int max);
 extern volatile int g_skip_prompt;   /* SWR: "Hold (-) to skip" (main.c skip_hold_filter) */
@@ -24,7 +25,7 @@ extern u64 plat_ns(void);
 extern int skip_prompt_rgba(u8** px, int* w, int* h, int* tw);   /* gpu_gl.c: the prompt in the game's font */
 static float g_ovl_alpha;
 /* the present pass runs for HDR output, anti-aliasing, the FPS counter or the skip prompt (renderer.c show) */
-int vk_present_pass_wanted(void) { return g_vk_sc_hdr || g_opt_aa || g_opt_sharp > 0 || g_opt_show_fps || g_skip_prompt || g_ovl_alpha > 0; }
+int vk_present_pass_wanted(void) { return g_vk_sc_hdr || g_opt_aa || swr_sharp() > 0 || g_opt_show_fps || g_skip_prompt || g_ovl_alpha > 0; }
 
 static VkImage g_mid;
 static VmaAllocation g_mid_mem;
@@ -239,8 +240,8 @@ VkImage vk_hdr_mid(int srgb) {
         LOG("vulkan: HDR output %s, paper white %d nits, peak %d nits%s\n", g_vk_sc_hdr == 1 ? "scRGB" : "HDR10 (PQ)",
             g_opt_hdr_paper, g_opt_hdr_peak > 0 ? g_opt_hdr_peak : backend_hdr_peak_nits(), g_opt_aa ? ", FXAA" : "");
     else
-        LOG("vulkan: present pass:%s%s%s\n", g_opt_aa ? " FXAA" : "", g_opt_sharp > 0 ? " sharpening" : "",
-            g_opt_aa || g_opt_sharp > 0 ? "" : " overlays only");
+        LOG("vulkan: present pass:%s%s%s\n", g_opt_aa ? " FXAA" : "", swr_sharp() > 0 ? " sharpening" : "",
+            g_opt_aa || swr_sharp() > 0 ? "" : " overlays only");
     return g_mid;
 }
 
@@ -265,7 +266,7 @@ void vk_hdr_resolve(VkCommandBuffer cb, VkImage sc) {
         float ox, oy, ow, oh, oa, hold, bx, by, bw, bh;
         float sharp; /* SWR: 0 off, else 0..1 (ini sharpening / 100) */
     } pc = {(float)paper, (float)peak, (float)g_vk_sc_hdr, g_opt_aa ? 1.0f : 0.0f, g_vk.sc_srgb ? 1.0f : 0.0f, 0.75f};
-    pc.sharp = g_opt_sharp > 0 ? (float)g_opt_sharp / 100.0f : 0.0f;
+    pc.sharp = swr_sharp() > 0 ? (float)swr_sharp() / 100.0f : 0.0f;
     if (g_ovl_state == 1) { /* SWR: first use: the prompt image to the GPU, in this frame's commands */
         VkBuffer sb; u64 so; u64 n = (u64)g_ovl_w * g_ovl_h * 4;
         u8* dst = vk_stage(n, 16, &sb, &so);

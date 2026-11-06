@@ -1928,11 +1928,12 @@ static void rs_depth_copy(Tex* z, u32 w, u32 h){
    so moving things and newly seen areas do not smear. The jitter above moves the scene by a sub-pixel Halton(2,3)
    offset each frame, so the history collects 8 sample positions per pixel. History: bicubic (Catmull-Rom) fetch,
    RGBA16F, tone-mapped. The result replaces the scene target before post effects, bloom and the HUD read it */
-static struct { GLuint prog, vao, fbo, hist[2], tmp; u32 w, h, cur; GLenum tfmt; int valid; GLint loc; } g_taa;
+static struct { GLuint prog, vao, fbo, hist[2], tmp; u32 w, h, cur; GLenum tfmt; int valid; GLint loc, loc_j; } g_taa;
 static const char* TAA_VS="#version 430 core\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0.0,1.0); }";
 static const char* TAA_FS="#version 430 core\n"
   "layout(binding=0) uniform sampler2D cur; layout(binding=1) uniform sampler2D hist; layout(binding=2) uniform sampler2D mvt;\n"
   "uniform vec4 info;   /* x history valid, y motion vectors, z weight of this frame */\n"
+  "uniform vec4 jit;    /* xy: this frame's jitter in pixels (what was drawn at texel q belongs at q - jitter) */\n"
   "layout(location=0) out vec4 oh; layout(location=1) out vec4 oc;\n"
   "ivec2 sz;\n"
   "vec3 tm(vec3 c){ c=max(c,vec3(0.0)); return c/(1.0+max(c.r,max(c.g,c.b))); }\n"
@@ -1946,11 +1947,12 @@ static const char* TAA_FS="#version 430 core\n"
   "  for(int y=0;y<4;y++) for(int x=0;x<4;x++) r+=hf(b+ivec2(x,y))*(w[x].x*w[y].y);\n"
   "  return clamp(r,vec3(0.0),vec3(1.0)); }\n"
   "void main(){ ivec2 p=ivec2(gl_FragCoord.xy); sz=textureSize(cur,0);\n"
-  "  vec3 c0=tm(texelFetch(cur,p,0).rgb); vec3 m1=vec3(0.0), m2=vec3(0.0); vec2 mv=vec2(0.0); float best=-1.0;\n"
+  "  vec3 c0=vec3(0.0); float cw=0.0; vec3 m1=vec3(0.0), m2=vec3(0.0); vec2 mv=vec2(0.0); float best=-1.0;\n"
   "  for(int y=-1;y<=1;y++) for(int x=-1;x<=1;x++){ ivec2 q=clamp(p+ivec2(x,y),ivec2(0),sz-1);\n"
-  "    vec3 s=ycc(tm(texelFetch(cur,q,0).rgb)); m1+=s; m2+=s*s;\n"
+  "    vec3 t=tm(texelFetch(cur,q,0).rgb); vec2 d=vec2(x,y)-jit.xy; float w=exp(-jit.z*dot(d,d)); c0+=t*w; cw+=w;   /* unjittered: narrow Gaussian at the true sample spots */\n"
+  "    vec3 s=ycc(t); m1+=s; m2+=s*s;\n"
   "    if(info.y>0.5){ vec2 v=texelFetch(mvt,q,0).xy; float l=dot(v,v); if(l>best){ best=l; mv=v; } } }\n"
-  "  m1/=9.0; vec3 sd=sqrt(max(m2/9.0-m1*m1,vec3(0.0)));\n"
+  "  c0/=cw; m1/=9.0; vec3 sd=sqrt(max(m2/9.0-m1*m1,vec3(0.0)));\n"
   "  vec2 uv=(vec2(p)+0.5+mv)/vec2(sz); vec3 o=c0;\n"
   "  if(info.x>0.5 && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))){\n"
   "    vec3 h=clamp(ycc(hs(uv)),m1-1.25*sd,m1+1.25*sd); o=mix(rgb(h),c0,info.z); }\n"
@@ -1962,7 +1964,7 @@ static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
     char err[1024]; err[0]=0; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,TAA_FS,err,sizeof err) : 0;
     g_taa.prog= a&&b? link2(a,b,0) : 0;
     if(!g_taa.prog){ g_taa_failed=1; LOG("taa (OpenGL): program failed, TAA off: %s\n",err); return 0; }
-    g_taa.loc=glGetUniformLocation(g_taa.prog,"info");
+    g_taa.loc=glGetUniformLocation(g_taa.prog,"info"); g_taa.loc_j=glGetUniformLocation(g_taa.prog,"jit");
     glGenVertexArrays(1,&g_taa.vao); glGenFramebuffers(1,&g_taa.fbo);
     LOG("taa (OpenGL): on%s\n",mv? "" : " (no motion vectors yet)"); }
   if(g_taa.w!=w || g_taa.h!=h || g_taa.tfmt!=t->f.ifmt){
@@ -1985,7 +1987,9 @@ static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,t->id);
   glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_taa.hist[c^1]);
   glActiveTexture(GL_TEXTURE0+2); glBindTexture(GL_TEXTURE_2D,mv? mv : g_taa.hist[c^1]);
-  { float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, 0.f }; glUniform4fv(g_taa.loc,1,in); }
+  { float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, 0.f }; glUniform4fv(g_taa.loc,1,in);
+    static float js=0, jk=0; if(!jk){ const char* e=getenv("SWR_TAA_JSIGN"); js= e? (float)atof(e) : 1.f; e=getenv("SWR_TAA_K"); jk= e? (float)atof(e) : 8.f; }   /* tests: sign +1 and a narrow kernel measured sharpest */
+    float j[4]={ g_dmv.jit_used? js*g_dmv.jx : 0.f, g_dmv.jit_used? js*g_dmv.jy : 0.f, jk, 0.f }; glUniform4fv(g_taa.loc_j,1,j); }
   glDrawArrays(GL_TRIANGLES,0,3);
   glCopyImageSubData(g_taa.tmp,GL_TEXTURE_2D,0,0,0,0,t->id,GL_TEXTURE_2D,0,0,0,0,(GLsizei)w,(GLsizei)h,1);
   g_taa.valid=1;
@@ -2073,7 +2077,7 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "    vis+=pl*((cn+2.0*h0*sin(n)-cos(2.0*h0-n))/4.0+(cn+2.0*h1*sin(n)-cos(2.0*h1-n))/4.0); }\n"
   "  vis=max(0.03,pow(vis/u_p.y,2.2)); imageStore(oAO,p,vec4(clamp(vis/1.5,0.0,1.0))); }\n";
 static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
-  "layout(binding=0) uniform sampler2D aoT; layout(binding=1) uniform sampler2D edT;\n"
+  "layout(binding=0) uniform sampler2D aoT; layout(binding=1) uniform sampler2D edT; layout(binding=2) uniform sampler2D col;\n"
   "layout(r8,binding=0) writeonly uniform image2D oF;\n"
   "uniform vec4 u_vp;\n"
   "ivec2 cl(ivec2 p){ return clamp(p,ivec2(0),ivec2(u_vp.xy)-1); }\n"
@@ -2087,7 +2091,9 @@ static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_siz
   "  float sw=1.2, sum=a(p)*sw;\n"
   "  sum+=a(p+ivec2(-1,0))*eC.x+a(p+ivec2(1,0))*eC.y+a(p+ivec2(0,-1))*eC.z+a(p+ivec2(0,1))*eC.w; sw+=dot(eC,vec4(1.0));\n"
   "  sum+=a(p+ivec2(-1,-1))*wTL+a(p+ivec2(1,-1))*wTR+a(p+ivec2(-1,1))*wBL+a(p+ivec2(1,1))*wBR; sw+=wTL+wTR+wBL+wBR;\n"
-  "  imageStore(oF,p,vec4(clamp(sum/sw*1.5,0.0,1.0))); }\n";
+  "  vec3 c=texelFetch(col,p,0).rgb; c=max(c,vec3(0.0)); float l=dot(c/(1.0+max(c.r,max(c.g,c.b))),vec3(0.2126,0.7152,0.0722));\n"
+  "  float r=mix(clamp(sum/sw*1.5,0.0,1.0),1.0,smoothstep(0.25,0.75,l));   /* AO dims indirect light: lit highlights keep their brightness */\n"
+  "  imageStore(oF,p,vec4(r)); }\n";
 static const char* AO_APPLY_FS="#version 430 core\nlayout(binding=0) uniform sampler2D aoF; uniform vec4 u_a; out vec4 o;\n"
   "void main(){ float a=texelFetch(aoF,ivec2(gl_FragCoord.xy),0).r; o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
 static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a; } g_ao;
@@ -2115,10 +2121,10 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){
   /* constants (XeGTAO.h GTAOUpdateConstants): view depth = mul/(add-depth); NDC->view from the projection's scale */
   float A=g_proj.a, B=g_proj.b, mul, add;
   if(g_proj.clip){ mul=-B; add=-A; } else { mul=-0.5f*B; add=0.5f*(1.f-A); }   /* depth = -A + B/d, or its 0.5x+0.5 */
-  float tx=1.f/g_proj.p00, ty=1.f/g_proj.p11, radius=60.f;
+  float tx=1.f/g_proj.p00, ty=1.f/g_proj.p11, radius=30.f;   /* game units (~cm): contact shadows, not a broad haze */
   float vp[4]={(float)w,(float)h,1.f/(float)w,1.f/(float)h}, ndc[4]={tx*2.f,ty*-2.f,-tx,ty};
   float pp[4]={radius,3.f,3.f,(float)(dlg_aa()? g_ao.n++%64 : 0)}, dep[4]={mul,add,radius,0};
-  for(int u=0;u<2;u++) glBindSampler(u,0);
+  for(int u=0;u<3;u++) glBindSampler(u,0);
   /* 1: view depth and its MIPs */
   glUseProgram(g_ao.pre); glUniform4fv(g_ao.pre_dep,1,dep);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,z->id);
@@ -2134,6 +2140,7 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){
   /* 3: denoise */
   glUseProgram(g_ao.den); glUniform4fv(g_ao.den_vp,1,vp);
   glBindTexture(GL_TEXTURE_2D,g_ao.ao); glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_ao.ed);
+  glActiveTexture(GL_TEXTURE0+2); glBindTexture(GL_TEXTURE_2D,t->id);
   glBindImageTexture(0,g_ao.fin,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8);
   glDispatchCompute((w+7)/8,(h+7)/8,1);
   glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT);
@@ -2828,6 +2835,9 @@ int g_opt_aa;
    neighbours, the share scaled down where the neighbourhood is already near black or white, so no halos or clipping.
    Neighbours one window pixel away (the picture as it is shown, after downscale or FXAA) */
 int g_opt_sharp;
+/* the sharpening the final pass applies: the setting, or a light 30 with TAA when it is Off (TAA averages jittered frames,
+   which softens like any TAA; Unreal's TAA and DLAA sharpen too). Also the native Vulkan present pass (hdr.c) */
+int swr_sharp(void){ extern int g_opt_taa; return g_opt_sharp>0? g_opt_sharp : g_opt_taa? 30 : 0; }
 static const char* DOWN_FS="#version 430 core\nin vec2 uv; out vec4 o; layout(binding=0) uniform sampler2D t; uniform vec4 px;\n"
   "float L(vec2 p){ return dot(texture(t,p).rgb,vec3(0.299,0.587,0.114)); }\n"
   "vec3 fxaa(vec2 uv){ vec2 rc=1.0/vec2(textureSize(t,0)); vec3 rgbM=texture(t,uv).rgb; float M=dot(rgbM,vec3(0.299,0.587,0.114));\n"
@@ -3056,7 +3066,7 @@ static void screen_quad(GLuint tex, const float* xf, int tw, int th){
   glUseProgram(g_down_prog? g_down_prog : g_blit_prog); g_pipe_on=0; glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,tex); glBindSampler(0,0);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
   { static const GLint idm[4]={GL_RED,GL_GREEN,GL_BLUE,GL_ALPHA}; glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_RGBA,idm); }
-  if(g_down_prog){ glUniform4fv(g_down_xf,1,xf); float pxv[4]={ fabsf_(xf[2])/(float)(dw>0? dw : 1), fabsf_(xf[3])/(float)(dh>0? dh : 1), g_opt_aa? 1.0f : 0.0f, g_opt_sharp>0? (float)g_opt_sharp/100.0f : 0.0f }; glUniform4fv(g_down_px,1,pxv); }
+  if(g_down_prog){ glUniform4fv(g_down_xf,1,xf); float pxv[4]={ fabsf_(xf[2])/(float)(dw>0? dw : 1), fabsf_(xf[3])/(float)(dh>0? dh : 1), g_opt_aa? 1.0f : 0.0f, swr_sharp()>0? (float)swr_sharp()/100.0f : 0.0f }; glUniform4fv(g_down_px,1,pxv); }
   else { static GLint xl=-2; static GLuint xp; if(xl==-2 || xp!=g_blit_prog){ xl=glGetUniformLocation(g_blit_prog,"xf"); xp=g_blit_prog; } glUniform4fv(xl,1,xf); }
   glBindVertexArray(g_scratch_vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4);
   { /* test only: SWR_TEST_BACKBUFFER=frame,frame,...:prefix writes the window's back buffer (what goes on screen,

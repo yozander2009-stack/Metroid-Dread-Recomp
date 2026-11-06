@@ -5,6 +5,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D aoT;
 layout(set = 0, binding = 1) uniform sampler2D edT;
 layout(set = 0, binding = 2, r32f) writeonly uniform image2D oF;
+layout(set = 0, binding = 3) uniform sampler2D col; // the lit scene: AO dims indirect light, lit highlights keep theirs
 layout(push_constant) uniform PC { vec4 vp; } pc;
 ivec2 cl(ivec2 p) { return clamp(p, ivec2(0), ivec2(pc.vp.xy) - 1); }
 vec4 ue(ivec2 p) {
@@ -26,5 +27,7 @@ void main() {
     sw += dot(eC, vec4(1.0));
     sum += a(p + ivec2(-1, -1)) * wTL + a(p + ivec2(1, -1)) * wTR + a(p + ivec2(-1, 1)) * wBL + a(p + ivec2(1, 1)) * wBR;
     sw += wTL + wTR + wBL + wBR;
-    imageStore(oF, p, vec4(clamp(sum / sw * 1.5, 0.0, 1.0)));
+    vec3 c = max(texelFetch(col, p, 0).rgb, vec3(0.0));
+    float l = dot(c / (1.0 + max(c.r, max(c.g, c.b))), vec3(0.2126, 0.7152, 0.0722));
+    imageStore(oF, p, vec4(mix(clamp(sum / sw * 1.5, 0.0, 1.0), 1.0, smoothstep(0.25, 0.75, l))));
 }
