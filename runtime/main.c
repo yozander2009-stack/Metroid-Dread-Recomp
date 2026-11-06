@@ -107,7 +107,7 @@ int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt
 #define MEDIA_TURNS 0
 #endif
 int g_opt_media_turns=MEDIA_TURNS;   /* serialize_media_threads, read by kernel.c core0_member */
-int g_opt_fast_load=1;     /* fast_loading, read by kernel.c SleepThread */
+int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
 static int aspect_given;   /* ini aspect= seen: ultrawide= no longer applies */
 int g_opt_hdr=0, g_opt_hdr_paper=200, g_opt_hdr_peak=0;   /* HDR output (native Vulkan): on, SDR white in nits, peak (0 = the display's) */
@@ -428,7 +428,7 @@ static const IniOpt INI_PERF[]={
   {"low_priority_shader_compiler","1","1 = compile shaders at low priority (less stutter on weak CPUs)"},
   {"fast_forward","0","1 = Tab (or both stick clicks, L3+R3) toggles fast forward: the game clock runs faster, e.g. to\n;   shorten elevator and train rides (their animations follow the clock). Turn it off again before playing"},
   {"fast_forward_speed","3","Fast forward speed, 2-8 times"},
-  {"fast_loading","1","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
+  {"fast_loading","0","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
   {"sleep_waits","1","1 = threads waiting on the OpenGL thread sleep instead of spinning (frees CPU on 2-4 core\n;   PCs and laptops); 0 = spin like older versions"},
   {"texture_threads","0","Threads that unpack texture loads: 0 = automatic (all cores), 1 = one thread like older versions"},
   {"serialize_media_threads",MEDIA_TURNS?"1":"0","1 = video/media threads that share a core on the Switch take turns like on the console\n;   (guards against a rare freeze when a video stops); 0 = run them fully in parallel"},
@@ -892,7 +892,7 @@ int swr_main(int argc, char** argv){
   { /* no Play screen here (Linux; on Windows the Play screen sets them, or the old Python launcher does): the [Launcher] choices the game reads as switches, as fe.cpp sets them on Windows.
        A switch already in the environment (tests, a launch script) is left as it is */
     static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"},{"loading_60fps","SWR_LOADING_60","1"},{"cutscenes_60fps","SWR_CUTSCENES_60FPS","1"}};
-    if(!getenv("SWR_TEST_SCRIPT") && !getenv("SWR_TEST_EXIT_FRAME"))
+    if((!getenv("SWR_TEST_SCRIPT") && !getenv("SWR_TEST_EXIT_FRAME")) || getenv("SWR_TEST_LAUNCHER"))   /* SWR_TEST_LAUNCHER=1: tests that start like a player */
       for(int i=0;i<3;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
 #endif
   for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"-v")) g_verbose=2; else if(!strncmp(argv[i],"--",2) && strchr(argv[i],'=')){ char k[256]; const char* opt=argv[i]+2; const char* e=strchr(opt,'='); size_t key_len=(size_t)(e-opt); if(key_len>=sizeof k) continue; memcpy(k,opt,key_len); k[key_len]=0; const char* value=e+1; backend_ini(k,value); if(!strcmp(k,"docked")) g_opt_docked=atoi(value); if(!strcmp(k,"fps_limit")) g_opt_fps=atoi(value); else if(!strcmp(k,"profile")) g_opt_prof=atoi(value); } }
