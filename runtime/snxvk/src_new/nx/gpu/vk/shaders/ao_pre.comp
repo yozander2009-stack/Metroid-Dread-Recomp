@@ -1,0 +1,50 @@
+#version 450
+// SWR XeGTAO (dlss.c, ini ambient_occlusion): view-space depth and its 4 MIPs from the scene depth. GLSL port of
+// XeGTAO_PrefilterDepths16x16 (Intel XeGTAO v1.30, MIT, github.com/GameTechDev/XeGTAO); same as gpu_gl.c AO_PRE_CS.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D dep;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D o0;
+layout(set = 0, binding = 2, r32f) writeonly uniform image2D o1;
+layout(set = 0, binding = 3, r32f) writeonly uniform image2D o2;
+layout(set = 0, binding = 4, r32f) writeonly uniform image2D o3;
+layout(set = 0, binding = 5, r32f) writeonly uniform image2D o4;
+layout(push_constant) uniform PC { vec4 dep; } pc; // x,y: view depth = x/(y-depth); z: effect radius
+shared float sd[8][8];
+float lin(ivec2 p) {
+    ivec2 s = textureSize(dep, 0);
+    float d = texelFetch(dep, clamp(p, ivec2(0), s - 1), 0).r;
+    return clamp(pc.dep.x / max(pc.dep.y - d, 1e-7), 0.0, 3.0e38);
+}
+float mipf(float a, float b, float c, float d) {
+    float mx = max(max(a, b), max(c, d));
+    float er = 0.75 * pc.dep.z * 1.457, fr = 0.615 * er, ff = er * (1.0 - 0.615);
+    float fm = -1.0 / fr, fa = ff / fr + 1.0;
+    vec4 w = clamp((vec4(mx) - vec4(a, b, c, d)) * fm + fa, 0.0, 1.0);
+    return dot(w, vec4(a, b, c, d)) / max(dot(w, vec4(1.0)), 1e-6);
+}
+void main() {
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy), t = ivec2(gl_LocalInvocationID.xy), p = g * 2;
+    float d0 = lin(p), d1 = lin(p + ivec2(1, 0)), d2 = lin(p + ivec2(0, 1)), d3 = lin(p + ivec2(1, 1));
+    imageStore(o0, p, vec4(d0)); imageStore(o0, p + ivec2(1, 0), vec4(d1));
+    imageStore(o0, p + ivec2(0, 1), vec4(d2)); imageStore(o0, p + ivec2(1, 1), vec4(d3));
+    float m1 = mipf(d0, d1, d2, d3);
+    imageStore(o1, g, vec4(m1));
+    sd[t.x][t.y] = m1;
+    barrier();
+    if (t.x % 2 == 0 && t.y % 2 == 0) {
+        float m2 = mipf(sd[t.x][t.y], sd[t.x + 1][t.y], sd[t.x][t.y + 1], sd[t.x + 1][t.y + 1]);
+        imageStore(o2, g / 2, vec4(m2));
+        sd[t.x][t.y] = m2;
+    }
+    barrier();
+    if (t.x % 4 == 0 && t.y % 4 == 0) {
+        float m3 = mipf(sd[t.x][t.y], sd[t.x + 2][t.y], sd[t.x][t.y + 2], sd[t.x + 2][t.y + 2]);
+        imageStore(o3, g / 4, vec4(m3));
+        sd[t.x][t.y] = m3;
+    }
+    barrier();
+    if (t.x % 8 == 0 && t.y % 8 == 0) {
+        float m4 = mipf(sd[t.x][t.y], sd[t.x + 4][t.y], sd[t.x][t.y + 4], sd[t.x + 4][t.y + 4]);
+        imageStore(o4, g / 8, vec4(m4));
+    }
+}

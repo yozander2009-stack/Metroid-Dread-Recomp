@@ -503,6 +503,8 @@ static std::vector<Opt> build_options() {
       "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
     B("antialiasing", "Graphics", "Graphics", "Anti-aliasing (FXAA)", LIVE_YES, "0", "Smooths jagged edges on the final picture. Not needed above 1\xC3\x97 resolution.");
     B("taa", "Graphics", "Graphics", "Temporal anti-aliasing (TAA)", LIVE_RESTART, "0", "Smooths edges and shimmer using the previous frames. OpenGL and Native Vulkan. Not used while DLAA runs.");
+    C("ambient_occlusion", "Graphics", "Graphics", "Ambient occlusion (XeGTAO)", LIVE_YES, "0", {{"0", "Off"}, {"40", "Low"}, {"70", "Medium"}, {"100", "High"}},
+      "Intel XeGTAO: soft shadows in corners, creases and where things touch. OpenGL, and Native Vulkan after a restart.");
     C("sharpening", "Graphics", "Graphics", "Sharpening", LIVE_YES, "0", {{"0", "Off"}, {"25", "Low"}, {"50", "Medium"}, {"75", "High"}, {"100", "Maximum"}},
       "Sharpens the final picture. Helps when the game looks soft, most at 1\xC3\x97 resolution.");
     C("anisotropy", "Graphics", "Graphics", "Anisotropic filtering", LIVE_RESTART, "0", {{"0", "Game default"}, {"2", "2\xC3\x97"}, {"4", "4\xC3\x97"}, {"8", "8\xC3\x97"}, {"16", "16\xC3\x97"}},

@@ -151,6 +151,8 @@ Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compa
 - SwitchRecomp: Apache-2.0. The credit "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept.
 - ScarletNX renderer: GPL-3.0, which makes the combined EXE GPL-3.0.
 - Dear ImGui: MIT.
+- Intel XeGTAO (ambient occlusion, ported to GLSL in gpu_gl.c and the renderer's shaders/ao_*): MIT
+  (`runtime/xegtao/LICENSE.txt`).
 - libvpx and OpenH264: BSD.
 - SDL2 and zlib: zlib licence.
 

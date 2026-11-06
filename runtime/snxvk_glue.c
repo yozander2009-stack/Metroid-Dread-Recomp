@@ -227,11 +227,11 @@ int snxvk_start(void){
        HDR output record directly into the frame's command buffer, so with either on it stays off (both need a restart) */
     extern void snxv_swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, int recording_thread);
     extern float g_opt_resf; extern int g_opt_shadows, g_opt_aniso, g_opt_hdr;
-    extern int g_opt_taa; extern int reshade_vk_layer_installed(void);   /* TAA and ReShade's depth copy record directly too */
+    extern int g_opt_taa, g_opt_ao; extern int reshade_vk_layer_installed(void);   /* TAA, AO and ReShade's depth copy record directly too */
     int rs= reshade_vk_layer_installed();
-    int rec= !(snxvk_dlss_mode>0 || g_opt_hdr || g_opt_taa || rs) && !getenv("SWR_SNXVK_NO_RECORD_THREAD");
+    int rec= !(snxvk_dlss_mode>0 || g_opt_hdr || g_opt_taa || g_opt_ao>0 || rs) && !getenv("SWR_SNXVK_NO_RECORD_THREAD");
     snxv_swr_settings_set(g_opt_resf,g_opt_shadows,snxvk_opt_vsync,g_opt_aniso,rec);
-    LOG("vulkan_native: command recording thread %s\n",rec? "on" : rs? "off (ReShade's Vulkan layer is installed: the depth copy records directly)" : "off (DLSS, TAA or HDR output records directly)");
+    LOG("vulkan_native: command recording thread %s\n",rec? "on" : rs? "off (ReShade's Vulkan layer is installed: the depth copy records directly)" : "off (DLSS, TAA, ambient occlusion or HDR output records directly)");
     /* prebuild_shaders: the game's shaders translated in the background at start, and the pipeline recipes made from
        them (pipeline.c rc_merge); SWR_VK_NO_PREPARE=1 = off (tests) */
     { extern void snxv_swr_settings_prepare(int); extern int g_opt_prebuild;

@@ -117,7 +117,7 @@ void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
-    case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
+    case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
     case 2: if (cheats_count() > 0) { section("CHEATS");
                 for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue;
                     bool on = cheats_is_on(i) != 0; if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on)) cheats_set(i, on ? 1 : 0); } }

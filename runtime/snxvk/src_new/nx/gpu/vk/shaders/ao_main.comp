@@ -1,0 +1,88 @@
+#version 450
+// SWR XeGTAO (dlss.c): the AO term and depth edges. GLSL port of XeGTAO_MainPass with in-place normals (Intel XeGTAO
+// v1.30, MIT, github.com/GameTechDev/XeGTAO); same as gpu_gl.c AO_MAIN_CS.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D vz;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D oAO;
+layout(set = 0, binding = 2, r32f) writeonly uniform image2D oEd;
+layout(push_constant) uniform PC {
+    vec4 vp;  // w h 1/w 1/h
+    vec4 ndc; // NDC->view mul xy, add xy
+    vec4 p;   // radius, slices, steps per slice, noise index
+} pc;
+const float PI = 3.14159265, HPI = 1.57079633;
+vec3 vpos(vec2 sp, float z) { return vec3((pc.ndc.xy * sp + pc.ndc.zw) * z, z); }
+float fz(ivec2 p) { return texelFetch(vz, clamp(p, ivec2(0), ivec2(pc.vp.xy) - 1), 0).r; }
+vec4 edges(float c, float l, float r, float t, float b) {
+    vec4 e = vec4(l, r, t, b) - c;
+    float slr = (e.y - e.x) * 0.5, stb = (e.w - e.z) * 0.5;
+    vec4 ea = e + vec4(slr, -slr, stb, -stb);
+    e = min(abs(e), abs(ea));
+    return clamp(1.25 - e / (c * 0.011), 0.0, 1.0);
+}
+float packE(vec4 e) { e = floor(clamp(e, 0.0, 1.0) * 2.9 + 0.5); return dot(e, vec4(64.0, 16.0, 4.0, 1.0) / 255.0); }
+vec3 calcN(vec4 e, vec3 C, vec3 L, vec3 R, vec3 T, vec3 B) {
+    vec4 k = clamp(vec4(e.x * e.z, e.z * e.y, e.y * e.w, e.w * e.x) + 0.01, 0.0, 1.0);
+    L = normalize(L - C); R = normalize(R - C); T = normalize(T - C); B = normalize(B - C);
+    return normalize(k.x * cross(L, T) + k.y * cross(T, R) + k.z * cross(R, B) + k.w * cross(B, L));
+}
+float facos(float x) { float ax = abs(x); float r = (-0.156583 * ax + HPI) * sqrt(max(1.0 - ax, 0.0)); return x >= 0.0 ? r : PI - r; }
+uint hilbert(uint x, uint y) {
+    uint i = 0u;
+    for (uint c = 32u; c > 0u; c /= 2u) {
+        uint rx = (x & c) > 0u ? 1u : 0u, ry = (y & c) > 0u ? 1u : 0u;
+        i += c * c * ((3u * rx) ^ ry);
+        if (ry == 0u) {
+            if (rx == 1u) { x = 63u - x; y = 63u - y; }
+            uint tt = x; x = y; y = tt;
+        }
+    }
+    return i;
+}
+vec2 noise(ivec2 p) {
+    uint i = hilbert(uint(p.x) & 63u, uint(p.y) & 63u) + 288u * (uint(pc.p.w) % 64u);
+    return fract(0.5 + float(i) * vec2(0.75487766624669276, 0.569840290998053266));
+}
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, ivec2(pc.vp.xy)))) return;
+    vec2 sp = (vec2(p) + 0.5) * pc.vp.zw;
+    float z = fz(p), lz = fz(p + ivec2(-1, 0)), rz = fz(p + ivec2(1, 0)), tz = fz(p + ivec2(0, -1)), bz = fz(p + ivec2(0, 1));
+    vec4 e = edges(z, lz, rz, tz, bz);
+    imageStore(oEd, p, vec4(packE(e)));
+    vec3 N = calcN(e, vpos(sp, z), vpos(sp - vec2(pc.vp.z, 0.0), lz), vpos(sp + vec2(pc.vp.z, 0.0), rz),
+                   vpos(sp - vec2(0.0, pc.vp.w), tz), vpos(sp + vec2(0.0, pc.vp.w), bz));
+    z *= 0.99999;
+    vec3 P = vpos(sp, z);
+    vec3 V = normalize(-P);
+    float er = pc.p.x * 1.457, fr = 0.615 * er, ff = er * (1.0 - 0.615), fm = -1.0 / fr, fa = ff / fr + 1.0;
+    float ssr = er / (z * pc.ndc.x * pc.vp.z);
+    float vis = clamp((10.0 - ssr) / 100.0, 0.0, 1.0) * 0.5;
+    float minS = 1.3 / ssr;
+    vec2 nz = noise(p);
+    for (float s = 0.0; s < pc.p.y; s++) {
+        float phi = (s + nz.x) / pc.p.y * PI, cp = cos(phi), sph = sin(phi);
+        vec2 om = vec2(cp, -sph) * ssr;
+        vec3 dir = vec3(cp, sph, 0.0), od = dir - dot(dir, V) * V, ax = normalize(cross(od, V)), pn = N - ax * dot(N, ax);
+        float sn = sign(dot(od, pn)), pl = length(pn), cn = clamp(dot(pn, V) / pl, 0.0, 1.0), n = sn * facos(cn);
+        float lo0 = cos(n + HPI), lo1 = cos(n - HPI), hc0 = lo0, hc1 = lo1;
+        for (float j = 0.0; j < pc.p.z; j++) {
+            float ss = pow((j + fract(nz.y + (s + j * pc.p.z) * 0.6180339887498948)) / pc.p.z, 2.0) + minS;
+            vec2 so = ss * om;
+            float mip = clamp(log2(length(so)) - 3.3, 0.0, 4.0);
+            so = floor(so + 0.5) * pc.vp.zw;
+            vec2 s0 = sp + so, s1 = sp - so;
+            vec3 d0 = vpos(s0, textureLod(vz, s0, mip).r) - P, d1 = vpos(s1, textureLod(vz, s1, mip).r) - P;
+            float l0 = length(d0), l1 = length(d1);
+            float c0 = mix(lo0, dot(d0 / l0, V), clamp(l0 * fm + fa, 0.0, 1.0));
+            float c1 = mix(lo1, dot(d1 / l1, V), clamp(l1 * fm + fa, 0.0, 1.0));
+            hc0 = max(hc0, c0);
+            hc1 = max(hc1, c1);
+        }
+        pl = mix(pl, 1.0, 0.05);
+        float h0 = -facos(hc1), h1 = facos(hc0);
+        vis += pl * ((cn + 2.0 * h0 * sin(n) - cos(2.0 * h0 - n)) / 4.0 + (cn + 2.0 * h1 * sin(n) - cos(2.0 * h1 - n)) / 4.0);
+    }
+    vis = max(0.03, pow(vis / pc.p.y, 2.2));
+    imageStore(oAO, p, vec4(clamp(vis / 1.5, 0.0, 1.0)));
+}

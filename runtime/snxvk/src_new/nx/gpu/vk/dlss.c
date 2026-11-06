@@ -297,7 +297,8 @@ static int dl_aa(void) { return dl_dlss() || dl_taa(); }           /* jitter and
 /* ReShade's depth copy is recorded directly into the frame: only with the recording thread off (snxvk_glue.c turns it
    off when ReShade's Vulkan layer is installed) */
 static int dl_reshade(void) { return !vk_rec_threaded() && reshade_vk_on(); }
-static int dl_active(void) { return dl_aa() || dl_reshade(); } /* finding the scene target */
+static int dl_ao(void); /* XeGTAO, below */
+static int dl_active(void) { return dl_aa() || dl_reshade() || dl_ao(); } /* finding the scene target */
 
 static int full_hdr(const Surf* s) {
     return s && (s->fkey & 0xFFFF) == DL_FMT_R11G11B10F && g_dl.scene_w && s->w == g_dl.scene_w && s->h == g_dl.scene_h;
@@ -1172,9 +1173,287 @@ static void reshade_depth(Surf* z, u32 w, u32 h) {
     reshade_set_view((unsigned long long)(uintptr_t)g_rsd.view);
 }
 
+#include <math.h>
+/* ---------------------------------------------------------------- XeGTAO (ini ambient_occlusion 0..100 = strength)
+   Intel XeGTAO v1.30 (MIT, github.com/GameTechDev/XeGTAO), ported to GLSL (shaders/ao_pre.comp, ao_main.comp,
+   ao_den.comp, ao_apply.frag; the same maths as the OpenGL renderer's gpu_gl.c AO_*): view-space depth MIPs, the AO
+   term with normals from depth, one denoise pass, then the scene target is multiplied by it (blend dst * src) before
+   post effects, bloom and the HUD. The camera projection comes from the game's scene draws (vertex constant bank 3,
+   render.c -> vk_ao_note). All AO images stay in GENERAL. Recorded directly, so only with the recording thread off. */
+#include "nx/gpu/vk/ao_pre_spv.h"
+#include "nx/gpu/vk/ao_main_spv.h"
+#include "nx/gpu/vk/ao_den_spv.h"
+#include "nx/gpu/vk/ao_apply_spv.h"
+extern int g_opt_ao;
+static int g_ao_failed;
+static struct { float p00, p11, a, b; int clip, ok; } g_vproj;
+static int dl_ao(void) { return g_opt_ao > 0 && !g_ao_failed && !vk_rec_threaded(); }
+
+void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip);
+void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip) {
+    if (!g_opt_ao || !zt || !g_dl.chosen_z || zt->gva != g_dl.chosen_z || !cb3 || cb3_size < 64) return;
+    float m[16];
+    gmem_read(cb3, m, 64);
+    for (int tr = 0; tr < 2; tr++) {
+        float M[16];
+        for (int i = 0; i < 16; i++) M[i] = tr ? m[(i % 4) * 4 + i / 4] : m[i];
+#define AZ(x) (fabsf(x) < 1e-6f)
+        if (M[0] > 0.05f && M[5] > 0.05f && AZ(M[1]) && AZ(M[2]) && AZ(M[3]) && AZ(M[4]) && AZ(M[6]) && AZ(M[7]) && AZ(M[12]) &&
+            AZ(M[13]) && AZ(M[15]) && fabsf(fabsf(M[11]) - 1.f) < 1e-4f) {
+            g_vproj.p00 = M[0]; g_vproj.p11 = M[5]; g_vproj.a = -M[10] * M[11]; g_vproj.b = M[14]; g_vproj.clip = clip & 1;
+            if (!g_vproj.ok) LOG("ao (vulkan): camera projection P00 %.4f P11 %.4f depth %g %g\n", M[0], M[5], M[10], M[14]);
+            g_vproj.ok = 1;
+            return;
+        }
+#undef AZ
+    }
+}
+
+static struct {
+    VkImage vz, ao, ed, fin;
+    VmaAllocation vz_mem, ao_mem, ed_mem, fin_mem;
+    VkImageView vz_all, vz_lv[5], ao_v, ed_v, fin_v;
+    u32 w, h, n;
+    VkSampler samp;
+    VkDescriptorSetLayout dsl[4];
+    VkPipelineLayout pl[4];
+    VkDescriptorPool pool;
+    VkDescriptorSet set[4];
+    VkPipeline pre, mainp, den, app;
+    VkFormat app_fmt;
+    VkImageView key_z, key_t;
+    int ready;
+} g_aov;
+
+static VkDescriptorSetLayout ao_dsl(const VkDescriptorType* types, int n) {
+    VkDescriptorSetLayoutBinding b[6];
+    for (int i = 0; i < n; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (u32)i, .descriptorType = types[i], .descriptorCount = 1,
+                                              .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = (u32)n, .pBindings = b};
+    VkDescriptorSetLayout l = VK_NULL_HANDLE;
+    vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &l);
+    return l;
+}
+static VkPipeline ao_compute(const u32* words, size_t n, VkPipelineLayout pl) {
+    VkShaderModule m = vk_module_spv(words, n);
+    if (!m) return VK_NULL_HANDLE;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = pl};
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+    vkDestroyShaderModule(g_vk.dev, m, NULL);
+    return p;
+}
+static int ao_setup(void) {
+    if (g_aov.pre) return 1;
+    const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    VkDescriptorType t0[6] = {S, I, I, I, I, I}, t1[3] = {S, I, I}, t2[3] = {S, S, I}, t3[1] = {S};
+    g_aov.dsl[0] = ao_dsl(t0, 6); g_aov.dsl[1] = ao_dsl(t1, 3); g_aov.dsl[2] = ao_dsl(t2, 3); g_aov.dsl[3] = ao_dsl(t3, 1);
+    u32 pcs[4] = {16, 48, 16, 16};
+    for (int i = 0; i < 4; i++) {
+        if (!g_aov.dsl[i]) return 0;
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, pcs[i]};
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                         .pSetLayouts = &g_aov.dsl[i], .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        if (vkCreatePipelineLayout(g_vk.dev, &li, NULL, &g_aov.pl[i]) != VK_SUCCESS) return 0;
+    }
+    VkDescriptorPoolSize sizes[2] = {{S, 8}, {I, 10}};
+    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4, .poolSizeCount = 2, .pPoolSizes = sizes};
+    if (vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_aov.pool) != VK_SUCCESS) return 0;
+    VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_aov.pool,
+                                      .descriptorSetCount = 4, .pSetLayouts = g_aov.dsl};
+    if (vkAllocateDescriptorSets(g_vk.dev, &ai, g_aov.set) != VK_SUCCESS) return 0;
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
+                               .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .maxLod = 4.0f};
+    if (vkCreateSampler(g_vk.dev, &sci, NULL, &g_aov.samp) != VK_SUCCESS) return 0;
+    g_aov.pre = ao_compute(g_ao_pre_comp, sizeof g_ao_pre_comp / 4, g_aov.pl[0]);
+    g_aov.mainp = ao_compute(g_ao_main_comp, sizeof g_ao_main_comp / 4, g_aov.pl[1]);
+    g_aov.den = ao_compute(g_ao_den_comp, sizeof g_ao_den_comp / 4, g_aov.pl[2]);
+    if (!g_aov.pre || !g_aov.mainp || !g_aov.den) return 0;
+    LOG("ao: XeGTAO on (vulkan)\n");
+    return 1;
+}
+static int ao_apply_pipeline(VkFormat fmt) {
+    if (g_aov.app && g_aov.app_fmt == fmt) return 1;
+    if (g_aov.app) { vk_finish(); vkDestroyPipeline(g_vk.dev, g_aov.app, NULL); g_aov.app = VK_NULL_HANDLE; }
+    VkShaderModule vs = vk_module_spv(g_hdr_out_vert, sizeof g_hdr_out_vert / 4), fs = vk_module_spv(g_ao_apply_frag, sizeof g_ao_apply_frag / 4);
+    VkPipelineShaderStageCreateInfo st[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vps = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    static int dbg = -1;
+    if (dbg < 0) dbg = getenv("SWR_AO_DEBUG") != NULL; /* test: the AO term alone in place of the scene */
+    VkPipelineColorBlendAttachmentState ba = {.blendEnable = dbg ? VK_FALSE : VK_TRUE,
+                                              .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO, .dstColorBlendFactor = VK_BLEND_FACTOR_SRC_COLOR,
+                                              .colorBlendOp = VK_BLEND_OP_ADD, .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+                                              .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .alphaBlendOp = VK_BLEND_OP_ADD,
+                                              .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT};
+    VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &fmt};
+    VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
+                                        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vps,
+                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb,
+                                        .pDynamicState = &dy, .layout = g_aov.pl[3]};
+    int ok = vs && fs && vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &g_aov.app) == VK_SUCCESS;
+    if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
+    if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);
+    if (!ok) g_aov.app = VK_NULL_HANDLE;
+    g_aov.app_fmt = fmt;
+    return ok;
+}
+static void ao_free(void) {
+    VkImageView* vs[8] = {&g_aov.vz_all, &g_aov.vz_lv[0], &g_aov.vz_lv[1], &g_aov.vz_lv[2], &g_aov.vz_lv[3], &g_aov.vz_lv[4], &g_aov.ao_v, &g_aov.ed_v};
+    for (int i = 0; i < 8; i++) if (*vs[i]) { vkDestroyImageView(g_vk.dev, *vs[i], NULL); *vs[i] = VK_NULL_HANDLE; }
+    if (g_aov.fin_v) { vkDestroyImageView(g_vk.dev, g_aov.fin_v, NULL); g_aov.fin_v = VK_NULL_HANDLE; }
+    if (g_aov.vz) vmaDestroyImage(g_vk.vma, g_aov.vz, g_aov.vz_mem);
+    if (g_aov.ao) vmaDestroyImage(g_vk.vma, g_aov.ao, g_aov.ao_mem);
+    if (g_aov.ed) vmaDestroyImage(g_vk.vma, g_aov.ed, g_aov.ed_mem);
+    if (g_aov.fin) vmaDestroyImage(g_vk.vma, g_aov.fin, g_aov.fin_mem);
+    g_aov.vz = g_aov.ao = g_aov.ed = g_aov.fin = VK_NULL_HANDLE;
+    g_aov.key_z = g_aov.key_t = VK_NULL_HANDLE;
+    g_aov.ready = 0;
+}
+static int ao_image(u32 w, u32 h, u32 levels, VkImage* img, VmaAllocation* mem) {
+    VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT,
+                            .extent = {w, h, 1}, .mipLevels = levels, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    return vmaCreateImage(g_vk.vma, &ii, &ai, img, mem, NULL) == VK_SUCCESS;
+}
+static VkImageView ao_view(VkImage img, u32 level, u32 count) {
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                .format = VK_FORMAT_R32_SFLOAT, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, count, 0, 1}};
+    VkImageView v = VK_NULL_HANDLE;
+    vkCreateImageView(g_vk.dev, &vi, NULL, &v);
+    return v;
+}
+static int ao_images(u32 w, u32 h) {
+    if (g_aov.vz && g_aov.w == w && g_aov.h == h) return 1;
+    vk_finish();
+    ao_free();
+    if (!ao_image(w, h, 5, &g_aov.vz, &g_aov.vz_mem) || !ao_image(w, h, 1, &g_aov.ao, &g_aov.ao_mem) ||
+        !ao_image(w, h, 1, &g_aov.ed, &g_aov.ed_mem) || !ao_image(w, h, 1, &g_aov.fin, &g_aov.fin_mem)) { ao_free(); return 0; }
+    g_aov.vz_all = ao_view(g_aov.vz, 0, 5);
+    for (u32 l = 0; l < 5; l++) g_aov.vz_lv[l] = ao_view(g_aov.vz, l, 1);
+    g_aov.ao_v = ao_view(g_aov.ao, 0, 1); g_aov.ed_v = ao_view(g_aov.ed, 0, 1); g_aov.fin_v = ao_view(g_aov.fin, 0, 1);
+    g_aov.w = w; g_aov.h = h;
+    return 1;
+}
+static void ao_sets(VkImageView zv) {
+    VkDescriptorImageInfo d[13] = {
+        {g_aov.samp, zv, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.vz_lv[0], VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.vz_lv[1], VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.vz_lv[2], VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.vz_lv[3], VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.vz_lv[4], VK_IMAGE_LAYOUT_GENERAL},
+        {g_aov.samp, g_aov.vz_all, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.ao_v, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL},
+        {g_aov.samp, g_aov.ao_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL},
+        {g_aov.samp, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL}};
+    const int setof[13] = {0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3}, bind[13] = {0, 1, 2, 3, 4, 5, 0, 1, 2, 0, 1, 2, 0};
+    VkWriteDescriptorSet wr[13];
+    for (int i = 0; i < 13; i++)
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_aov.set[setof[i]], .dstBinding = (u32)bind[i],
+                                       .descriptorCount = 1,
+                                       .descriptorType = d[i].sampler ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       .pImageInfo = &d[i]};
+    vkUpdateDescriptorSets(g_vk.dev, 13, wr, 0, NULL);
+}
+static void ao_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 dst) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, .dstStageMask = dst,
+                           .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+static void evaluate_ao(Surf* t, Surf* z) {
+    u32 w = t->sw, h = t->sh;
+    if (!g_vproj.ok) return;
+    if (!ao_setup()) { g_ao_failed = 1; LOG("ao (vulkan): setup failed: AO off\n"); return; }
+    if (!ao_apply_pipeline(t->f.vk) || !ao_images(w, h)) { g_ao_failed = 1; LOG("ao (vulkan): images or pipeline failed: AO off\n"); return; }
+    VkImageView zv = depth_view(z);
+    if (!zv) return;
+    if (g_aov.key_z != zv || !g_aov.ready) { vk_finish(); ao_sets(zv); g_aov.key_z = zv; }
+    VkCommandBuffer cb = vk_cmd();
+    if (!g_aov.ready) { /* first use: every AO image to GENERAL */
+        VkImage im[4] = {g_aov.vz, g_aov.ao, g_aov.ed, g_aov.fin};
+        for (int i = 0; i < 4; i++) {
+            VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                        .image = im[i], .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, i ? 1u : 5u, 0, 1}};
+            VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
+            vkCmdPipelineBarrier2(cb, &di);
+        }
+        g_aov.ready = 1;
+    }
+    float A = g_vproj.a, B = g_vproj.b, mul, add;
+    if (g_vproj.clip) { mul = -B; add = -A; } else { mul = -0.5f * B; add = 0.5f * (1.f - A); }
+    float tx = 1.f / g_vproj.p00, ty = 1.f / g_vproj.p11, radius = 60.f;
+    float dep[4] = {mul, add, radius, 0};
+    float mp[12] = {(float)w, (float)h, 1.f / (float)w, 1.f / (float)h, tx * 2.f, ty * -2.f, -tx, ty, radius, 3.f, 3.f, (float)(dl_aa() ? g_aov.n++ % 64 : 0)};
+    float vp[4] = {(float)w, (float)h, 1.f / (float)w, 1.f / (float)h}, ap[4] = {(float)g_opt_ao / 100.f, 0, 0, 0};
+    /* 1: view depth MIPs from the scene depth */
+    vk_surf_use(cb, z, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT); /* last frame's AO reads before this frame's writes */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pre);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[0], 0, 1, &g_aov.set[0], 0, NULL);
+    vkCmdPushConstants(cb, g_aov.pl[0], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, dep);
+    vkCmdDispatch(cb, (w + 15) / 16, (h + 15) / 16, 1);
+    ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    /* 2: AO term and edges */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.mainp);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[1], 0, 1, &g_aov.set[1], 0, NULL);
+    vkCmdPushConstants(cb, g_aov.pl[1], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, mp);
+    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    /* 3: denoise */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.den);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[2], 0, 1, &g_aov.set[2], 0, NULL);
+    vkCmdPushConstants(cb, g_aov.pl[2], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, vp);
+    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    ao_barrier(cb, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    /* 4: scene colour *= AO */
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = t->att,
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_aov.app);
+    VkViewport v = {0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D sc = {{0, 0}, {w, h}};
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_aov.pl[3], 0, 1, &g_aov.set[3], 0, NULL);
+    vkCmdPushConstants(cb, g_aov.pl[3], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, ap);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    t->wgen++;
+    vk_rt_drawn(t);
+    vk_render_forget_state();
+}
+
 static void evaluate(Surf* t, Surf* z) {
     vk_render_end();
     if (dl_reshade()) reshade_depth(z, t->sw, t->sh);
+    if (dl_ao()) evaluate_ao(t, z); /* before TAA: its noise is resolved over frames */
 #ifndef SWR_NO_NGX
     if (dl_dlss()) evaluate_dlss(t, z);
     else

@@ -1,0 +1,30 @@
+#version 450
+// SWR XeGTAO (dlss.c): one edge-aware denoise pass (XeGTAO_Denoise with finalApply, per pixel; Intel XeGTAO v1.30, MIT);
+// same as gpu_gl.c AO_DEN_CS.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D aoT;
+layout(set = 0, binding = 1) uniform sampler2D edT;
+layout(set = 0, binding = 2, r32f) writeonly uniform image2D oF;
+layout(push_constant) uniform PC { vec4 vp; } pc;
+ivec2 cl(ivec2 p) { return clamp(p, ivec2(0), ivec2(pc.vp.xy) - 1); }
+vec4 ue(ivec2 p) {
+    uint v = uint(texelFetch(edT, cl(p), 0).r * 255.5);
+    return clamp(vec4(float((v >> 6) & 3u), float((v >> 4) & 3u), float((v >> 2) & 3u), float(v & 3u)) / 3.0, 0.0, 1.0);
+}
+float a(ivec2 p) { return texelFetch(aoT, cl(p), 0).r; }
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, ivec2(pc.vp.xy)))) return;
+    vec4 eL = ue(p + ivec2(-1, 0)), eR = ue(p + ivec2(1, 0)), eT = ue(p + ivec2(0, -1)), eB = ue(p + ivec2(0, 1));
+    vec4 eC = ue(p) * vec4(eL.y, eR.x, eT.w, eB.z);
+    eC = clamp(eC + (clamp(4.0 - 2.5 - dot(eC, vec4(1.0)), 0.0, 1.0) / 1.5) * 0.5, 0.0, 1.0);
+    float dw = 0.425;
+    float wTL = dw * (eC.x * eL.z + eC.z * eT.x), wTR = dw * (eC.z * eT.y + eC.y * eR.z);
+    float wBL = dw * (eC.w * eB.x + eC.x * eL.w), wBR = dw * (eC.y * eR.w + eC.w * eB.y);
+    float sw = 1.2, sum = a(p) * sw;
+    sum += a(p + ivec2(-1, 0)) * eC.x + a(p + ivec2(1, 0)) * eC.y + a(p + ivec2(0, -1)) * eC.z + a(p + ivec2(0, 1)) * eC.w;
+    sw += dot(eC, vec4(1.0));
+    sum += a(p + ivec2(-1, -1)) * wTL + a(p + ivec2(1, -1)) * wTR + a(p + ivec2(-1, 1)) * wBL + a(p + ivec2(1, 1)) * wBR;
+    sw += wTL + wTR + wBL + wBR;
+    imageStore(oF, p, vec4(clamp(sum / sw * 1.5, 0.0, 1.0)));
+}

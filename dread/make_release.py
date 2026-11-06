@@ -57,7 +57,7 @@ LICENSES = [
     ('runtime/snxvk/LICENSE', 'ScarletNX-GPL-3.0.txt'), ('runtime/snxvk/NOTICE', 'ScarletNX-NOTICE.txt'),
     ('runtime/imgui/LICENSE.txt', 'DearImGui-MIT.txt'), ('runtime/vp9/LICENSE-libvpx.txt', 'libvpx-BSD.txt'),
     ('runtime/oh264/LICENSE', 'OpenH264-BSD.txt'), ('runtime/bcn/LICENSE_texture2ddecoder.txt', 'texture2ddecoder.txt'),
-    ('python/LICENSE_PYTHON.txt', 'Python-PSF.txt'),
+    ('python/LICENSE_PYTHON.txt', 'Python-PSF.txt'), ('runtime/xegtao/LICENSE.txt', 'XeGTAO-MIT.txt'),
 ]
 ZLIB_TXT = """zlib (zlib1.dll) and SDL2 (SDL2.dll) are under the zlib licence:
 
@@ -98,7 +98,7 @@ and 8BitDo over USB or Bluetooth. Keyboard: arrows = D-pad, WASD = stick, X/Z/C/
 
 Made by yozander2009-stack (project lead) with Claude by Anthropic (AI pair programmer).
 Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); theboy181 (60 FPS cutscenes,
-21:9); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
+21:9); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Intel XeGTAO (ambient occlusion); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
 GPL-3.0 (it contains the ScarletNX renderer) and its source is published with this release.
 Metroid Dread is (c) Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """
@@ -453,6 +453,7 @@ Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compa
 - SwitchRecomp: Apache-2.0. The credit "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept.
 - ScarletNX renderer: GPL-3.0, which makes the combined EXE GPL-3.0.
 - Dear ImGui: MIT.
+- Intel XeGTAO (ambient occlusion, ported to GLSL in gpu_gl.c and the renderer's shaders/ao_*): MIT.
 - libvpx and OpenH264: BSD.
 - SDL2 and zlib: zlib licence.
 

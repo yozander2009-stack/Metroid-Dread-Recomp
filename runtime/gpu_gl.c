@@ -1780,7 +1780,9 @@ extern int reshade_gl_on(void); extern void reshade_gl_set_depth(unsigned tex);
 static int g_taa_failed;
 static int dlg_taa(void){ return g_opt_taa && !g_gles && !g_taa_failed && !dlg_dlss(); }
 static int dlg_aa(void){ return dlg_dlss() || dlg_taa(); }       /* jitter and motion vectors */
-static int dlg_on(void){ return dlg_aa() || reshade_gl_on(); }   /* finding the scene target */
+extern int g_opt_ao; static int g_ao_failed;   /* [Graphics] ambient_occlusion 0..100 (XeGTAO, below) */
+static int dlg_ao(void){ return g_opt_ao>0 && !g_gles && !g_ao_failed; }
+static int dlg_on(void){ return dlg_aa() || dlg_ao() || reshade_gl_on(); }   /* finding the scene target */
 static int dlg_full_hdr(const Tex* t){ return t && t->f.ifmt==GL_R11F_G11F_B10F && g_dlg.scene_w && t->w==g_dlg.scene_w && t->h==g_dlg.scene_h; }
 static int dlg_written(u64 a){ for(int i=0;i<g_dlg.nwritten;i++) if(g_dlg.written[i]==a) return 1; return 0; }
 static Tex* dlg_find(u64 gva, int depth){ for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt && !!t->f.depth==depth) return t; return NULL; }
@@ -1990,11 +1992,174 @@ static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
   state_dirty(); g_fb_sig_ok=0; g_clip_mode=-1; g_pipe_on=0; mb_reset();
   return 1; }
 
+/* Ambient occlusion ([Graphics] ambient_occlusion 0..100 = strength): Intel's XeGTAO (MIT, github.com/GameTechDev/XeGTAO,
+   v1.30; GLSL port of XeGTAO.hlsli: depth MIP prefilter, main pass with in-place normals, one denoise pass), at the scene
+   point, multiplied into the lit scene before post effects, bloom and the HUD. The camera projection comes from the
+   game: its scene draws carry the perspective matrix in vertex-shader constant bank 3 (MEASURED 2026-11-05, SWR_FIND_PROJ:
+   P00 2.414, P11 4.292, near 100, far 100100, OpenGL-style depth). Units are the game's (about 1 cm). The game lights
+   the scene first, so AO darkens the whole lit colour (as ReShade's AO effects do), not only the ambient light */
+static struct { float p00, p11, a, b; int clip, ok; u32 frame; } g_proj;
+static void ao_proj_note(u32* r){   /* r3d_draw_gl: a scene draw's projection (VS bank 3), once per frame */
+  if(g_proj.frame==g_frame && g_proj.ok) return;
+  u64 ca=g_cb.cb[0][3]; u32 sz=g_cb.cbsize[0][3]; if(!ca || sz<64) return;
+  float m[16]; gmem_read(ca,m,64);
+  for(int tr=0;tr<2;tr++){ float M[16]; for(int i=0;i<16;i++) M[i]= tr? m[(i%4)*4+i/4] : m[i];
+    #define AZ(x) (fabsf(x)<1e-6f)
+    if(M[0]>0.05f && M[5]>0.05f && AZ(M[1])&&AZ(M[2])&&AZ(M[3])&&AZ(M[4])&&AZ(M[6])&&AZ(M[7])&&AZ(M[12])&&AZ(M[13])&&AZ(M[15]) && fabsf(fabsf(M[11])-1.f)<1e-4f){
+      g_proj.p00=M[0]; g_proj.p11=M[5]; g_proj.a=-M[10]*M[11]; g_proj.b=M[14];   /* NDC depth = -a + b/d at view distance d */ g_proj.clip=r[0x35F]&1; g_proj.ok=1; g_proj.frame=g_frame;
+      static int said; if(!said){ said=1; LOG("ao: camera projection P00 %.4f P11 %.4f depth %g %g (%s)\n",M[0],M[5],M[10],M[14],g_proj.clip? "0..1" : "-1..1"); }
+      return; }
+    #undef AZ
+  } }
+static const char* AO_PRE_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
+  "layout(binding=0) uniform sampler2D dep;\n"
+  "layout(r32f,binding=0) writeonly uniform image2D o0; layout(r32f,binding=1) writeonly uniform image2D o1; layout(r32f,binding=2) writeonly uniform image2D o2;\n"
+  "layout(r32f,binding=3) writeonly uniform image2D o3; layout(r32f,binding=4) writeonly uniform image2D o4;\n"
+  "uniform vec4 u_dep;   /* x,y: view depth = x/(y-depth); z: effect radius */\n"
+  "shared float sd[8][8];\n"
+  "float lin(ivec2 p){ ivec2 s=textureSize(dep,0); float d=texelFetch(dep,clamp(p,ivec2(0),s-1),0).r; return clamp(u_dep.x/max(u_dep.y-d,1e-7),0.0,3.0e38); }\n"
+  "float mipf(float a,float b,float c,float d){ float mx=max(max(a,b),max(c,d)); float er=0.75*u_dep.z*1.457, fr=0.615*er, ff=er*(1.0-0.615);\n"
+  "  float fm=-1.0/fr, fa=ff/fr+1.0; vec4 w=clamp((vec4(mx)-vec4(a,b,c,d))*fm+fa,0.0,1.0); return dot(w,vec4(a,b,c,d))/max(dot(w,vec4(1.0)),1e-6); }\n"
+  "void main(){ ivec2 g=ivec2(gl_GlobalInvocationID.xy), t=ivec2(gl_LocalInvocationID.xy), pc=g*2;\n"
+  "  float d0=lin(pc), d1=lin(pc+ivec2(1,0)), d2=lin(pc+ivec2(0,1)), d3=lin(pc+ivec2(1,1));\n"
+  "  imageStore(o0,pc,vec4(d0)); imageStore(o0,pc+ivec2(1,0),vec4(d1)); imageStore(o0,pc+ivec2(0,1),vec4(d2)); imageStore(o0,pc+ivec2(1,1),vec4(d3));\n"
+  "  float m1=mipf(d0,d1,d2,d3); imageStore(o1,g,vec4(m1)); sd[t.x][t.y]=m1; barrier();\n"
+  "  if(t.x%2==0 && t.y%2==0){ float m2=mipf(sd[t.x][t.y],sd[t.x+1][t.y],sd[t.x][t.y+1],sd[t.x+1][t.y+1]); imageStore(o2,g/2,vec4(m2)); sd[t.x][t.y]=m2; }\n"
+  "  barrier();\n"
+  "  if(t.x%4==0 && t.y%4==0){ float m3=mipf(sd[t.x][t.y],sd[t.x+2][t.y],sd[t.x][t.y+2],sd[t.x+2][t.y+2]); imageStore(o3,g/4,vec4(m3)); sd[t.x][t.y]=m3; }\n"
+  "  barrier();\n"
+  "  if(t.x%8==0 && t.y%8==0){ float m4=mipf(sd[t.x][t.y],sd[t.x+4][t.y],sd[t.x][t.y+4],sd[t.x+4][t.y+4]); imageStore(o4,g/8,vec4(m4)); } }\n";
+static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
+  "layout(binding=0) uniform sampler2D vz;\n"
+  "layout(r8,binding=0) writeonly uniform image2D oAO; layout(r8,binding=1) writeonly uniform image2D oEd;\n"
+  "uniform vec4 u_vp;    /* w h 1/w 1/h */\n"
+  "uniform vec4 u_ndc;   /* NDC->view mul xy, add xy */\n"
+  "uniform vec4 u_p;     /* radius, slices, steps per slice, noise index */\n"
+  "const float PI=3.14159265, HPI=1.57079633;\n"
+  "vec3 vpos(vec2 sp,float z){ return vec3((u_ndc.xy*sp+u_ndc.zw)*z,z); }\n"
+  "float fz(ivec2 p){ return texelFetch(vz,clamp(p,ivec2(0),ivec2(u_vp.xy)-1),0).r; }\n"
+  "vec4 edges(float c,float l,float r,float t,float b){ vec4 e=vec4(l,r,t,b)-c; float slr=(e.y-e.x)*0.5, stb=(e.w-e.z)*0.5;\n"
+  "  vec4 ea=e+vec4(slr,-slr,stb,-stb); e=min(abs(e),abs(ea)); return clamp(1.25-e/(c*0.011),0.0,1.0); }\n"
+  "float packE(vec4 e){ e=floor(clamp(e,0.0,1.0)*2.9+0.5); return dot(e,vec4(64.0,16.0,4.0,1.0)/255.0); }\n"
+  "vec3 calcN(vec4 e,vec3 C,vec3 L,vec3 R,vec3 T,vec3 B){ vec4 k=clamp(vec4(e.x*e.z,e.z*e.y,e.y*e.w,e.w*e.x)+0.01,0.0,1.0);\n"
+  "  L=normalize(L-C); R=normalize(R-C); T=normalize(T-C); B=normalize(B-C);\n"
+  "  return normalize(k.x*cross(L,T)+k.y*cross(T,R)+k.z*cross(R,B)+k.w*cross(B,L)); }\n"
+  "float facos(float x){ float ax=abs(x); float r=(-0.156583*ax+HPI)*sqrt(max(1.0-ax,0.0)); return x>=0.0? r : PI-r; }\n"
+  "uint hilbert(uint x,uint y){ uint i=0u; for(uint c=32u;c>0u;c/=2u){ uint rx=(x&c)>0u?1u:0u, ry=(y&c)>0u?1u:0u; i+=c*c*((3u*rx)^ry);\n"
+  "  if(ry==0u){ if(rx==1u){ x=63u-x; y=63u-y; } uint tt=x; x=y; y=tt; } } return i; }\n"
+  "vec2 noise(ivec2 p){ uint i=hilbert(uint(p.x)&63u,uint(p.y)&63u)+288u*(uint(u_p.w)%64u); return fract(0.5+float(i)*vec2(0.75487766624669276,0.569840290998053266)); }\n"
+  "void main(){ ivec2 p=ivec2(gl_GlobalInvocationID.xy); if(any(greaterThanEqual(p,ivec2(u_vp.xy)))) return;\n"
+  "  vec2 sp=(vec2(p)+0.5)*u_vp.zw;\n"
+  "  float z=fz(p), lz=fz(p+ivec2(-1,0)), rz=fz(p+ivec2(1,0)), tz=fz(p+ivec2(0,-1)), bz=fz(p+ivec2(0,1));\n"
+  "  vec4 e=edges(z,lz,rz,tz,bz); imageStore(oEd,p,vec4(packE(e)));\n"
+  "  vec3 N=calcN(e,vpos(sp,z),vpos(sp-vec2(u_vp.z,0.0),lz),vpos(sp+vec2(u_vp.z,0.0),rz),vpos(sp-vec2(0.0,u_vp.w),tz),vpos(sp+vec2(0.0,u_vp.w),bz));\n"
+  "  z*=0.99999; vec3 P=vpos(sp,z); vec3 V=normalize(-P);\n"
+  "  float er=u_p.x*1.457, fr=0.615*er, ff=er*(1.0-0.615), fm=-1.0/fr, fa=ff/fr+1.0;\n"
+  "  float ssr=er/(z*u_ndc.x*u_vp.z);\n"
+  "  float vis=clamp((10.0-ssr)/100.0,0.0,1.0)*0.5; float minS=1.3/ssr; vec2 nz=noise(p);\n"
+  "  for(float s=0.0;s<u_p.y;s++){\n"
+  "    float phi=(s+nz.x)/u_p.y*PI, cp=cos(phi), sph=sin(phi); vec2 om=vec2(cp,-sph)*ssr;\n"
+  "    vec3 dir=vec3(cp,sph,0.0), od=dir-dot(dir,V)*V, ax=normalize(cross(od,V)), pn=N-ax*dot(N,ax);\n"
+  "    float sn=sign(dot(od,pn)), pl=length(pn), cn=clamp(dot(pn,V)/pl,0.0,1.0), n=sn*facos(cn);\n"
+  "    float lo0=cos(n+HPI), lo1=cos(n-HPI), hc0=lo0, hc1=lo1;\n"
+  "    for(float j=0.0;j<u_p.z;j++){\n"
+  "      float ss=pow((j+fract(nz.y+(s+j*u_p.z)*0.6180339887498948))/u_p.z,2.0)+minS;\n"
+  "      vec2 so=ss*om; float mip=clamp(log2(length(so))-3.3,0.0,4.0); so=floor(so+0.5)*u_vp.zw;\n"
+  "      vec2 s0=sp+so, s1=sp-so; vec3 d0=vpos(s0,textureLod(vz,s0,mip).r)-P, d1=vpos(s1,textureLod(vz,s1,mip).r)-P;\n"
+  "      float l0=length(d0), l1=length(d1);\n"
+  "      float c0=mix(lo0,dot(d0/l0,V),clamp(l0*fm+fa,0.0,1.0)), c1=mix(lo1,dot(d1/l1,V),clamp(l1*fm+fa,0.0,1.0));\n"
+  "      hc0=max(hc0,c0); hc1=max(hc1,c1); }\n"
+  "    pl=mix(pl,1.0,0.05); float h0=-facos(hc1), h1=facos(hc0);\n"
+  "    vis+=pl*((cn+2.0*h0*sin(n)-cos(2.0*h0-n))/4.0+(cn+2.0*h1*sin(n)-cos(2.0*h1-n))/4.0); }\n"
+  "  vis=max(0.03,pow(vis/u_p.y,2.2)); imageStore(oAO,p,vec4(clamp(vis/1.5,0.0,1.0))); }\n";
+static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
+  "layout(binding=0) uniform sampler2D aoT; layout(binding=1) uniform sampler2D edT;\n"
+  "layout(r8,binding=0) writeonly uniform image2D oF;\n"
+  "uniform vec4 u_vp;\n"
+  "ivec2 cl(ivec2 p){ return clamp(p,ivec2(0),ivec2(u_vp.xy)-1); }\n"
+  "vec4 ue(ivec2 p){ uint v=uint(texelFetch(edT,cl(p),0).r*255.5); return clamp(vec4(float((v>>6)&3u),float((v>>4)&3u),float((v>>2)&3u),float(v&3u))/3.0,0.0,1.0); }\n"
+  "float a(ivec2 p){ return texelFetch(aoT,cl(p),0).r; }\n"
+  "void main(){ ivec2 p=ivec2(gl_GlobalInvocationID.xy); if(any(greaterThanEqual(p,ivec2(u_vp.xy)))) return;\n"
+  "  vec4 eL=ue(p+ivec2(-1,0)), eR=ue(p+ivec2(1,0)), eT=ue(p+ivec2(0,-1)), eB=ue(p+ivec2(0,1));\n"
+  "  vec4 eC=ue(p)*vec4(eL.y,eR.x,eT.w,eB.z);\n"
+  "  eC=clamp(eC+(clamp(4.0-2.5-dot(eC,vec4(1.0)),0.0,1.0)/1.5)*0.5,0.0,1.0);\n"
+  "  float dw=0.425, wTL=dw*(eC.x*eL.z+eC.z*eT.x), wTR=dw*(eC.z*eT.y+eC.y*eR.z), wBL=dw*(eC.w*eB.x+eC.x*eL.w), wBR=dw*(eC.y*eR.w+eC.w*eB.y);\n"
+  "  float sw=1.2, sum=a(p)*sw;\n"
+  "  sum+=a(p+ivec2(-1,0))*eC.x+a(p+ivec2(1,0))*eC.y+a(p+ivec2(0,-1))*eC.z+a(p+ivec2(0,1))*eC.w; sw+=dot(eC,vec4(1.0));\n"
+  "  sum+=a(p+ivec2(-1,-1))*wTL+a(p+ivec2(1,-1))*wTR+a(p+ivec2(-1,1))*wBL+a(p+ivec2(1,1))*wBR; sw+=wTL+wTR+wBL+wBR;\n"
+  "  imageStore(oF,p,vec4(clamp(sum/sw*1.5,0.0,1.0))); }\n";
+static const char* AO_APPLY_FS="#version 430 core\nlayout(binding=0) uniform sampler2D aoF; uniform vec4 u_a; out vec4 o;\n"
+  "void main(){ float a=texelFetch(aoF,ivec2(gl_FragCoord.xy),0).r; o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
+static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a; } g_ao;
+static GLuint ao_cs(const char* src){ char err[1024]; err[0]=0; GLuint s=compile(GL_COMPUTE_SHADER,src,err,sizeof err); GLuint p= s? link2(s,0,0) : 0;
+  if(!p) LOG("ao: compute program failed: %s\n",err); return p; }
+static void ao_tex(GLuint* t, GLenum f, u32 w, u32 h, int levels){
+  if(*t) glDeleteTextures(1,t);
+  glGenTextures(1,t); glBindTexture(GL_TEXTURE_2D,*t); glTexStorage2D(GL_TEXTURE_2D,levels,f,(GLsizei)w,(GLsizei)h);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,levels>1? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE); }
+static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){
+  if(!g_proj.ok){ static int said; if(!said){ said=1; LOG("ao: no camera projection found yet: AO waits\n"); } return 0; }
+  if(z->target!=GL_TEXTURE_2D) return 0;
+  if(!g_ao.pre){
+    g_ao.pre=ao_cs(AO_PRE_CS); g_ao.mainp=ao_cs(AO_MAIN_CS); g_ao.den=ao_cs(AO_DEN_CS);
+    { char err[512]; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,AO_APPLY_FS,err,sizeof err) : 0; g_ao.app= a&&b? link2(a,b,0) : 0; }
+    if(!g_ao.pre || !g_ao.mainp || !g_ao.den || !g_ao.app){ g_ao_failed=1; LOG("ao: programs failed: AO off\n"); return 0; }
+    g_ao.pre_dep=glGetUniformLocation(g_ao.pre,"u_dep"); g_ao.main_vp=glGetUniformLocation(g_ao.mainp,"u_vp"); g_ao.main_ndc=glGetUniformLocation(g_ao.mainp,"u_ndc");
+    g_ao.main_p=glGetUniformLocation(g_ao.mainp,"u_p"); g_ao.den_vp=glGetUniformLocation(g_ao.den,"u_vp"); g_ao.app_a=glGetUniformLocation(g_ao.app,"u_a");
+    glGenVertexArrays(1,&g_ao.vao); glGenFramebuffers(1,&g_ao.fbo);
+    LOG("ao: XeGTAO on (OpenGL)\n"); }
+  if(g_ao.w!=w || g_ao.h!=h){
+    ao_tex(&g_ao.vz,GL_R32F,w,h,5); ao_tex(&g_ao.ao,GL_R8,w,h,1); ao_tex(&g_ao.ed,GL_R8,w,h,1); ao_tex(&g_ao.fin,GL_R8,w,h,1);
+    g_ao.w=w; g_ao.h=h; }
+  /* constants (XeGTAO.h GTAOUpdateConstants): view depth = mul/(add-depth); NDC->view from the projection's scale */
+  float A=g_proj.a, B=g_proj.b, mul, add;
+  if(g_proj.clip){ mul=-B; add=-A; } else { mul=-0.5f*B; add=0.5f*(1.f-A); }   /* depth = -A + B/d, or its 0.5x+0.5 */
+  float tx=1.f/g_proj.p00, ty=1.f/g_proj.p11, radius=60.f;
+  float vp[4]={(float)w,(float)h,1.f/(float)w,1.f/(float)h}, ndc[4]={tx*2.f,ty*-2.f,-tx,ty};
+  float pp[4]={radius,3.f,3.f,(float)(dlg_aa()? g_ao.n++%64 : 0)}, dep[4]={mul,add,radius,0};
+  for(int u=0;u<2;u++) glBindSampler(u,0);
+  /* 1: view depth and its MIPs */
+  glUseProgram(g_ao.pre); glUniform4fv(g_ao.pre_dep,1,dep);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,z->id);
+  for(int l=0;l<5;l++) glBindImageTexture(l,g_ao.vz,l,GL_FALSE,0,GL_WRITE_ONLY,GL_R32F);
+  glDispatchCompute((w+15)/16,(h+15)/16,1);
+  glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+  /* 2: AO term and edges */
+  glUseProgram(g_ao.mainp); glUniform4fv(g_ao.main_vp,1,vp); glUniform4fv(g_ao.main_ndc,1,ndc); glUniform4fv(g_ao.main_p,1,pp);
+  glBindTexture(GL_TEXTURE_2D,g_ao.vz);
+  glBindImageTexture(0,g_ao.ao,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8); glBindImageTexture(1,g_ao.ed,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8);
+  glDispatchCompute((w+7)/8,(h+7)/8,1);
+  glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+  /* 3: denoise */
+  glUseProgram(g_ao.den); glUniform4fv(g_ao.den_vp,1,vp);
+  glBindTexture(GL_TEXTURE_2D,g_ao.ao); glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_ao.ed);
+  glBindImageTexture(0,g_ao.fin,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8);
+  glDispatchCompute((w+7)/8,(h+7)/8,1);
+  glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT);
+  /* 4: scene colour *= AO */
+  glBindFramebuffer(GL_FRAMEBUFFER,g_ao.fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,0,0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT1,GL_TEXTURE_2D,0,0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,t->id,0);
+  { GLenum b0=GL_COLOR_ATTACHMENT0; glDrawBuffers(1,&b0); }
+  glDisable(GL_SCISSOR_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE); glDisable(GL_DEPTH_TEST); glDisable(GL_FRAMEBUFFER_SRGB);
+  glDisable(GL_POLYGON_OFFSET_FILL); glColorMaski(0,1,1,1,0); glViewportIndexedf(0,0,0,(float)w,(float)h);
+  { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_AO_DEBUG")!=NULL;   /* test: the AO term alone in place of the scene */
+    if(!dbg){ glEnablei(GL_BLEND,0); glBlendFuncSeparatei(0,GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE); } else glDisablei(GL_BLEND,0); }
+  glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,0,0}; glUniform4fv(g_ao.app_a,1,a); }
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_ao.fin); glBindVertexArray(g_ao.vao);
+  glDrawArrays(GL_TRIANGLES,0,3);
+  glDisablei(GL_BLEND,0); glColorMaski(0,1,1,1,1);
+  state_dirty(); g_fb_sig_ok=0; g_clip_mode=-1; g_pipe_on=0; mb_reset();
+  return 1; }
+
 static int dlg_eval(void){
   Tex* t=g_dlg.need; Tex* z=g_dlg.need_z; g_dlg.need=g_dlg.need_z=NULL;
   if(!t || !z) return 0;
   u32 w=RW(t), h=RH(t);
   if(reshade_gl_on()) rs_depth_copy(z,w,h);
+  if(dlg_ao()) ao_pass(t,z,w,h);   /* before TAA: its noise is resolved over frames */
   if(dlg_aa()){
     GLuint mv=dlg_mv_pass(z,w,h);
     if(dlg_dlss()) dlgl_queue(t->id,z->id,mv,z->f.ifmt,w,h,g_dmv.jit_used? g_dmv.jx : 0.0f,g_dmv.jit_used? g_dmv.jy : 0.0f,g_dlg.reset);
@@ -2400,6 +2565,21 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   u32* r=ch->r3d; g_draws++;
   if(g_lfn && !(g_draws&15)) lsfg_pump();   /* push pending generated frames out on time even mid-frame */
   if(!count) return;
+  { /* test only: SWR_FIND_PROJ=1 logs perspective-looking 4x4 matrices in the constant buffers of scene draws */
+    static int fp=-1; static int found; if(fp<0) fp=getenv("SWR_FIND_PROJ")!=NULL;
+    if(fp && found<40 && g_frame>1500 && g_zt && g_zt->w>=640){
+      for(int st=0;st<5 && found<40;st+=4) for(int b=0;b<18 && found<40;b++){ u64 ca=g_cb.cb[st][b]; u32 sz=g_cb.cbsize[st][b]; if(!ca||!sz) continue; if(sz>0x4000) sz=0x4000;
+        static float v[0x1000]; gmem_read(ca,v,sz);
+        for(u32 o=0;o+16<=sz/4 && found<40;o++){ float* m=v+o;
+          for(int tr=0;tr<2;tr++){ float M[16]; for(int i=0;i<16;i++) M[i]= tr? m[(i%4)*4+i/4] : m[i];
+            #define Z(x) (fabsf(x)<1e-6f)
+            if(M[0]>0.05f && M[5]>0.05f && Z(M[1])&&Z(M[2])&&Z(M[3])&&Z(M[4])&&Z(M[6])&&Z(M[7])&&Z(M[12])&&Z(M[13])&&Z(M[15]) && fabsf(fabsf(M[11])-1.f)<1e-4f){
+              static u64 seen[64]; static int ns; u64 key=(ca+o*4)^((u64)st<<60)^((u64)tr<<59); int dup=0; for(int i=0;i<ns;i++) dup|=seen[i]==key;
+              if(!dup && ns<64){ seen[ns++]=key; found++;
+                LOG("findproj: frame %u draw %llu stage %d bank %d off %u %s rt0 %ux%u: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n",g_frame,(unsigned long long)g_draws,st,b,o*4,tr? "transposed" : "as stored",
+                    g_nrt&&g_rt[0]? g_rt[0]->w:0,g_nrt&&g_rt[0]? g_rt[0]->h:0,M[0],M[1],M[2],M[3],M[4],M[5],M[6],M[7],M[8],M[9],M[10],M[11],M[12],M[13],M[14],M[15]); } }
+            #undef Z
+          } } } } }
   /* shaders */
   u64 code=((u64)r[0x582]<<32)|r[0x583];
   Sh* vs=NULL; Sh* fs=NULL;
@@ -2486,6 +2666,7 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   TM(TM_TEX,(bind_textures(ch,0,vs), bind_textures(ch,4,fs)));
   if(g_pf_blit){ g_pf_blit=0; state_dirty(); apply_state(ch); }
   dlg_draw();
+  if(g_zt && g_dlg.chosen_z && g_zt->gva==g_dlg.chosen_z && dlg_ao()) ao_proj_note(r);
   if(g_dlg.need && dlg_eval()){   /* DLSS ran before this draw: its framebuffer, program and state again */
     bind_framebuffer(ch);
     if(g_sep>0){ glUseProgram(0); p_bpp(g_pipe); g_pipe_on=1; p_ups(g_pipe,0x00000001,vpp); g_pipe_vs=vpp; p_ups(g_pipe,0x00000002,atp); g_pipe_fs=atp; }
