@@ -14,8 +14,10 @@ HEADERS = [('hdr_spv.h', 'hdr_out', 'g_hdr_out',
            ('dlss_mv_spv.h', 'dlss_mv', 'g_dlss_mv',
             '/* generated from dlss_mv.vert / dlss_mv.frag by glslang 16.6.0 (glslang -V); see work-profiler/gen_spv_headers.py */'),
            ('shrink_spv.h', 'shrink', 'g_shrink',
-            '/* generated from shaders/shrink.frag by glslang (glslang -V); see work-profiler/gen_spv_headers.py */')]
-STAGES = {'shrink': ('frag',)}   # the others have a vertex and a fragment shader
+            '/* generated from shaders/shrink.frag by glslang (glslang -V); see work-profiler/gen_spv_headers.py */'),
+           ('taa_spv.h', 'taa', 'g_taa',
+            '/* generated from shaders/taa.frag by glslang 16.6.0 (glslang -V); see work-profiler/gen_spv_headers.py */')]
+STAGES = {'shrink': ('frag',), 'taa': ('frag',)}   # the others have a vertex and a fragment shader
 
 
 def words(src):

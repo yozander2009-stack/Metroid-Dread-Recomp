@@ -266,7 +266,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
         raise SystemExit('TCC cannot build the runtime: build it once with GCC (--build-runtime --cc gcc), '
                          'or use the prebuilt one from the release (%s).' % os.path.relpath(runtime_path(target_win, backend), HERE))
     gl = backend != 'headless'
-    extra = ['gpu_gl', 'gl_load', 'shader', 'astc', 'glq', 'glq_gen', 'dlss_gl'] if gl else ['gpu_nogl']
+    extra = ['gpu_gl', 'gl_load', 'shader', 'astc', 'glq', 'glq_gen', 'dlss_gl', 'reshade_gl'] if gl else ['gpu_nogl']
     gles = backend in ('x11es', 'android')
     if gles: extra += ['overlay']
     srcs = [os.path.join(RT, s + '.c') for s in RUNTIME_SRC + extra] + [os.path.join(RT, 'backend_%s.c' % backend), os.path.join(RT, 'entry.c')]

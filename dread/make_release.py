@@ -200,7 +200,7 @@ def snx_keep(s2=None):
     src = ''.join(re.findall(r"'([^']*)'", re.search(r"SRC = \((.*?)\)\.split\(\)", b, re.S).group(1))).split()
     for extra in re.findall(r"SRC \+= \[(.*?)\]", b, re.S):   # ScarletNX main 112db409's (common/ among them)
         src += re.findall(r"'([^']+)'", extra)
-    src += ['gpu/vk/dlss.c', 'gpu/vk/dlss_stub.c', 'gpu/vk/vma.cpp', 'gpu/shader/maxwell_opcodes.def', 'runtime/settings.txt']
+    src += ['gpu/vk/dlss.c', 'gpu/vk/vma.cpp', 'gpu/shader/maxwell_opcodes.def', 'runtime/settings.txt']
     src += re.findall(r"\('([^']+\.comp)'", b)
     todo = [os.path.join(nx, f) for f in src]
     for d in (os.path.join(nx, 'gpu', 'vk', 'shaders'), os.path.join(s2, 'tools')):

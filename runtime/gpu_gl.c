@@ -105,13 +105,14 @@ static GLuint link2(GLuint a, GLuint b, GLuint c3){
 /* DLAA (dlss=1): vertex shaders expose gl_Position to transform feedback (buffer 0, 16 bytes a vertex), so the scene's
    depth-prepass draws can be captured and replayed for motion vectors. Only with DLAA on: the default build's shader
    text, and so its cached binaries, stay as they were (the binary cache is keyed by the text) */
-extern int snxvk_dlss_mode;
+extern int snxvk_dlss_mode; extern int g_opt_taa; extern int g_gles;
 static char* dlg_vs_xfb(char* src){
   static const char* decl="out gl_PerVertex { invariant vec4 gl_Position;";
-#ifdef SWR_RELEASE
-  return src;
+  int want= g_opt_taa!=0;   /* TAA uses the same motion vectors (also in the release) */
+#ifndef SWR_RELEASE
+  want|= snxvk_dlss_mode>0;
 #endif
-  if(snxvk_dlss_mode<=0 || !src) return src;
+  if(!want || g_gles || !src) return src;
   char* d=strstr(src,decl); char* nl=strchr(src,'\n'); if(!d || !nl || nl>d) return src;
   static const char* ext="#extension GL_ARB_enhanced_layouts : require\n";
   static const char* nd="out gl_PerVertex { layout(xfb_buffer=0, xfb_offset=0) invariant vec4 gl_Position;";
@@ -1770,10 +1771,16 @@ static struct {
   Tex *need, *need_z;    /* DLSS runs before the draw that first reads the scene target */
 } g_dlg;
 #ifdef SWR_RELEASE   /* the public release has no DLSS (NVIDIA's licence question is open): off whatever the .ini says */
-static int dlg_on(void){ return 0; }
+static int dlg_dlss(void){ return 0; }
 #else
-static int dlg_on(void){ return snxvk_dlss_mode>0 && !g_gles && !dlgl_failed(); }
+static int dlg_dlss(void){ return snxvk_dlss_mode>0 && !g_gles && !dlgl_failed(); }
 #endif
+/* The same scene point serves TAA ([Graphics] taa=1, when DLAA is not running) and ReShade's depth (reshade_gl.c) */
+extern int reshade_gl_on(void); extern void reshade_gl_set_depth(unsigned tex);
+static int g_taa_failed;
+static int dlg_taa(void){ return g_opt_taa && !g_gles && !g_taa_failed && !dlg_dlss(); }
+static int dlg_aa(void){ return dlg_dlss() || dlg_taa(); }       /* jitter and motion vectors */
+static int dlg_on(void){ return dlg_aa() || reshade_gl_on(); }   /* finding the scene target */
 static int dlg_full_hdr(const Tex* t){ return t && t->f.ifmt==GL_R11F_G11F_B10F && g_dlg.scene_w && t->w==g_dlg.scene_w && t->h==g_dlg.scene_h; }
 static int dlg_written(u64 a){ for(int i=0;i<g_dlg.nwritten;i++) if(g_dlg.written[i]==a) return 1; return 0; }
 static Tex* dlg_find(u64 gva, int depth){ for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt && !!t->f.depth==depth) return t; return NULL; }
@@ -1824,7 +1831,7 @@ static void dmv_tf(int begin){   /* begin/end transform feedback: not in the que
   if(!glq_active()){ e_tf(&begin); return; }
   int* q=(int*)glq_alloc(sizeof(int),0,e_tf); *q=begin; glq_commit(); }
 static float halton(u32 i, u32 b){ float f=1, r=0; for(;i;i/=b){ f/=(float)b; r+=f*(float)(i%b); } return r; }
-static int dlg_scene_draw(void){ return dlg_on() && !g_dmv.failed && g_dlg.chosen && !g_dlg.done && g_zt && g_zt->gva==g_dlg.chosen_z; }
+static int dlg_scene_draw(void){ return dlg_aa() &&!g_dmv.failed && g_dlg.chosen && !g_dlg.done && g_zt && g_zt->gva==g_dlg.chosen_z; }
 /* r3d_draw_gl, before apply_state: this draw's jitter */
 static void dlg_jitter(u32* r){
   g_dl_jx=g_dl_jy=0;
@@ -1902,20 +1909,105 @@ static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){
   return g_dmv.mv; }
 /* r3d_draw_gl, after the draw's textures are bound: DLSS on the scene target this draw is about to read. The draw's own
    framebuffer, program and state are set again afterwards */
+/* ReShade: a copy of the finished scene depth, bound to ReShade's DEPTH effect textures (reshade_gl.c) */
+static struct { GLuint tex; u32 w, h; GLenum fmt; } g_rsd;
+static void rs_depth_copy(Tex* z, u32 w, u32 h){
+  if(!g_rsd.tex || g_rsd.w!=w || g_rsd.h!=h || g_rsd.fmt!=z->f.ifmt){
+    if(g_rsd.tex){ reshade_gl_set_depth(0); glDeleteTextures(1,&g_rsd.tex); }
+    glGenTextures(1,&g_rsd.tex); glBindTexture(GL_TEXTURE_2D,g_rsd.tex); glTexStorage2D(GL_TEXTURE_2D,1,z->f.ifmt,(GLsizei)w,(GLsizei)h);
+    g_rsd.w=w; g_rsd.h=h; g_rsd.fmt=z->f.ifmt; mb_reset();
+    LOG("reshade: scene depth %ux%u (format %x) copied for ReShade each frame\n",w,h,z->f.ifmt); }
+  glCopyImageSubData(z->id,GL_TEXTURE_2D,0,0,0,0,g_rsd.tex,GL_TEXTURE_2D,0,0,0,0,(GLsizei)w,(GLsizei)h,1);
+  reshade_gl_set_depth(g_rsd.tex); }
+
+/* TAA ([Graphics] taa=1): the scene target is blended with the previous frames' result, which is moved by the motion
+   vectors above (the surface the game shows at each pixel, from last frame's positions of the same draw) and limited
+   to the colour range of the pixel's 3x3 neighbourhood this frame (variance clipping in YCoCg on tone-mapped colour),
+   so moving things and newly seen areas do not smear. The jitter above moves the scene by a sub-pixel Halton(2,3)
+   offset each frame, so the history collects 8 sample positions per pixel. History: bicubic (Catmull-Rom) fetch,
+   RGBA16F, tone-mapped. The result replaces the scene target before post effects, bloom and the HUD read it */
+static struct { GLuint prog, vao, fbo, hist[2], tmp; u32 w, h, cur; GLenum tfmt; int valid; GLint loc; } g_taa;
+static const char* TAA_VS="#version 430 core\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0.0,1.0); }";
+static const char* TAA_FS="#version 430 core\n"
+  "layout(binding=0) uniform sampler2D cur; layout(binding=1) uniform sampler2D hist; layout(binding=2) uniform sampler2D mvt;\n"
+  "uniform vec4 info;   /* x history valid, y motion vectors, z weight of this frame */\n"
+  "layout(location=0) out vec4 oh; layout(location=1) out vec4 oc;\n"
+  "ivec2 sz;\n"
+  "vec3 tm(vec3 c){ c=max(c,vec3(0.0)); return c/(1.0+max(c.r,max(c.g,c.b))); }\n"
+  "vec3 itm(vec3 c){ return c/max(1.0-max(c.r,max(c.g,c.b)),1.0/65504.0); }\n"
+  "vec3 ycc(vec3 c){ return vec3(0.25*c.r+0.5*c.g+0.25*c.b, 0.5*c.r-0.5*c.b, -0.25*c.r+0.5*c.g-0.25*c.b); }\n"
+  "vec3 rgb(vec3 y){ return vec3(y.x+y.y-y.z, y.x+y.z, y.x-y.y-y.z); }\n"
+  "vec3 hf(ivec2 p){ return texelFetch(hist,clamp(p,ivec2(0),sz-1),0).rgb; }\n"
+  "vec3 hs(vec2 uv){ vec2 q=uv*vec2(sz)-0.5; vec2 i=floor(q); vec2 f=q-i;\n"
+  "  vec2 w[4]; w[0]=f*(-0.5+f*(1.0-0.5*f)); w[1]=1.0+f*f*(-2.5+1.5*f); w[2]=f*(0.5+f*(2.0-1.5*f)); w[3]=f*f*(-0.5+0.5*f);\n"
+  "  vec3 r=vec3(0.0); ivec2 b=ivec2(i)-1;\n"
+  "  for(int y=0;y<4;y++) for(int x=0;x<4;x++) r+=hf(b+ivec2(x,y))*(w[x].x*w[y].y);\n"
+  "  return clamp(r,vec3(0.0),vec3(1.0)); }\n"
+  "void main(){ ivec2 p=ivec2(gl_FragCoord.xy); sz=textureSize(cur,0);\n"
+  "  vec3 c0=tm(texelFetch(cur,p,0).rgb); vec3 m1=vec3(0.0), m2=vec3(0.0); vec2 mv=vec2(0.0); float best=-1.0;\n"
+  "  for(int y=-1;y<=1;y++) for(int x=-1;x<=1;x++){ ivec2 q=clamp(p+ivec2(x,y),ivec2(0),sz-1);\n"
+  "    vec3 s=ycc(tm(texelFetch(cur,q,0).rgb)); m1+=s; m2+=s*s;\n"
+  "    if(info.y>0.5){ vec2 v=texelFetch(mvt,q,0).xy; float l=dot(v,v); if(l>best){ best=l; mv=v; } } }\n"
+  "  m1/=9.0; vec3 sd=sqrt(max(m2/9.0-m1*m1,vec3(0.0)));\n"
+  "  vec2 uv=(vec2(p)+0.5+mv)/vec2(sz); vec3 o=c0;\n"
+  "  if(info.x>0.5 && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))){\n"
+  "    vec3 h=clamp(ycc(hs(uv)),m1-1.25*sd,m1+1.25*sd); o=mix(rgb(h),c0,info.z); }\n"
+  "  oh=vec4(o,1.0); oc=vec4(itm(o),1.0); }\n";
+static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){
+  if(g_dmv.failed){ g_taa_failed=1; LOG("taa (OpenGL): no motion vectors on this driver: TAA off\n"); return 0; }
+  if(!g_taa.prog){
+    char err[1024]; err[0]=0; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,TAA_FS,err,sizeof err) : 0;
+    g_taa.prog= a&&b? link2(a,b,0) : 0;
+    if(!g_taa.prog){ g_taa_failed=1; LOG("taa (OpenGL): program failed, TAA off: %s\n",err); return 0; }
+    g_taa.loc=glGetUniformLocation(g_taa.prog,"info");
+    glGenVertexArrays(1,&g_taa.vao); glGenFramebuffers(1,&g_taa.fbo);
+    LOG("taa (OpenGL): on%s\n",mv? "" : " (no motion vectors yet)"); }
+  if(g_taa.w!=w || g_taa.h!=h || g_taa.tfmt!=t->f.ifmt){
+    if(g_taa.hist[0]){ glDeleteTextures(2,g_taa.hist); glDeleteTextures(1,&g_taa.tmp); }
+    glGenTextures(2,g_taa.hist); glGenTextures(1,&g_taa.tmp);
+    for(int i=0;i<2;i++){ glBindTexture(GL_TEXTURE_2D,g_taa.hist[i]); glTexStorage2D(GL_TEXTURE_2D,1,GL_RGBA16F,(GLsizei)w,(GLsizei)h); }
+    glBindTexture(GL_TEXTURE_2D,g_taa.tmp); glTexStorage2D(GL_TEXTURE_2D,1,t->f.ifmt,(GLsizei)w,(GLsizei)h);
+    g_taa.w=w; g_taa.h=h; g_taa.tfmt=t->f.ifmt; g_taa.valid=0; }
+  if(reset) g_taa.valid=0;
+  u32 c=(g_taa.cur^=1);
+  glBindFramebuffer(GL_FRAMEBUFFER,g_taa.fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,0,0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,g_taa.hist[c],0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT1,GL_TEXTURE_2D,g_taa.tmp,0);
+  { GLenum b[2]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1}; glDrawBuffers(2,b); }
+  glDisable(GL_SCISSOR_TEST); glDisablei(GL_BLEND,0); glDisablei(GL_BLEND,1); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glDisable(GL_POLYGON_OFFSET_FILL);
+  glColorMaski(0,1,1,1,1); glColorMaski(1,1,1,1,1); glViewportIndexedf(0,0,0,(float)w,(float)h);
+  glUseProgram(g_taa.prog); glBindVertexArray(g_taa.vao);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,t->id);
+  glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_taa.hist[c^1]);
+  glActiveTexture(GL_TEXTURE0+2); glBindTexture(GL_TEXTURE_2D,mv? mv : g_taa.hist[c^1]);
+  { float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, 0.f }; glUniform4fv(g_taa.loc,1,in); }
+  glDrawArrays(GL_TRIANGLES,0,3);
+  glCopyImageSubData(g_taa.tmp,GL_TEXTURE_2D,0,0,0,0,t->id,GL_TEXTURE_2D,0,0,0,0,(GLsizei)w,(GLsizei)h,1);
+  g_taa.valid=1;
+  state_dirty(); g_fb_sig_ok=0; g_clip_mode=-1; g_pipe_on=0; mb_reset();
+  return 1; }
+
 static int dlg_eval(void){
   Tex* t=g_dlg.need; Tex* z=g_dlg.need_z; g_dlg.need=g_dlg.need_z=NULL;
   if(!t || !z) return 0;
   u32 w=RW(t), h=RH(t);
-  GLuint mv=dlg_mv_pass(z,w,h);
-  dlgl_queue(t->id,z->id,mv,z->f.ifmt,w,h,g_dmv.jit_used? g_dmv.jx : 0.0f,g_dmv.jit_used? g_dmv.jy : 0.0f,g_dlg.reset);
-  g_dlg.reset=0; t->wgen++; g_dlg.evals++; g_dlg.evaluated=1;
-  { static int said; if(!said){ said=1; LOG("dlaa (OpenGL): scene target %llx %ux%u, depth %llx\n",(unsigned long long)t->gva,w,h,(unsigned long long)z->gva); } }
+  if(reshade_gl_on()) rs_depth_copy(z,w,h);
+  if(dlg_aa()){
+    GLuint mv=dlg_mv_pass(z,w,h);
+    if(dlg_dlss()) dlgl_queue(t->id,z->id,mv,z->f.ifmt,w,h,g_dmv.jit_used? g_dmv.jx : 0.0f,g_dmv.jit_used? g_dmv.jy : 0.0f,g_dlg.reset);
+    else if(!taa_pass(t,mv,w,h,g_dlg.reset)) g_dmv.hold=60;   /* TAA failed: stop the jitter */
+    g_dlg.reset=0; t->wgen++; g_dlg.evals++; }
+  g_dlg.evaluated=1;
+  { static int said; if(!said){ said=1; LOG("scene point (OpenGL, %s): target %llx %ux%u, depth %llx\n",dlg_dlss()? "DLAA" : dlg_taa()? "TAA" : "ReShade depth",
+      (unsigned long long)t->gva,w,h,(unsigned long long)z->gva); } }
   return 1; }
 
 /* each present */
 static void dlg_frame(void){
   if(!dlg_on()) return;
-  { static int started; if(!started){ started=1; dlgl_queue(0,0,0,0,0,0,0.0f,0.0f,0); } }   /* NGX up now, not at the first DLAA frame */
+  if(dlg_dlss()){ static int started; if(!started){ started=1; dlgl_queue(0,0,0,0,0,0,0.0f,0.0f,0); } }   /* NGX up now, not at the first DLAA frame */
   if(g_dlg.small_seen && g_dlg.frame_best){ g_dlg.missing=0;
     if(g_dlg.frame_best==g_dlg.stable) g_dlg.streak=0;
     else if(!g_dlg.stable || ++g_dlg.streak>=30){ g_dlg.stable=g_dlg.frame_best; g_dlg.stable_z=g_dlg.frame_best_z; g_dlg.streak=0; g_dlg.reset=1; } }
@@ -1924,7 +2016,7 @@ static void dlg_frame(void){
   g_dmv.cur^=1; g_dmv.nrec[g_dmv.cur]=0; g_dmv.used[g_dmv.cur]=0;
   { u32 i=(g_dmv.jframe++%8)+1; g_dmv.jx=halton(i,2)-0.5f; g_dmv.jy=halton(i,3)-0.5f; }
   if(g_dmv.jit_used && !g_dlg.evaluated){ g_dmv.hold=60; g_dmv.misses++; } else if(g_dmv.hold) g_dmv.hold--;   /* jittered without DLSS: that frame shook */
-  g_dmv.jit_ok= g_dlg.evaluated && !g_dmv.hold; g_dmv.jit_used=0; g_dlg.evaluated=0;
+  g_dmv.jit_ok= dlg_aa() && g_dlg.evaluated && !g_dmv.hold; g_dmv.jit_used=0; g_dlg.evaluated=0;
   g_dlg.nwritten=g_dlg.nreads=0; g_dlg.cand=g_dlg.cand_z=0; g_dlg.frame_best=g_dlg.frame_best_z=0;
   g_dlg.small_seen=0; g_dlg.done=0; g_dlg.last_rt0=NULL; }
 

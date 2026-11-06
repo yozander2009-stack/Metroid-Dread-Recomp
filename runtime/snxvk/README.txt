@@ -17,7 +17,8 @@ Local changes to upstream (marked "SWR" in the code):
                         records through the recording thread's ring
   gpu/vk/renderer.c     the present pass, DLSS frame hook, "slow present" step timing (logs over 250 ms)
   gpu/vk/render.c, texture.c, device.c, spirv_translate.c, common/utilities/spirv_emit.c: DLSS hooks (dlss.c;
-                        dlss_stub.c in the public build), the jitter on every viewport, motion-vector draws paired by
+                        the public build compiles it with -DSWR_NO_NGX: no NGX code, scene point / motion vectors / TAA
+                        (shaders/taa.frag) / ReShade depth stay), the jitter on every viewport, motion-vector draws paired by
                         guest address; vk_rt_prefiltered (glow passes read an averaged copy); ShTex.use
   gpu/vk/pipeline.c     pipeline recipes (pipeline_recipes.bin) for the shipped-shader pass
   gpu/shader/shipped.c, gpu/shipped_pass.c: Metroid Dread's MSHD shader containers

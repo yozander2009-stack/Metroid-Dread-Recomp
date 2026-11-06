@@ -34,7 +34,7 @@ SRC = ('gpu/gpu.c gpu/maxwell/engines.c gpu/maxwell/mme.c gpu/maxwell/mme_hle.c 
        'gpu/vk/query.c gpu/vk/compute.c gpu/vk/pending_pages.c gpu/vk/memory.c gpu/vk/renderdoc.c gpu/vk/astc.c '
        'gpu/vk/blocklinear.c gpu/vk/texconv.c gpu/vk/owned.c gpu/vk/dma.c gpu/vk/blit.c gpu/vk/ui.c '
        'gpu/texture/blocklinear.c gpu/texture/depth.c gpu/texture/etc2.c gpu/vk/vic.c gpu/vk/gpuprof.c '
-       'gpu/vk/hdr.c gpu/vk/swr_settings.c').split() + (['gpu/vk/dlss_stub.c'] if NODLSS else ['gpu/vk/dlss.c'])
+       'gpu/vk/hdr.c gpu/vk/swr_settings.c gpu/vk/dlss.c').split()   # SWR_NO_DLSS: dlss.c without its NGX part (-DSWR_NO_NGX)
 if NEW:   # ScarletNX main 112db409: spirv_emit and the Vulkan device helpers moved to common/, XXH3 hashing, structured
           # control flow (structure.c), the FTZ probe; etc2.c went to the tests
     SRC = [f for f in SRC if f not in ('gpu/shader/spirv_emit.c', 'gpu/texture/etc2.c')]
@@ -50,7 +50,7 @@ REDIRECT = {'g_opt_vsync': 'snxvk_opt_vsync'}
 GEN = os.path.join(OUT, 'shaderdec')
 INC = ['-I' + S, '-I' + NX, '-I' + GEN, '-I' + DEPS['volk'], '-I' + os.path.join(DEPS['vma'], 'include'),
        '-I' + os.path.join(DEPS['vkh'], 'include'), '-I' + DEPS['xxh'], '-I' + os.path.join(ROOT, 'runtime')]
-CF = ['-std=gnu2x', '-O2', '-fno-strict-aliasing', '-DVK_NO_PROTOTYPES', '-DVK_USE_PLATFORM_WIN32_KHR' if WIN else '-fPIC', '-w'] + ([] if os.name == 'nt' else ['-include', 'stdbool.h']) + INC
+CF = ['-std=gnu2x', '-O2', '-fno-strict-aliasing', '-DVK_NO_PROTOTYPES', '-DVK_USE_PLATFORM_WIN32_KHR' if WIN else '-fPIC', '-w'] + (['-DSWR_NO_NGX'] if NODLSS else []) +([] if os.name == 'nt' else ['-include', 'stdbool.h']) + INC
 if NEW:   # cmake/ship_walk.cmake: the shipped-shader walk's version, the hash of its sources
     import hashlib
     _h = ''.join(hashlib.sha256(open(os.path.join(NX, f), 'rb').read()).hexdigest() for f in

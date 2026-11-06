@@ -13,8 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#ifndef SWR_NO_NGX
 extern char g_exedir[1024];
+#endif
 
+#ifndef SWR_NO_NGX /* SWR_NO_NGX (public release, Linux): no NGX code at all; scene point, motion vectors, TAA and
+                      the ReShade depth below still work */
 typedef int NgxResult; /* NVSDK_NGX_Result: 1 success, 0xBAD00000 | n failures */
 #define NGX_OK(r) (((r) & 0xFFF00000) != 0xBAD00000)
 #define NGX_VERSION_API 0x15
@@ -147,7 +151,10 @@ void vk_dlss_device_exts(VkPhysicalDevice pd, const char** ext, u32* next, u32 m
 void vk_dlss_device_exts(VkPhysicalDevice pd, const char** ext, u32* next, u32 max) {
     unsigned ni = 0, nd = 0;
     const char **ie = NULL, **de = NULL;
-    if (!vk_dlss_wanted() || !core_load() || !NGX_OK(g_ngx.req_ext(&ni, &ie, &nd, &de))) return;
+    extern int g_opt_taa;
+    int ngx = vk_dlss_wanted() && core_load() && NGX_OK(g_ngx.req_ext(&ni, &ie, &nd, &de));
+    if (!ngx) nd = 0;
+    if (!ngx && !g_opt_taa) return; /* TAA needs only the motion vectors' transform feedback */
     u32 n = 0;
     vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL);
     VkExtensionProperties* have = calloc(n ? n : 1, sizeof *have);
@@ -208,6 +215,37 @@ int vk_dlss_init(void) {
         needs_driver ? " (the driver needs an update)" : "");
     return g_ngx.available;
 }
+#else
+static struct { int available; } g_ngx;
+typedef struct NgxParam NgxParam; /* only as pointers in g_dl */
+typedef struct NgxHandle NgxHandle;
+static void xfb_ext(VkExtensionProperties* have, u32 n, const char** ext, u32* next, u32 max);
+static void mv_frame(int evaluated);
+extern int snxvk_dlss_mode;
+int vk_dlss_wanted(void);
+int vk_dlss_wanted(void) { return 0; }
+static int has_name(const char* const* list, u32 n, const char* s) {
+    for (u32 i = 0; i < n; i++)
+        if (!strcmp(list[i], s)) return 1;
+    return 0;
+}
+void vk_dlss_instance_exts(const char** ext, u32* next, u32 max);
+void vk_dlss_instance_exts(const char** ext, u32* next, u32 max) { (void)ext; (void)next; (void)max; }
+void vk_dlss_device_exts(VkPhysicalDevice pd, const char** ext, u32* next, u32 max);
+void vk_dlss_device_exts(VkPhysicalDevice pd, const char** ext, u32* next, u32 max) {
+    extern int g_opt_taa;
+    if (!g_opt_taa) return;
+    u32 n = 0;
+    vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL);
+    VkExtensionProperties* have = calloc(n ? n : 1, sizeof *have);
+    if (!have) return;
+    vkEnumerateDeviceExtensionProperties(pd, NULL, &n, have);
+    xfb_ext(have, n, ext, next, max); /* motion vectors */
+    free(have);
+}
+int vk_dlss_init(void);
+int vk_dlss_init(void) { return 0; }
+#endif
 
 /* ---------------------------------------------------------------- where DLSS runs in Dread's frame
    Measured (SNX_FRAME_MAP, 2026-10-18, a combat room and the save room): the lit scene goes from the lighting buffer
@@ -248,7 +286,18 @@ static struct {
     int reset, evals, failed, switches;
 } g_dl;
 
-static int dl_active(void) { return g_ngx.available && snxvk_dlss_mode > 0 && !g_dl.failed; }
+/* The scene point serves DLSS, TAA (ini taa=1, when DLSS is not running) and ReShade's depth (runtime/reshade_gl.c) */
+extern int g_opt_taa;
+extern int reshade_vk_on(void);
+extern void reshade_set_view(unsigned long long view);
+static int g_taa_failed;
+static int dl_dlss(void) { return g_ngx.available && snxvk_dlss_mode > 0 && !g_dl.failed; }
+static int dl_taa(void) { return g_opt_taa && !g_taa_failed && !dl_dlss(); }
+static int dl_aa(void) { return dl_dlss() || dl_taa(); }           /* jitter and motion vectors */
+/* ReShade's depth copy is recorded directly into the frame: only with the recording thread off (snxvk_glue.c turns it
+   off when ReShade's Vulkan layer is installed) */
+static int dl_reshade(void) { return !vk_rec_threaded() && reshade_vk_on(); }
+static int dl_active(void) { return dl_aa() || dl_reshade(); } /* finding the scene target */
 
 static int full_hdr(const Surf* s) {
     return s && (s->fkey & 0xFFFF) == DL_FMT_R11G11B10F && g_dl.scene_w && s->w == g_dl.scene_w && s->h == g_dl.scene_h;
@@ -389,6 +438,7 @@ static VkImageView depth_view(Surf* z) {
     return g_dl.zview;
 }
 
+#ifndef SWR_NO_NGX
 static NgxResourceVK res_image(VkImageView v, VkImage img, VkFormat f, u32 w, u32 h, VkImageAspectFlags aspect, int rw) {
     NgxResourceVK r;
     memset(&r, 0, sizeof r);
@@ -419,6 +469,7 @@ static void dl_fail(const char* what, NgxResult r) {
     LOG("dlss: %s failed (%08x): DLSS off for this run\n", what, (unsigned)r);
     g_dl.failed = 1;
 }
+#endif
 
 /* ---------------------------------------------------------------- motion vectors and jitter
    Exact per-pixel motion, camera and objects alike: each depth-prepass draw of the scene (depth writes on, triangle
@@ -454,7 +505,7 @@ static struct {
 } g_mv;
 
 int vk_dlss_xfb_wanted(void);
-int vk_dlss_xfb_wanted(void) { return g_mv.on && snxvk_dlss_mode > 0; }
+int vk_dlss_xfb_wanted(void) { return g_mv.on && (snxvk_dlss_mode > 0 || g_opt_taa); }
 
 static VkPhysicalDeviceTransformFeedbackFeaturesEXT g_xfb_feat;
 const void* vk_dlss_device_chain(const void* next);
@@ -521,7 +572,7 @@ void vk_dlss_rt_read(void);
 void vk_dlss_rt_read(void) { g_mv.reads_rt = 1; }
 
 static int scene_draw(Surf* zt) {
-    return dl_active() && g_dl.chosen && !g_dl.done && zt && zt->gva == g_dl.chosen_z;
+    return dl_aa() && g_dl.chosen && !g_dl.done && zt && zt->gva == g_dl.chosen_z;
 }
 
 /* render.c, before the viewport is set: scene geometry moves by the frame's jitter. Draws that write depth or test it
@@ -707,11 +758,12 @@ static void mv_frame(int evaluated) {
         g_mv.misses++;
     } else if (g_mv.hold)
         g_mv.hold--;
-    g_mv.jit_ok = evaluated && !g_mv.hold; /* jitter only after a frame DLSS ran on */
+    g_mv.jit_ok = dl_aa() && evaluated && !g_mv.hold; /* jitter only after a frame DLSS / TAA ran on */
     g_mv.jit_used = 0;
 }
 
-static void evaluate(Surf* t, Surf* z) {
+#ifndef SWR_NO_NGX
+static void evaluate_dlss(Surf* t, Surf* z) {
     u32 w = t->sw, h = t->sh;
     vk_render_end();
     if (!ensure_images(w, h)) return dl_fail("image creation", 0);
@@ -840,6 +892,297 @@ static void evaluate(Surf* t, Surf* z) {
             g_mv.nrec[g_mv.cur], g_mv.jx, g_mv.jy, g_dl.switches, g_mv.misses);
 }
 
+#endif /* SWR_NO_NGX */
+
+/* ---------------------------------------------------------------- TAA (ini taa=1) and ReShade's depth
+   TAA: the scene target blended with the previous result (shaders/taa.frag, the same maths as the OpenGL renderer's),
+   moved by the motion vectors above and clipped to this frame's 3x3 colour range. Two attachments: the history
+   (RGBA16F, tone-mapped) and the result in the scene's own format, copied back into the scene target that post
+   effects, bloom and the HUD read. ReShade: a copy of the finished scene depth, handed to ReShade's effects (DEPTH). */
+#include "nx/gpu/vk/hdr_spv.h" /* g_hdr_out_vert: one triangle over the target */
+#include "nx/gpu/vk/taa_spv.h"
+static struct {
+    VkImage hist[2], tmp;
+    VmaAllocation hist_mem[2], tmp_mem;
+    VkImageView hist_view[2], tmp_view;
+    VkImageLayout hist_layout[2];
+    u32 w, h, cur;
+    VkFormat fmt;
+    int valid;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkDescriptorPool pool;
+    VkDescriptorSet set[2];
+    VkImageView set_key[2][3];
+    VkSampler samp;
+    VkPipeline pipe;
+    VkFormat pipe_fmt;
+} g_taa;
+
+static void taa_fail(const char* what) {
+    LOG("taa (vulkan): %s failed: TAA off for this run\n", what);
+    g_taa_failed = 1;
+}
+
+static int taa_layout(void) {
+    if (g_taa.layout) return 1;
+    VkDescriptorSetLayoutBinding b[3];
+    for (int i = 0; i < 3; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (u32)i, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
+    if (vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_taa.dsl) != VK_SUCCESS) return 0;
+    VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                      .pSetLayouts = &g_taa.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+    if (vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &g_taa.layout) != VK_SUCCESS) return 0;
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6};
+    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2, .poolSizeCount = 1, .pPoolSizes = &size};
+    if (vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_taa.pool) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout l2[2] = {g_taa.dsl, g_taa.dsl};
+    VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_taa.pool,
+                                      .descriptorSetCount = 2, .pSetLayouts = l2};
+    if (vkAllocateDescriptorSets(g_vk.dev, &ai, g_taa.set) != VK_SUCCESS) return 0;
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST,
+                               .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    return vkCreateSampler(g_vk.dev, &sci, NULL, &g_taa.samp) == VK_SUCCESS;
+}
+
+static int taa_pipeline(VkFormat fmt) {
+    if (g_taa.pipe && g_taa.pipe_fmt == fmt) return 1;
+    if (g_taa.pipe) {
+        vk_finish();
+        vkDestroyPipeline(g_vk.dev, g_taa.pipe, NULL);
+        g_taa.pipe = VK_NULL_HANDLE;
+    }
+    VkShaderModule vs = vk_module_spv(g_hdr_out_vert, sizeof g_hdr_out_vert / 4), fs = vk_module_spv(g_taa_frag, sizeof g_taa_frag / 4);
+    VkPipelineShaderStageCreateInfo st[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vps = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba[2] = {{.colorWriteMask = 0xF}, {.colorWriteMask = 0xF}};
+    VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 2, .pAttachments = ba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkFormat cf[2] = {VK_FORMAT_R16G16B16A16_SFLOAT, fmt};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 2, .pColorAttachmentFormats = cf};
+    VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
+                                        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vps,
+                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb,
+                                        .pDynamicState = &dy, .layout = g_taa.layout};
+    int ok = vs && fs && vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &g_taa.pipe) == VK_SUCCESS;
+    if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
+    if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);
+    if (!ok) g_taa.pipe = VK_NULL_HANDLE;
+    g_taa.pipe_fmt = fmt;
+    return ok;
+}
+
+static void taa_free(void) {
+    for (int i = 0; i < 2; i++) {
+        if (g_taa.hist_view[i]) vkDestroyImageView(g_vk.dev, g_taa.hist_view[i], NULL);
+        if (g_taa.hist[i]) vmaDestroyImage(g_vk.vma, g_taa.hist[i], g_taa.hist_mem[i]);
+        g_taa.hist[i] = VK_NULL_HANDLE;
+        g_taa.hist_view[i] = VK_NULL_HANDLE;
+    }
+    if (g_taa.tmp_view) vkDestroyImageView(g_vk.dev, g_taa.tmp_view, NULL);
+    if (g_taa.tmp) vmaDestroyImage(g_vk.vma, g_taa.tmp, g_taa.tmp_mem);
+    g_taa.tmp = VK_NULL_HANDLE;
+    g_taa.tmp_view = VK_NULL_HANDLE;
+    memset(g_taa.set_key, 0, sizeof g_taa.set_key);
+}
+
+static int taa_images(u32 w, u32 h, VkFormat fmt) {
+    if (g_taa.tmp && g_taa.w == w && g_taa.h == h && g_taa.fmt == fmt) return 1;
+    vk_finish(); /* the old images may still be in flight */
+    taa_free();
+    VkImageUsageFlags u = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    for (int i = 0; i < 2; i++) {
+        if (!image2d(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, u, &g_taa.hist[i], &g_taa.hist_mem[i], &g_taa.hist_view[i])) {
+            taa_free();
+            return 0;
+        }
+        g_taa.hist_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    if (!image2d(w, h, fmt, u, &g_taa.tmp, &g_taa.tmp_mem, &g_taa.tmp_view)) {
+        taa_free();
+        return 0;
+    }
+    g_taa.w = w;
+    g_taa.h = h;
+    g_taa.fmt = fmt;
+    g_taa.valid = 0;
+    LOG("taa (vulkan): on, %ux%u\n", w, h);
+    return 1;
+}
+
+/* the motion-vector image for this frame, left readable by fragment shaders; 1 = vectors drawn */
+static int mv_for_fragment(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
+    vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearColorValue zero = {{0, 0, 0, 0}};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cb, g_dl.mv, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &all);
+    u32 drawn = getenv("SWR_DLSS_NO_MV") ? 0 : mv_pass(cb, z, w, h);
+    if (!drawn)
+        vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                   VK_IMAGE_LAYOUT_GENERAL);
+    else /* mv_pass left it in GENERAL for compute: fragment reads too */
+        vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    return drawn > 1;
+}
+
+static void evaluate_taa(Surf* t, Surf* z) {
+    u32 w = t->sw, h = t->sh;
+    if (!g_mv.on) return taa_fail("motion vectors (no transform feedback)");
+    if (!ensure_images(w, h)) return taa_fail("motion-vector image");
+    if (!taa_layout()) return taa_fail("layout");
+    if (!taa_pipeline(t->f.vk)) return taa_fail("pipeline");
+    if (!taa_images(w, h, t->f.vk)) return taa_fail("images");
+    if (g_dl.reset) g_taa.valid = 0;
+    u32 c = (g_taa.cur ^= 1), p = c ^ 1;
+    /* the set for this parity: scene, last result, motion vectors (rewritten only when one of them changed) */
+    VkImageView key[3] = {t->att, g_taa.hist_view[p], g_dl.mv_view};
+    if (memcmp(key, g_taa.set_key[c], sizeof key)) {
+        vk_finish();
+        VkDescriptorImageInfo di[3] = {{g_taa.samp, t->att, VK_IMAGE_LAYOUT_GENERAL},
+                                       {g_taa.samp, g_taa.hist_view[p], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {g_taa.samp, g_dl.mv_view, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[3];
+        for (int i = 0; i < 3; i++)
+            wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_taa.set[c], .dstBinding = (u32)i,
+                                           .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di[i]};
+        vkUpdateDescriptorSets(g_vk.dev, 3, wr, 0, NULL);
+        memcpy(g_taa.set_key[c], key, sizeof key);
+    }
+    VkCommandBuffer cb = vk_cmd();
+    int have_mv = mv_for_fragment(cb, z, w, h);
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    if (g_taa.hist_layout[p] == VK_IMAGE_LAYOUT_UNDEFINED) { /* first frame: readable, never read (valid 0) */
+        vk_barrier(cb, g_taa.hist[p], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        g_taa.valid = 0;
+    } else /* last frame's result, written as an attachment */
+        vk_barrier(cb, g_taa.hist[p], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, g_taa.hist_layout[p], VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    g_taa.hist_layout[p] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vk_barrier(cb, g_taa.hist[c], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vk_barrier(cb, g_taa.tmp, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca[2] = {
+        {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_taa.hist_view[c], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE},
+        {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_taa.tmp_view, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE}};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                          .colorAttachmentCount = 2, .pColorAttachments = ca};
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.pipe);
+    VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D sc = {{0, 0}, {w, h}};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.layout, 0, 1, &g_taa.set[c], 0, NULL);
+    float pc[4] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, 0.0f};
+    vkCmdPushConstants(cb, g_taa.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    g_taa.hist_layout[c] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    /* the result into the scene target */
+    vk_barrier(cb, g_taa.tmp, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                      .extent = {w, h, 1}};
+    vkCmdCopyImage(cb, g_taa.tmp, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    g_taa.valid = 1;
+    g_dl.reset = 0;
+    t->wgen++;
+    vk_rt_drawn(t);
+    vk_render_forget_state(); /* the replay pass and this one bound pipelines and state of their own */
+    if (++g_dl.evals == 1 || g_dl.evals % 600 == 0)
+        LOG("taa (vulkan): %d frames (scene %llx %ux%u); motion vectors from %u captured draws, %d target switches\n", g_dl.evals,
+            (unsigned long long)t->gva, w, h, g_mv.nrec[g_mv.cur], g_dl.switches);
+}
+
+/* ReShade: the finished scene depth, copied into an image ReShade's effects sample (left in SHADER_READ_ONLY) */
+static struct {
+    VkImage img;
+    VmaAllocation mem;
+    VkImageView view;
+    u32 w, h;
+    VkFormat fmt;
+    int ready;
+} g_rsd;
+static void reshade_depth(Surf* z, u32 w, u32 h) {
+    VkImageAspectFlags asp = VK_IMAGE_ASPECT_DEPTH_BIT | (z->f.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    if (!g_rsd.img || g_rsd.w != w || g_rsd.h != h || g_rsd.fmt != z->f.vk) {
+        reshade_set_view(0);
+        if (g_rsd.img) {
+            vk_finish();
+            vkDestroyImageView(g_vk.dev, g_rsd.view, NULL);
+            vmaDestroyImage(g_vk.vma, g_rsd.img, g_rsd.mem);
+            g_rsd.img = VK_NULL_HANDLE;
+        }
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = z->f.vk,
+                                .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ii, &ai, &g_rsd.img, &g_rsd.mem, NULL) != VK_SUCCESS) { g_rsd.img = VK_NULL_HANDLE; return; }
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_rsd.img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = z->f.vk, .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(g_vk.dev, &vi, NULL, &g_rsd.view) != VK_SUCCESS) {
+            vmaDestroyImage(g_vk.vma, g_rsd.img, g_rsd.mem);
+            g_rsd.img = VK_NULL_HANDLE;
+            return;
+        }
+        g_rsd.w = w;
+        g_rsd.h = h;
+        g_rsd.fmt = z->f.vk;
+        g_rsd.ready = 0;
+        LOG("reshade (vulkan): scene depth %ux%u (format %d) copied for ReShade each frame\n", w, h, (int)z->f.vk);
+    }
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, z, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    vk_barrier(cb, g_rsd.img, asp, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0,
+               g_rsd.ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
+                      .extent = {w, h, 1}};
+    vkCmdCopyImage(cb, z->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_rsd.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    vk_barrier(cb, g_rsd.img, asp, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    g_rsd.ready = 1;
+    reshade_set_view((unsigned long long)(uintptr_t)g_rsd.view);
+}
+
+static void evaluate(Surf* t, Surf* z) {
+    vk_render_end();
+    if (dl_reshade()) reshade_depth(z, t->sw, t->sh);
+#ifndef SWR_NO_NGX
+    if (dl_dlss()) evaluate_dlss(t, z);
+    else
+#endif
+    if (dl_taa()) evaluate_taa(t, z);
+    g_dl.evaluated = 1;
+}
+
 /* texture.c, before a texture over a render target takes its pixels */
 void vk_dlss_before_read(u64 gva);
 void vk_dlss_before_read(u64 gva) {
@@ -857,5 +1200,4 @@ void vk_dlss_before_read(u64 gva) {
     Surf* z = g_dl.chosen_z ? vk_rt_find(g_dl.chosen_z) : NULL;
     if (!z || !z->f.depth || r->sw != z->sw || r->sh != z->sh) return;
     evaluate(r, z);
-    g_dl.evaluated = 1;
 }

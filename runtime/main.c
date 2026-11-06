@@ -107,6 +107,7 @@ int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt
 #define MEDIA_TURNS 0
 #endif
 int g_opt_media_turns=MEDIA_TURNS;   /* serialize_media_threads, read by kernel.c core0_member */
+int g_opt_taa=0;          /* taa, read by gpu_gl.c (restart: it changes the vertex shaders) */
 int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
 static int aspect_given;   /* ini aspect= seen: ultrawide= no longer applies */
@@ -357,6 +358,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"hdr_paper_white")){ g_opt_hdr_paper=atoi(v); if(g_opt_hdr_paper<80) g_opt_hdr_paper=80; if(g_opt_hdr_paper>1000) g_opt_hdr_paper=1000; }
     else if(!strcmp(k,"hdr_peak")){ g_opt_hdr_peak=atoi(v); if(g_opt_hdr_peak<0) g_opt_hdr_peak=0; if(g_opt_hdr_peak>10000) g_opt_hdr_peak=10000; }
     else if(!strcmp(k,"prebuild_shaders")){ extern int g_opt_prebuild; g_opt_prebuild=atoi(v); }   /* gpu_gl.c prebuild_shaders */
+    else if(!strcmp(k,"taa")) g_opt_taa=atoi(v)!=0;
     else if(!strcmp(k,"antialiasing")){ extern int g_opt_aa; g_opt_aa=atoi(v)!=0; }
     else if(!strcmp(k,"sharpening")){ extern int g_opt_sharp; g_opt_sharp=atoi(v); if(g_opt_sharp<0) g_opt_sharp=0; if(g_opt_sharp>100) g_opt_sharp=100; }   /* gpu_gl.c present pass, snxvk hdr.c */   /* FXAA: gpu_gl.c present pass, snxvk hdr.c */
     else if(!strcmp(k,"show_fps")) g_opt_show_fps=atoi(v)!=0;   /* FPS counter, live */
@@ -404,6 +406,7 @@ static const IniOpt INI_GRAPHICS[]={
 #endif
   {"show_fps","0","1 = FPS counter in the top-left corner (frames that reach the screen)"},
   {"antialiasing","0","1 = smooth jagged edges (FXAA on the final picture; OpenGL and native Vulkan). Not needed at\n;   resolution above 1 (the downscale already averages) or with DLAA"},
+  {"taa","0","1 = temporal anti-aliasing (OpenGL and native Vulkan): smooths edges and shimmer with the previous frames; restart to apply.\n;   Not used while DLAA runs"},
   {"sharpening","0","0 = off, 1..100 = sharpen the final picture (contrast-adaptive, like AMD CAS; OpenGL and native Vulkan)"},
   {"anisotropy","0","Texture filtering at an angle: 0 = as the game asks, 2/4/8/16 = at least that much\n;   (sharper floors and walls seen at an angle; samplers are made at first use, so a change applies on the next start)"},
   {"hdr","0","1 = HDR output (renderer=vulkan_native, Windows HDR on): the game's picture on an HDR swapchain, highlights\n;   expanded toward the display's peak (like Windows Auto HDR). Falls back to SDR when the display offers no HDR"},
