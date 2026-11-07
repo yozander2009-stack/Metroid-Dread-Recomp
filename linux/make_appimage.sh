@@ -1,7 +1,8 @@
 #!/bin/bash
 # Linux build: the AppImage, one file that sets up, configures and runs the game like the Windows EXE. Inside: the runtime
 # with the Play / setup screens, the recompiler (the Python scripts, patches and RomFS manifest), a relocatable GCC
-# (Bootlin) and Python (python-build-standalone), so the player needs neither. No game files inside.
+# (Bootlin), Clang (the official LLVM build, using the GCC's C library and linker) and Python
+# (python-build-standalone), so the player needs none of them. No game files inside.
 # The game is installed in ~/.local/share/MetroidDreadRecomp (METROID_DREAD_HOME moves it), see appimage/AppRun.
 # Downloads are checked against the SHA-256 below and kept in linux/appimage/cache.
 # Output: linux/dist/Metroid_Dread-x86_64.AppImage, and linux/dist/update-linux.txt for the in-game updater
@@ -18,6 +19,8 @@ GCC_SHA=760acd5c3159448b618e237b61935335baada74fe0cdc0d7611826cb49b41c8c
 PY_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
 PY_SHA=ffa8f85f1b56e88b687f08d743d817015524b86a9365fd921243132b80f1a36d
 TOOL_URL=https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+LLVM_URL=https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.xz   # 1.9 GB, kept in the cache
+LLVM_SHA=25d814fda50d5fb0084b42be09605d8b1595d49d5e2e03a3345d7e112ff6f9f3
 
 fetch() {   # fetch FILE URL [SHA256]
   local f="$C/$1"
@@ -29,6 +32,7 @@ mkdir -p "$C"
 fetch gcc.tar.xz "$GCC_URL" "$GCC_SHA"
 fetch python.tar.gz "$PY_URL" "$PY_SHA"
 fetch appimagetool "$TOOL_URL"
+fetch llvm.tar.xz "$LLVM_URL" "$LLVM_SHA"
 chmod +x "$C/appimagetool"
 
 # the runtime as released on Windows (SWR_RELEASE: no frame generation, no DLSS notes), with the front end
@@ -61,6 +65,26 @@ mkdir -p "$R/gcc"; tar -xf "$C/gcc.tar.xz" -C "$R/gcc" --strip-components=1
   rm -f $T/lib64/lib{asan,hwasan,lsan,tsan,ubsan,stdc++,stdc++fs,supc++,gfortran}* $T/sysroot/usr/lib/lib{asan,hwasan,lsan,tsan,ubsan,stdc++,stdc++fs,supc++,gfortran}*
   rm -f $T/sysroot/usr/lib/libc.a $T/sysroot/usr/lib/libm-2.*.a $T/sysroot/usr/lib/libmvec.a
   rm -rf $T/sysroot/usr/include/c++ include/c++ )
+# Clang: the compiler binary and its own headers only (the LLVM package is 1.9 GB). It compiles against the bundled GCC's
+# C library and startup files and links with its GNU ld, so the game code is built the same way on every distribution.
+# Setup uses it when it runs here (it needs libstdc++ from GCC 12 or newer on the system), else GCC (dread_setup.py)
+echo "unpacking Clang"
+mkdir -p "$R/clang"
+tar -xJf "$C/llvm.tar.xz" -C "$R/clang" --strip-components=1 --wildcards '*/bin/clang-23' '*/lib/clang/23/include/*' \
+    '*/include/llvm/Support/LICENSE.TXT'
+mv "$R/clang/include/llvm/Support/LICENSE.TXT" "$R/clang/LICENSE.TXT"; rm -rf "$R/clang/include"
+"$R/gcc/bin/x86_64-buildroot-linux-gnu-strip" --strip-unneeded "$R/clang/bin/clang-23"
+cat > "$R/clang/bin/clang" <<'EOF'
+#!/bin/sh
+# Clang with the bundled GCC's C library, startup files and linker (recompiler/gcc), so the game code doesn't depend on
+# the system's development packages
+R="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"; T=x86_64-buildroot-linux-gnu
+exec "$R/clang/bin/clang-23" --target=$T --gcc-toolchain="$R/gcc" --sysroot="$R/gcc/$T/sysroot" \
+    --ld-path="$R/gcc/bin/$T-ld" -Qunused-arguments "$@"
+EOF
+chmod +x "$R/clang/bin/clang"
+cp "$R/clang/LICENSE.TXT" "$LIC/LICENSE-LLVM.txt"
+
 # Python: the standard library dread_setup.py and SwitchRecomp use (no Tk, IDLE, tests, pip)
 echo "unpacking Python"
 tar -xzf "$C/python.tar.gz" -C "$R"
@@ -73,13 +97,16 @@ GCC_BIN="$R/gcc/bin/x86_64-buildroot-linux-gnu-gcc"; T=$(mktemp -d)
 printf 'unsigned long GetEnvironmentVariableA(const char*,char*,unsigned long);\nint f(void){ char b[8]; return (int)GetEnvironmentVariableA("X",b,8); }\n' > "$T/t.c"
 "$GCC_BIN" -O2 -fPIC -fvisibility=hidden -I "$R/runtime" -include "$R/linux/lx_compat.h" -c "$T/t.c" -o "$T/t.o"
 "$GCC_BIN" -shared -o "$T/t.so" "$T/t.o" -lm -ldl
+CL_BIN="$R/clang/bin/clang"
+"$CL_BIN" -O2 -fPIC -fvisibility=hidden -I "$R/runtime" -include "$R/linux/lx_compat.h" -c "$T/t.c" -o "$T/c.o"
+"$CL_BIN" -shared -o "$T/c.so" "$T/c.o" -lm -ldl
 "$R/python/bin/python3" -I -c "import hashlib, json, zipfile, concurrent.futures, argparse, struct; import sys; sys.path.insert(0, '$R'); import switchrecomp"
 rm -rf "$T" "$R/__pycache__"
 
 # the updater's record of this build: version, release tag, and a hash over the recompiler (not GCC or Python), whose
 # change means the game code must be rebuilt after an update
 VERSION=${VERSION:-0.0.0-dev}; TAG=${TAG:-v$VERSION}
-RHASH=$( cd "$R" && find . -path ./gcc -prune -o -path ./python -prune -o -type f -print | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64 )
+RHASH=$( cd "$R" && find . -path ./gcc -prune -o -path ./clang -prune -o -path ./python -prune -o -type f -print | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64 )
 printf 'version %s\ntag %s\nrecompiler %s\n' "$VERSION" "$TAG" "$RHASH" > "$A/usr/share/metroid-dread/update.txt"
 
 # desktop entry, icon (the 256 px PNG inside runtime/app.ico) and AppRun
@@ -94,7 +121,7 @@ EOF
 ln -sf metroid-dread.png "$A/.DirIcon"
 
 mkdir -p "$(dirname "$OUT")"
-du -sh "$R/gcc" "$R/python" "$A"
+du -sh "$R/gcc" "$R/clang" "$R/python" "$A"
 ARCH=x86_64 "$C/appimagetool" --appimage-extract-and-run --no-appstream "$A" "$OUT"
 ls -la "$OUT"
 { cat "$A/usr/share/metroid-dread/update.txt"

@@ -748,7 +748,7 @@ static int load_code(void){
     const u8* b=(const u8*)h; u32 lf; memcpy(&lf,b+0x3C,4); u8 mj=b[lf+24+2], mn=b[lf+24+3];
     g_code_tcc= mj==6 && mn==0;
     if(g_code_tcc) LOG("code: %s_code.dll was compiled with TCC. It runs several times slower than with GCC: recompile with GCC (SwitchRecomp, compiler GCC) for much better performance\n",g_exename);
-    else LOG("code: %s_code.dll compiled with GCC (linker %u.%u)\n",g_exename,mj,mn); }
+    else LOG("code: %s_code.dll compiled with %s (linker %u.%u)\n",g_exename,mj>=10? "Clang" : "GCC",mj,mn); }   /* lld writes 14.0, GNU ld 2.x */
 #endif
   g_mod=f(); return 0; }
 

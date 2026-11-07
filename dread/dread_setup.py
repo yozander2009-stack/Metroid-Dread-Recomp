@@ -12,7 +12,7 @@ Usage: dread_setup.py --out DIR --name "Metroid Dread" --base DIR [--update DIR]
 On Linux (linux/setup_game.sh) the same steps give Metroid Dread_code.so, compiled with the system's gcc and with
 linux/lx_compat.h force-included, so the patched (Windows) sources compile unchanged.
 """
-import argparse, hashlib, json, os, shutil, struct, sys, threading, time
+import argparse, hashlib, json, os, shutil, struct, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -408,8 +408,15 @@ def main():
         else:
             # $CC, else the Clang or GCC bundled next to this script (the AppImage's recompiler/), else the system's
             cc = shutil.which(os.environ['CC']) if os.environ.get('CC') else None
-            if not cc and not use_gcc and os.path.isfile(os.path.join(HERE, 'clang', 'bin', 'clang')):
-                cc = os.path.join(HERE, 'clang', 'bin', 'clang')
+            cl = os.path.join(HERE, 'clang', 'bin', 'clang')
+            if not cc and not use_gcc and os.path.isfile(cl):
+                # it needs libstdc++ from GCC 12 or newer on the system: when it can't start, the bundled GCC builds
+                try:
+                    ok = subprocess.run([cl, '--version'], capture_output=True, timeout=60).returncode == 0
+                except Exception:
+                    ok = False
+                if ok: cc = cl
+                else: log('The bundled Clang does not run on this system: compiling with GCC instead.')
             for n in ('gcc', 'x86_64-buildroot-linux-gnu-gcc'):
                 if not cc and os.path.isfile(os.path.join(HERE, 'gcc', 'bin', n)):
                     cc = os.path.join(HERE, 'gcc', 'bin', n)
