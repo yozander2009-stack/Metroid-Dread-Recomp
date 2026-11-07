@@ -592,6 +592,7 @@ void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt
    the legs and dies. With a cap above 60, slow-motion frames are paced at 60, where it works as on the Switch.
    g_pace_fps is the cap the pacers use; SWR_NO_SLOWMO_60=1 = old behaviour (tests). */
 volatile int g_pace_fps=1;
+void* g_code_mod;   /* the loaded game code module */
 static const volatile int* g_particle_pool;   /* swr_particle_pool in a patched code DLL: the game's particle vertex-buffer
                                                  pool size, set when the game makes the pool (1024 or 2048) */
 static void pace_update(void){
@@ -717,6 +718,7 @@ static int load_code(void){
 #endif
     WARN("Cannot find the recompiled code: %s\n",p); return -1; }
   ModFn f=(ModFn)plat_dl_sym(h,"swr_module"); if(!f){ WARN("%s is not a SwitchRecomp module\n",p); return -1; }
+  g_code_mod=h;
   g_particle_pool=(const volatile int*)plat_dl_sym(h,"swr_particle_pool");
   if(g_particle_pool) LOG("code: particle pool size from the game patch\n");
 #if defined(_WIN32)

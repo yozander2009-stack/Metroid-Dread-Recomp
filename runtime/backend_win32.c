@@ -667,7 +667,9 @@ void frontend_frame(void){
     /* SWR_TEST_CRASH_FRAME=N: a crash inside a C-library DLL on this runtime thread (tests the crash report) */
     { const char*cr=getenv("SWR_TEST_CRASH_FRAME"); if(cr&&(u64)g_frames>=strtoull(cr,NULL,10)){ void*(*volatile ms)(void*,int,size_t)=memset; ms((void*)(uintptr_t)0x10,0,16); } }
     const char*stop=getenv("SWR_TEST_EXIT_FRAME"),*stop_ms=getenv("SWR_TEST_EXIT_MS");
-    if((stop&&(u64)g_frames>=strtoull(stop,NULL,10)) || (stop_ms&&test_clock_start&&(plat_ns()-test_clock_start)/1000000ull>=strtoull(stop_ms,NULL,10))){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);ExitProcess(0);}
+    if((stop&&(u64)g_frames>=strtoull(stop,NULL,10)) || (stop_ms&&test_clock_start&&(plat_ns()-test_clock_start)/1000000ull>=strtoull(stop_ms,NULL,10))){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}
+      {extern void* g_code_mod;extern void* plat_dl_sym(void*,const char*);void(*gd)(void)=g_code_mod?(void(*)(void))plat_dl_sym(g_code_mod,"swr_gcov_dump"):NULL;if(gd){LOG("test: writing the PGO profile\n");gd();}}   /* PGO training builds only */
+      log_flush();fflush(NULL);ExitProcess(0);}
   }
 
   if(g_shot_req){ g_shot_req=0; char p[MAX_PATH]; SYSTEMTIME t; GetLocalTime(&t); CreateDirectoryA("captures",NULL);
