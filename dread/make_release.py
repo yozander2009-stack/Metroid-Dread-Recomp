@@ -13,6 +13,8 @@ import os, sys, shutil, zipfile, hashlib, fnmatch, time, subprocess
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GCC = os.environ.get('SWR_RELEASE_GCC', os.path.join(ROOT, 'gcc', 'Library'))
 GV = '14.2.0'; TRIPLE = 'x86_64-w64-mingw32'
+# llvm-mingw (github.com/mstorsjo/llvm-mingw, UCRT x86_64): setup compiles the game with it when recompiler\clang is there
+CLANG = os.environ.get('SWR_RELEASE_CLANG', os.path.join(ROOT, 'clang'))
 RECOMPILER_PY = ['switchrecomp.py', 'codegen.py', 'a64.py', 'nxloader.py', 'metroid_perf.py']
 
 
@@ -50,6 +52,28 @@ def slim_gcc(dst):
     for f in ('as.exe', 'ld.exe', 'ld.bfd.exe', 'libiconv-2.dll', 'libintl-8.dll', 'libwinpthread-1.dll', 'libzstd.dll', 'zlib1.dll'):
         cp(os.path.join(GCC, TRIPLE, 'bin', f), os.path.join(dst, TRIPLE, 'bin', f))
     cp(os.path.join(GCC, 'version_info.txt'), os.path.join(dst, 'version_info.txt'))
+
+
+def clang_major():
+    d = os.path.join(CLANG, 'lib', 'clang')
+    v = [x for x in os.listdir(d) if x.isdigit()] if os.path.isdir(d) else []
+    if len(v) != 1: raise SystemExit('Expected one Clang version in ' + d + ' (set SWR_RELEASE_CLANG)')
+    return v[0]
+
+
+def slim_clang(dst):
+    """llvm-mingw for x86_64 C only: the compiler, lld, the C headers and import libraries, compiler-rt builtins (the
+    full package, 736 MB, has three more targets, C++ headers, lldb, clangd ...)"""
+    v = clang_major(); b = os.path.join(CLANG, 'bin')
+    for f in ('clang.exe', 'clang-%s.exe' % v, 'clang-target-wrapper.exe', 'ld.lld.exe', 'libLLVM-%s.dll' % v,
+              'libclang-cpp.dll', 'libc++.dll', 'libunwind.dll', 'x86_64-w64-windows-gnu.cfg', 'mingw32-common.cfg'):
+        if os.path.isfile(os.path.join(b, f)): cp(os.path.join(b, f), os.path.join(dst, 'bin', f))
+    cptree(os.path.join(CLANG, 'include'), os.path.join(dst, 'include'), ignore=shutil.ignore_patterns('c++'))
+    cptree(os.path.join(CLANG, TRIPLE, 'lib'), os.path.join(dst, TRIPLE, 'lib'))
+    cptree(os.path.join(CLANG, 'lib', 'clang', v, 'include'), os.path.join(dst, 'lib', 'clang', v, 'include'))
+    rt = os.path.join('lib', 'clang', v, 'lib', 'windows', 'libclang_rt.builtins-x86_64.a')
+    cp(os.path.join(CLANG, rt), os.path.join(dst, rt))
+    cp(os.path.join(CLANG, 'LICENSE.TXT'), os.path.join(dst, 'LICENSE.TXT'))
 
 
 LICENSES = [
@@ -122,7 +146,7 @@ def update_files(out, version):
     own = []
     for dp, dn, fn in os.walk(dst):
         rel_dir = os.path.relpath(dp, dst).replace(os.sep, '/')
-        if rel_dir.startswith('recompiler/gcc') or rel_dir.startswith('recompiler/python'):
+        if rel_dir.startswith(('recompiler/gcc', 'recompiler/clang', 'recompiler/python')):   # compilers: not updated in place
             continue
         for n in fn:
             if rel_dir == '.' and n == 'update.txt': continue   # the manifest itself
@@ -167,12 +191,14 @@ def release(out, exe, version):
     for f in ('cpu.h', 'cpu_helpers.c'):
         cp(os.path.join(ROOT, 'runtime', f), os.path.join(rc, 'runtime', f))
     cptree(os.path.join(ROOT, 'python'), os.path.join(rc, 'python'), ignore=shutil.ignore_patterns('__pycache__'))
-    slim_gcc(os.path.join(rc, 'gcc', 'Library'))
+    slim_gcc(os.path.join(rc, 'gcc', 'Library'))   # kept: SWR_SETUP_GCC=1, and installs updated from 0.5 and older
+    slim_clang(os.path.join(rc, 'clang'))
     lic = os.path.join(dst, 'licenses')
     for s, d in LICENSES:
         cp(os.path.join(ROOT, s), os.path.join(lic, d))
     open(os.path.join(lic, 'zlib-and-SDL2.txt'), 'w').write(ZLIB_TXT)
     open(os.path.join(lic, 'GCC-binutils-MinGW.txt'), 'w').write(GCC_TXT % gcc_version())
+    cp(os.path.join(CLANG, 'LICENSE.TXT'), os.path.join(lic, 'LLVM-mingw-Apache-2.0-with-LLVM-exception.txt'))
     open(os.path.join(lic, 'theboy181-patches.txt'), 'w').write(
         'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Dread v2.1.0 patches\n'
         '(https://github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081.\n')
@@ -284,7 +310,7 @@ def source(out):
     for f in ('AppRun', 'metroid-dread.desktop'):   # the AppImage's own files (linux/make_appimage.sh)
         cp(os.path.join(ROOT, 'linux', 'appimage', f), os.path.join(out, 'linux', 'appimage', f))
     cp(os.path.join(ROOT, 'runtime', 'snxvk', 'LICENSE'), os.path.join(out, 'LICENSE-GPL-3.0.txt'))
-    open(os.path.join(out, '.gitignore'), 'w').write('\n'.join(['gcc/', 'python/', 'bin/', 'games/', '*_build/', '*_data/', '*_code.dll', '*.o', '*.a',
+    open(os.path.join(out, '.gitignore'), 'w').write('\n'.join(['gcc/', 'clang/', 'python/', 'bin/', 'games/', '*_build/', '*_data/', '*_code.dll', '*.o', '*.a',
         '!runtime/vp9/win/libvpx.a', '!runtime/oh264/win/*.a', 'runtime/imgui/', 'redist/', 'cleanbuild_test/', 'runtime/snxvk/obj*/', '__pycache__/', 'release/', '*.log', 'shader_cache/', 'vulkan_native/', '',
         '# Linux build output (linux/*.sh)', '*.so', 'linux/test/', 'linux/dist/MetroidDread-Linux/', 'linux/dist/*.tar.gz', 'linux/dist/*.AppImage', 'linux/dist/update-linux.txt', 'linux/appimage/cache/', 'linux/appimage/AppDir/', '',
         '# never commit binaries, archives or game files', '*.exe', '*.dll', '*.pdb', '*.zip', '*.7z', '*.rar', '*.nsp', '*.xci',
@@ -369,6 +395,8 @@ The toolchain is **not** in this repository and never was: the paths below are w
 The release zip bundles the same GCC and Python so that setup can compile the game on the player's PC.
 
 - `gcc\\` in the repository root: [winlibs](https://winlibs.com) GCC 14.2.0, UCRT, POSIX threads, x64
+- `clang\\` in the repository root (release packages only): [llvm-mingw](https://github.com/mstorsjo/llvm-mingw), UCRT x86_64
+  (`SWR_RELEASE_CLANG` = another folder). The release bundles a C-only slice of it; game setup compiles with Clang when it is there
 - `python\\` in the repository root: Python 3.12 for Windows (the embeddable package is enough)
 - glslang 16.6.0 (Vulkan SDK or KhronosGroup release), for the renderer's compute shaders: `GLSLANG=` or on PATH
 
