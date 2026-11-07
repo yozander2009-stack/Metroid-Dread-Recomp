@@ -663,7 +663,8 @@ void frontend_frame(void){
     }
 
     {static int changed;const char*target=getenv("SWR_TEST_FPS_AFTER_LOAD");
-      if(target&&!changed&&g_frames>=2300){int fps=atoi(target);if(fps<0||(fps>0&&fps<30)||fps>360){WARN("test FPS: invalid target\n");ExitProcess(2);}
+      static int at=-1; if(at<0){ const char* e=getenv("SWR_TEST_FPS_AFTER_FRAME"); at= e? atoi(e) : 2300; }   /* the frame it switches at */
+      if(target&&!changed&&g_frames>=at){int fps=atoi(target);if(fps<0||(fps>0&&fps<30)||fps>360){WARN("test FPS: invalid target\n");ExitProcess(2);}
         changed=1;g_opt_fps=fps;LOG("test FPS: selected=%d frame=%d ns=%llu\n",fps,g_frames,(unsigned long long)plat_ns());
       }
     }
