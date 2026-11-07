@@ -12,6 +12,7 @@ set -e -o pipefail
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 need curl "curl"; need "$PY" "python3"
 need desktop-file-validate "desktop-file-utils (appimagetool makes no AppImage without it, and says nothing)"
+need file "file (appimagetool needs it)"
 C="$W/linux/appimage/cache"; A="$W/linux/appimage/AppDir"; R="$A/usr/share/metroid-dread/recompiler"
 OUT="$W/linux/dist/Metroid_Dread-x86_64.AppImage"
 GCC_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/x86-64/tarballs/x86-64--glibc--stable-2025.08-1.tar.xz   # GCC 14.3.0, glibc 2.41
