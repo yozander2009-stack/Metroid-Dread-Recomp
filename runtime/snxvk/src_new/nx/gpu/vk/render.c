@@ -1749,6 +1749,11 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
             t = vk_rt_upsampled(t, st, want, num, rt, n);   /* SWR: bloom_quality=1, the glow spread smoothly (texture.c) */
             view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
         }
+        if (want == VK_IMAGE_VIEW_TYPE_CUBE && t) { /* SWR test: SWR_TRACE_CUBE, which cube each sampler gets */
+            static int tr = -1;
+            if (tr < 0) tr = getenv("SWR_TRACE_CUBE") != NULL;
+            if (tr) LOG_LIMIT(64, "cube bind: slot %u cbuf off %u handle %08x gva %llx %ux%u\n", i, (u32)st->cbuf_off, handle, (unsigned long long)t->gva, t->w, t->h);
+        }
         const Surf* sampled = view ? t : NULL; /* the texture whose own view is bound, for the sampler */
         { static int nts = -1; if (nts < 0) nts = getenv("SWR_VK_NO_TEXEL_SCALE") != NULL;   /* SWR test: no scaled pixel reads */
         if (!nts && scaled && sampled && (sampled->sw != sampled->w || sampled->sh != sampled->h))

@@ -2422,8 +2422,14 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     if(srgb_raw) tsc[7]|=0x80000000u;
     if(mb) sids[i]=sampler_get(tsc); else glBindSampler(unit,sampler_get(tsc));
     /* TIC swizzle */
-    if(t && want==GL_TEXTURE_CUBE_MAP && getenv("SWR_TRACE_CUBE")){ static u64 seen[64]; static int ns; int k=0; for(;k<ns&&seen[k]!=t->gva;k++);
-      if(k==ns && ns<64){ seen[ns++]=t->gva; LOG("cube: gva %llx %ux%u levels %u tic0 %08x fmt %02x swz %u%u%u%u target %x want %x view %u is_rt %d bh %u bl %d tic3 %08x\n",(unsigned long long)t->gva,t->w,t->h,t->levels,tic[0],tic[0]&0x7F,(tic[0]>>19)&7,(tic[0]>>22)&7,(tic[0]>>25)&7,(tic[0]>>28)&7,t->target,want,t->view,t->is_rt,t->bh,t->bl,tic[3]); } }
+    if(t && want==GL_TEXTURE_CUBE_MAP && getenv("SWR_TRACE_CUBE")){ static u64 seen[64]; static int ns; int k=0; u64 key=t->gva^((u64)i<<56)^((u64)st->cbuf_off<<40); for(;k<ns&&seen[k]!=key;k++);
+      if(k==ns && ns<64){ seen[ns++]=key; LOG("cube bind: tic7 %08x slot %d cbuf off %u gva %llx\n",tic[7],i,(unsigned)st->cbuf_off,(unsigned long long)t->gva); LOG("cube: gva %llx %ux%u levels %u tic0 %08x fmt %02x swz %u%u%u%u target %x want %x view %u is_rt %d bh %u bl %d tic3 %08x\n",(unsigned long long)t->gva,t->w,t->h,t->levels,tic[0],tic[0]&0x7F,(tic[0]>>19)&7,(tic[0]>>22)&7,(tic[0]>>25)&7,(tic[0]>>28)&7,t->target,want,t->view,t->is_rt,t->bh,t->bl,tic[3]); }
+      { static long at=-2; static u64 dn[8]; static int nd; extern int g_frames; if(at==-2){ const char* e=getenv("SWR_GL_CUBE_DUMP_AT"); at= e? atol(e) : -1; }   /* test: level 0 faces decoded, RGBA32F */
+        int k2=0; for(;k2<nd&&dn[k2]!=t->gva;k2++);
+        if(at>=0 && g_frames>=at && k2==nd && nd<8 && t->target==GL_TEXTURE_CUBE_MAP){ dn[nd++]=t->gva; size_t fs=(size_t)t->w*t->h*16; float* px=malloc(fs*6);
+          glBindTexture(GL_TEXTURE_CUBE_MAP,t->id); glPixelStorei(GL_PACK_ALIGNMENT,4);
+          for(int fc=0;fc<6;fc++) glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X+fc,0,GL_RGBA,GL_FLOAT,(u8*)px+fc*fs);
+          plat_mkdir("captures"); char fp[200]; snprintf(fp,sizeof fp,"captures/cube_%llx_%ux%u_gldec.bin",(unsigned long long)t->gva,t->w,t->h); FILE* fo=fopen(fp,"wb"); if(fo){ fwrite(px,1,fs*6,fo); fclose(fo); } free(px); } } }
     if(t && (t->target==want || (t->view && t->view_target==want))){ static const GLint sw[8]={GL_ZERO,GL_ZERO,GL_RED,GL_GREEN,GL_BLUE,GL_ALPHA,GL_ONE,GL_ONE};
       GLint m[4]={sw[(tic[0]>>19)&7],sw[(tic[0]>>22)&7],sw[(tic[0]>>25)&7],sw[(tic[0]>>28)&7]};
       /* RTs: only apply swizzles with constant 0/1 (e.g. an R8 HUD mask read as 1,1,1,R). pure reorders are

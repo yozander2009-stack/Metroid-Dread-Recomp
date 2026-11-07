@@ -1039,5 +1039,44 @@ void swr_vk_dump_cube(Surf* t) {
     f = fopen(fn, "wb");
     if (f && m) fwrite(m, 1, t->size, f);
     if (f) fclose(f);
+    { /* the six faces of level 0 decoded by the GPU: blitted to RGBA32F (captures/cube_<gva>_<w>x<h>_vkdec.bin) */
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                .format = VK_FORMAT_R32G32B32A32_SFLOAT, .extent = {t->w, t->h, 1}, .mipLevels = 1,
+                                .arrayLayers = 6, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage tmp;
+        VmaAllocation tmem;
+        u64 nd2 = (u64)t->w * t->h * 16 * 6;
+        VkBuffer b2;
+        if (VK_OK(vmaCreateImage(g_vk.vma, &ii, &aci, &tmp, &tmem, NULL))) {
+            u8* q = vk_readback_buffer(nd2, &b2);
+            if (q) {
+                vk_render_end();
+                VkCommandBuffer cb2 = vk_cmd();
+                vk_surf_use(cb2, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+                vk_barrier(cb2, tmp, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6},
+                                  .srcOffsets = {{0, 0, 0}, {(i32)t->w, (i32)t->h, 1}},
+                                  .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6},
+                                  .dstOffsets = {{0, 0, 0}, {(i32)t->w, (i32)t->h, 1}}};
+                rec_CmdBlitImage(cb2, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tmp, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
+                vk_barrier(cb2, tmp, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy c2 = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {t->w, t->h, 1}};
+                rec_CmdCopyImageToBuffer(cb2, tmp, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b2, 1, &c2);
+                rec_CmdPipelineBarrier2(cb2, &di);
+                vk_finish();
+                vk_readback_ready();
+                snprintf(fn, sizeof fn, "captures/cube_%llx_%ux%u_vkdec.bin", (unsigned long long)t->gva, t->w, t->h);
+                f = fopen(fn, "wb");
+                if (f) { fwrite(q, 1, nd2, f); fclose(f); }
+            }
+            vmaDestroyImage(g_vk.vma, tmp, tmem);
+        }
+    }
     LOG("cube dump: %llx %ux%u size %llu levels %u layers %u layer size %llu bh %u bd %u fbpp %u fbw %u fbh %u\n", (unsigned long long)t->gva, t->w, t->h, (unsigned long long)t->size, t->levels, t->layers, (unsigned long long)t->layer_size, t->bh, t->bd, t->f.bpp, t->f.bw, t->f.bh);
 }
