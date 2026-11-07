@@ -20,6 +20,40 @@
 #include <ctype.h>
 #include "x11_vk.h"
 
+/* Keep the screen on while the game runs (issue #50: Bazzite/KDE dimmed and locked after 30 min of controller play;
+   controller input is not user activity for the desktop's idle timer). Windows does this with SetThreadExecutionState
+   (plat.c). Here: org.freedesktop.ScreenSaver.Inhibit (KDE, Xfce, LXQt, the portal's backends) and
+   org.gnome.SessionManager.Inhibit (GNOME, flags 8 = idle), on a session-bus connection kept open for the whole run
+   (an inhibit ends when its connection closes). libdbus is loaded at run time; without it nothing changes.
+   SWR_NO_IDLE_INHIBIT=1 = off. */
+static void idle_inhibit(unsigned long xwin){
+  if(getenv("SWR_NO_IDLE_INHIBIT")) return;
+  void* d=dlopen("libdbus-1.so.3",RTLD_NOW|RTLD_LOCAL); if(!d){ LOG("display: libdbus not found, the desktop may dim the screen during controller play\n"); return; }
+  typedef struct { void* a; void* b; unsigned c; void* p; } DErr;   /* DBusError layout (name, message, flags, padding) */
+  union { DErr e; char pad[64]; } err; memset(&err,0,sizeof err);
+  void  (*ei)(void*)=(void(*)(void*))dlsym(d,"dbus_error_init");
+  void* (*bg)(int,void*)=(void*(*)(int,void*))dlsym(d,"dbus_bus_get");
+  void* (*mc)(const char*,const char*,const char*,const char*)=(void*(*)(const char*,const char*,const char*,const char*))dlsym(d,"dbus_message_new_method_call");
+  int   (*aa)(void*,int,...)=(int(*)(void*,int,...))dlsym(d,"dbus_message_append_args");
+  void* (*sr)(void*,void*,int,void*)=(void*(*)(void*,void*,int,void*))dlsym(d,"dbus_connection_send_with_reply_and_block");
+  void  (*mu)(void*)=(void(*)(void*))dlsym(d,"dbus_message_unref");
+  int   (*es)(void*)=(int(*)(void*))dlsym(d,"dbus_error_is_set");
+  void  (*ef)(void*)=(void(*)(void*))dlsym(d,"dbus_error_free");
+  void  (*se)(void*,int)=(void(*)(void*,int))dlsym(d,"dbus_connection_set_exit_on_disconnect");
+  if(!ei||!bg||!mc||!aa||!sr||!mu||!es||!ef){ LOG("display: libdbus incomplete, no idle inhibit\n"); return; }
+  ei(&err); void* conn=bg(0 /*DBUS_BUS_SESSION*/,&err);
+  if(!conn || es(&err)){ if(es(&err)) ef(&err); LOG("display: no session bus, no idle inhibit\n"); return; }
+  if(se) se(conn,0);   /* a lost session bus must not end the game */
+  const char* app="Metroid Dread"; const char* why="Playing"; int ok=0;
+  void* m=mc("org.freedesktop.ScreenSaver","/org/freedesktop/ScreenSaver","org.freedesktop.ScreenSaver","Inhibit");
+  if(m){ aa(m,'s',&app,'s',&why,0); void* r=sr(conn,m,2000,&err); mu(m);
+    if(r){ mu(r); ok|=1; } else if(es(&err)) ef(&err); }
+  unsigned xid=(unsigned)xwin, fl=8;
+  m=mc("org.gnome.SessionManager","/org/gnome/SessionManager","org.gnome.SessionManager","Inhibit");
+  if(m){ aa(m,'s',&app,'u',&xid,'s',&why,'u',&fl,0); void* r=sr(conn,m,2000,&err); mu(m);
+    if(r){ mu(r); ok|=2; } else if(es(&err)) ef(&err); }
+  LOG("display: screen kept on while playing (%s)\n",ok==3? "screensaver + GNOME" : ok==1? "screensaver" : ok==2? "GNOME" : "no desktop service answered"); }
+
 static Display* dpy; static Window win; static Atom wm_delete, a_state, a_fs; static Cursor g_blank;
 static volatile int g_ww=1280, g_wh=720; static int g_fullscreen=0, g_want_fs=1;
 static int g_seconds=0, g_maxframes=-1; static char g_shot[1024]; static u64 g_start; static u64 g_press=0, g_press_at=0, g_press_len=300;
@@ -219,6 +253,7 @@ void video_init(const char* title){
   /* start fullscreen: the window manager reads the state when the window is mapped */
   if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); g_fullscreen=1; }
   XMapWindow(dpy,win); XFlush(dpy);
+  idle_inhibit((unsigned long)win);
   xi_init();
   sdl_load();
   g_start=plat_ns();
