@@ -552,8 +552,9 @@ static Surf* rt_crop(Surf* rt, u32 w, u32 h, const VkFmt* as) {
         c->gva = rt->gva;
         c->w = w;
         c->h = h;
-        c->sw = vk_sc(w) < rt->sw ? vk_sc(w) : rt->sw; /* the same region of the scaled target */
-        c->sh = vk_sc(h) < rt->sh ? vk_sc(h) : rt->sh;
+        { float k = vk_surf_scale(rt); u32 a = (u32)((float)w * k + 0.5f), b = (u32)((float)h * k + 0.5f); if (!a) a = 1; if (!b) b = 1;
+          c->sw = a < rt->sw ? a : rt->sw; /* the same region of the scaled target (SWR: at its own scale) */
+          c->sh = b < rt->sh ? b : rt->sh; }
         c->layers = rt->layers;
         c->levels = c->depth3d = 1;
         c->f = f;
@@ -627,9 +628,9 @@ Surf* vk_rt_snapshot(Surf* rt) {
    Deck 2026-11-01) go on from the last such level to a copy of the guest size, at most 2:1. SWR_NO_RT_PREFILTER=1 = off */
 static int can_blit(VkFormat f);
 #define PRE_GUEST 31u /* pre_lv of the guest-size copy */
-static u32 pre_levels(void) { /* whole halvings of the scale */
+static u32 pre_levels(float sc) { /* whole halvings of the scale */
     u32 lv = 0;
-    for (float k = 2.0f; k <= g_vk_scale + 0.01f; k *= 2.0f) lv++;
+    for (float k = 2.0f; k <= sc + 0.01f; k *= 2.0f) lv++;
     return lv;
 }
 static Surf* pre_level(Surf* t, u32 k) {
@@ -677,7 +678,7 @@ static Surf* pre_level(Surf* t, u32 k) {
     }
     c->last_used = g_vk_present;
     if (c->crop_gen != t->wgen) {
-        Surf* from = pre_level(t, k == PRE_GUEST ? pre_levels() : k - 1);
+        Surf* from = pre_level(t, k == PRE_GUEST ? pre_levels(vk_surf_scale(t)) : k - 1);
         if (!from) return NULL;
         VkCommandBuffer cb = vk_cmd();
         vk_surf_use(cb, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
@@ -697,14 +698,15 @@ static Surf* pre_level(Surf* t, u32 k) {
 Surf* vk_rt_prefiltered(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
     static int off = -1;
     if (off < 0) off = getenv("SWR_NO_RT_PREFILTER") != NULL;
-    if (off || g_vk_scale < 1.01f || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+    if (off || vk_surf_scale(t) < 1.01f || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
         want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int || t->layers != 1 || st->use != 1 ||
         st->type != 1 || st->array || st->shadow || !n || !rt[0] || rt[0] == t)
         return t;
     const Surf* o = rt[0];
     if (!(t->w >= 2 * o->w && t->h >= 2 * o->h) && !(t->w <= 480 && t->h <= 270)) return t;
-    u32 lv = pre_levels();
-    int frac = g_vk_scale > (float)(1u << lv) * 1.01f;
+    float tsc = vk_surf_scale(t);
+    u32 lv = pre_levels(tsc);
+    int frac = tsc > (float)(1u << lv) * 1.01f;
     if ((!lv && !frac) || !can_blit(t->f.vk)) return t;
     Surf* c = pre_level(t, frac ? PRE_GUEST : lv);
     return c ? c : t;
@@ -1292,7 +1294,7 @@ static void copy_layers(VkCommandBuffer cb, Surf* s, Surf* t, u32 l, u32 dst, u3
     }
     VkImageBlit b[2];
     b[0] = (VkImageBlit){.srcSubresource = from,
-                         .srcOffsets = {{0, 0, 0}, {(i32)vk_sc(w), (i32)vk_sc(h), 1}},
+                         .srcOffsets = {{0, 0, 0}, {(i32)((float)w * vk_surf_scale(s) + 0.5f), (i32)((float)h * vk_surf_scale(s) + 0.5f), 1}},
                          .dstSubresource = to,
                          .dstOffsets = {{0, 0, dz}, {(i32)w, (i32)h, dz + 1}}};
     b[1] = b[0];
@@ -1356,7 +1358,7 @@ static void tex_take_drawn(Surf* t) {
                 if (scaled) {
                     VkImageSubresourceLayers all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, t->depth3d};
                     VkImageBlit b = {.srcSubresource = all,
-                                     .srcOffsets = {{0, 0, 0}, {(i32)vk_sc(t->w), (i32)vk_sc(t->h), 1}},
+                                     .srcOffsets = {{0, 0, 0}, {(i32)((float)t->w * vk_surf_scale(s) + 0.5f), (i32)((float)t->h * vk_surf_scale(s) + 0.5f), 1}},
                                      .dstSubresource = all,
                                      .dstOffsets = {{0, 0, 0}, {(i32)t->w, (i32)t->h, 1}}};
                     vk_barrier(cb, mid, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_NONE, 0,
@@ -1473,4 +1475,74 @@ Surf* vk_tex_from_tic_raw(const u32* tic) {
     if (t) vk_dlss_before_read(t->gva);
     tex_take_drawn(t);
     return t;
+}
+/* SWR: bloom_quality=1. A glow target kept at the game's own size (surface.c vk_rt_scale), read with filtering by a
+   draw into a bigger target, is read through a copy of that target's real size, drawn with a cubic B-spline
+   (hdr.c vk_upsample_draw): the game's soft glow without blocky steps. Remade only when the glow target was written */
+#define PRE_UP 30u /* pre_lv of the upsampled copy */
+int vk_upsample_draw(Surf* src, Surf* dst);
+Surf* vk_rt_upsampled(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
+    if (!g_vk_bloom_hq || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+        want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int || t->layers != 1 || st->use != 1 ||
+        st->type != 1 || st->array || st->shadow || !n || !rt[0] || rt[0] == t || t->w > 480 || t->h > 270 ||
+        t->sw != t->w || t->sh != t->h || !t->att)
+        return t;
+    const Surf* o = rt[0];
+    if (o->w <= 480 || o->h <= 270) return t; /* only the final spread over a full-size target: the chain's steps stay the game's */
+    u32 W = o->sw, H = o->sh;
+    if (W * 2 < t->w * 3 || H * 2 < t->h * 3) return t; /* only where it is magnified */
+    if (W > 8192) W = 8192;
+    if (H > 8192) H = 8192;
+    Surf* c = NULL;
+    for (Surf* x = t->crop; x && !c; x = x->next)
+        if (x->pre_lv == PRE_UP) c = x;
+    if (c && (c->sw != W || c->sh != H)) return t; /* read into a target of another size: as the game does */
+    if (!c) {
+        c = calloc(1, sizeof *c);
+        if (!c) return t;
+        c->gva = t->gva;
+        c->sw = c->w = W;
+        c->sh = c->h = H;
+        c->layers = c->levels = c->depth3d = 1;
+        c->f = t->f;
+        c->fkey = t->fkey;
+        c->type = t->type;
+        c->is_rt = 1; /* sampled like one; not in the table, so never found as one */
+        c->pre_lv = PRE_UP;
+        c->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                .imageType = VK_IMAGE_TYPE_2D,
+                                .format = t->f.vk,
+                                .extent = {W, H, 1},
+                                .mipLevels = 1,
+                                .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VkViewFormats vf;
+        vk_view_formats(&ii, &vf);
+        if (!vk_cache_image_create(&ii, &c->img, &c->mem, &c->bytes)) {
+            free(c);
+            return t;
+        }
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                    .image = c->img,
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = t->f.vk,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VK_OK(vkCreateImageView(g_vk.dev, &vi, NULL, &c->att));
+        c->crop_gen = ~0u;
+        c->next = t->crop;
+        t->crop = c;
+        LOG_LIMIT(8, "vulkan: the %ux%u glow target at %llx is upsampled to %ux%u (bloom_quality=1)\n", t->w, t->h,
+                  (unsigned long long)t->gva, W, H);
+    }
+    c->last_used = g_vk_present;
+    if (c->crop_gen != t->wgen) {
+        if (!vk_upsample_draw(t, c)) return t;
+        c->crop_gen = t->wgen;
+    }
+    return c;
 }

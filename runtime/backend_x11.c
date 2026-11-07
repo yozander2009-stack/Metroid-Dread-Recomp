@@ -26,6 +26,29 @@
    org.gnome.SessionManager.Inhibit (GNOME, flags 8 = idle), on a session-bus connection kept open for the whole run
    (an inhibit ends when its connection closes). libdbus is loaded at run time; without it nothing changes.
    SWR_NO_IDLE_INHIBIT=1 = off. */
+/* The screen's exact refresh rate for the 60 FPS pacer (main.c pace_period_ns): the active CRTC's mode timing through
+   XRandR (loaded at run time; minimal struct layouts of Xrandr.h, a stable ABI). Steam Deck: 59.93 Hz */
+typedef struct { unsigned long id; unsigned int width, height; unsigned long dotClock; unsigned int hSyncStart, hSyncEnd, hTotal, hSkew,
+  vSyncStart, vSyncEnd, vTotal; char* name; unsigned int nameLength; unsigned long modeFlags; } SwrRRMode;
+typedef struct { unsigned long timestamp, configTimestamp; int ncrtc; unsigned long* crtcs; int noutput; unsigned long* outputs;
+  int nmode; SwrRRMode* modes; } SwrRRRes;
+typedef struct { unsigned long timestamp; int x, y; unsigned int width, height; unsigned long mode; unsigned short rotation; int noutput;
+  unsigned long* outputs; unsigned short rotations; int npossible; unsigned long* possible; } SwrRRCrtc;
+static void disp_rate(void* dpy_, unsigned long root){
+  void* d=dlopen("libXrandr.so.2",RTLD_NOW|RTLD_LOCAL); if(!d) return;
+  SwrRRRes* (*gr)(void*,unsigned long)=(SwrRRRes*(*)(void*,unsigned long))dlsym(d,"XRRGetScreenResourcesCurrent");
+  SwrRRCrtc* (*gc)(void*,SwrRRRes*,unsigned long)=(SwrRRCrtc*(*)(void*,SwrRRRes*,unsigned long))dlsym(d,"XRRGetCrtcInfo");
+  void (*fr)(SwrRRRes*)=(void(*)(SwrRRRes*))dlsym(d,"XRRFreeScreenResources"); void (*fc)(SwrRRCrtc*)=(void(*)(SwrRRCrtc*))dlsym(d,"XRRFreeCrtcInfo");
+  if(!gr||!gc||!fr||!fc) return;
+  SwrRRRes* r=gr(dpy_,root); if(!r) return;
+  double hz=0;
+  for(int i=0;i<r->ncrtc && hz==0;i++){ SwrRRCrtc* c=gc(dpy_,r,r->crtcs[i]); if(!c) continue;
+    if(c->mode) for(int m=0;m<r->nmode;m++) if(r->modes[m].id==c->mode && r->modes[m].hTotal && r->modes[m].vTotal){
+      double v=(double)r->modes[m].vTotal; if(r->modes[m].modeFlags & 0x10) v/=2;   /* RR_Interlace */
+      hz=(double)r->modes[m].dotClock/((double)r->modes[m].hTotal*v); break; }
+    fc(c); }
+  fr(r);
+  if(hz>1){ extern volatile double g_disp_hz; g_disp_hz=hz; LOG("display: %.3f Hz\n",hz); } }
 static void idle_inhibit(unsigned long xwin){
   if(getenv("SWR_NO_IDLE_INHIBIT")) return;
   void* d=dlopen("libdbus-1.so.3",RTLD_NOW|RTLD_LOCAL); if(!d){ LOG("display: libdbus not found, the desktop may dim the screen during controller play\n"); return; }
@@ -254,6 +277,7 @@ void video_init(const char* title){
   if(g_want_fs){ XChangeProperty(dpy,win,a_state,XA_ATOM,32,PropModeReplace,(unsigned char*)&a_fs,1); g_fullscreen=1; }
   XMapWindow(dpy,win); XFlush(dpy);
   idle_inhibit((unsigned long)win);
+  disp_rate(dpy,RootWindow(dpy,DefaultScreen(dpy)));
   xi_init();
   sdl_load();
   g_start=plat_ns();

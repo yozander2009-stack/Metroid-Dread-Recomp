@@ -32,3 +32,9 @@ u64 swr_r_screenshot(const char* path) { return vk_renderer.screenshot ? vk_rend
 void swr_r_save(int at_exit) {
     if (vk_renderer.save) vk_renderer.save(at_exit);
 }
+/* [Graphics] shadow_resolution (1/2/4) and bloom_quality (0/1): render targets at their own scale (surface.c) */
+#include "vk.h"
+void swr_settings_quality(int shadow_res, int bloom_hq) {
+    g_vk_shadow_res = shadow_res >= 4 ? 4 : shadow_res >= 2 ? 2 : 1;
+    g_vk_bloom_hq = bloom_hq ? 1 : 0;
+}

@@ -231,6 +231,7 @@ int snxvk_start(void){
     int rs= reshade_vk_layer_installed();
     int rec= !(snxvk_dlss_mode>0 || g_opt_hdr || g_opt_taa || g_opt_ao>0 || rs) && !getenv("SWR_SNXVK_NO_RECORD_THREAD");
     snxv_swr_settings_set(g_opt_resf,g_opt_shadows,snxvk_opt_vsync,g_opt_aniso,rec);
+    { extern void snxv_swr_settings_quality(int,int); extern int g_opt_shadow_res, g_opt_bloom_hq; snxv_swr_settings_quality(g_opt_shadow_res,g_opt_bloom_hq); }
     LOG("vulkan_native: command recording thread %s\n",rec? "on" : rs? "off (ReShade's Vulkan layer is installed: the depth copy records directly)" : "off (DLSS, TAA, ambient occlusion or HDR output records directly)");
     /* prebuild_shaders: the game's shaders translated in the background at start, and the pipeline recipes made from
        them (pipeline.c rc_merge); SWR_VK_NO_PREPARE=1 = off (tests) */
@@ -310,7 +311,7 @@ void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt)
   static u64 st_n, st_wait, st_pres, st_gap, last_out;   /* SWR_SNXVK_TRACE: averages every 600 presents */
   u64 t_in=plat_ns(), t_w=t_in;
   if(snxvk_pacing()){ extern volatile int g_pace_fps; static u64 deadline; int pf=g_pace_fps;   /* g_opt_fps, or 60 during slow motion */
-    u64 per= pf>=30 && pf<=240? 1000000000ull/(u64)pf : 16666667ull;   /* 30: cinematics (main.c pace_update) */
+    extern u64 pace_period_ns(int); u64 per= pace_period_ns(pf);   /* 30: cinematics (main.c pace_update); 60: the screen's exact rate */
     u64 next=deadline+per; if(deadline) wait_deadline(next);
     u64 now=plat_ns(); t_w=now; deadline= deadline && (i64)(now-next)<(i64)(per/2)? next : now; }
   { static u64 last_in; u64 t0=plat_ns(); SNXR_PRESENT(a,w,h,pitch,layout,bhl,fmt,crop,0); u64 t1=plat_ns();

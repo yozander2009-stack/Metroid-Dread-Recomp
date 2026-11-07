@@ -7381,8 +7381,11 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                    IPA.MUL */
                 if (addr != 0x7c && needs_scale && component < 2) {
                     u32 zero_index = spv_emit_constant_u32(&c->emit, c->u32_type, 0);
+                    /* SWR: component 1 = 1 / the scale of the target being drawn (render.c frame_consts); 0 and 2
+                       stay the resolution scale for texture coordinates and sizes */
+                    u32 one_index = spv_emit_constant_u32(&c->emit, c->u32_type, 1);
                     u32 scale = spv_emit_uniform_component(&c->emit, c->scale_pointer, c->scale_buffer, zero_index,
-                                                           zero_index, zero_index, c->f32_type);
+                                                           zero_index, one_index, c->f32_type);
                     value = spv_emit_fmul(&c->emit, c->f32_type, value, scale);
                     spv_emit_no_contraction(&c->emit, value);
                 }

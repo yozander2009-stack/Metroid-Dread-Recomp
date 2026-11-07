@@ -510,6 +510,10 @@ static std::vector<Opt> build_options() {
     C("anisotropy", "Graphics", "Graphics", "Anisotropic filtering", LIVE_RESTART, "0", {{"0", "Game default"}, {"2", "2\xC3\x97"}, {"4", "4\xC3\x97"}, {"8", "8\xC3\x97"}, {"16", "16\xC3\x97"}},
       "Sharper floors and walls at an angle.");
     B("shadows", "Graphics", "Graphics", "Shadows", LIVE_YES, "1", "");
+    C("shadow_resolution", "Graphics", "Graphics", "Shadow resolution", LIVE_RESTART, "1", {{"1", "Game"}, {"2", "2×"}, {"4", "4×"}},
+      "Sharper shadow edges. On top of the resolution scale; 4× needs a strong graphics card.");
+    C("bloom_quality", "Graphics", "Graphics", "Bloom and lens flares", LIVE_RESTART, "0", {{"0", "Game"}, {"1", "Smooth"}},
+      "Smooth keeps the game's soft glow but spreads it over the screen with a cubic filter: no blocky steps at 2× resolution and above.");
     B("dynamic_resolution", "Graphics", "Graphics", "Dynamic resolution", LIVE_YES, "0", "Lowers the resolution when the graphics card can't keep up.");
     F("dynamic_resolution_min", "Graphics", "Graphics", "Lowest dynamic resolution", LIVE_YES, "0.6", 0.25f, 1.0f, 0.05f, "");
     B("game_dynamic_resolution", "Graphics", "Graphics", "Game's own dynamic resolution", LIVE_YES, "0", "Let the game lower its own resolution like on the console.");

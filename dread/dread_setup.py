@@ -391,16 +391,25 @@ def main():
                 log('Regenerated: %d of %d files unchanged (their compiled objects are reused)' % (kept, len(files)))
             with open(gen_marker, 'w') as f:
                 f.write(gen_key)
-        P(31, 'Compiling with GCC', '0 of %d files' % len(files))
+        P(31, 'Compiling the game', '0 of %d files' % len(files))
 
+        # Clang when it is bundled (recompiler/clang: llvm-mingw on Windows, an LLVM build on Linux), else GCC. MEASURED
+        # 2026-11-07: the game code from Clang ran ~6% faster in effect-heavy scenes on the PC, no slower on the Steam
+        # Deck, and compiled about 2x (Deck) to 4x (PC, per core) faster. SWR_SETUP_GCC=1 = GCC even when Clang is there
+        use_gcc = os.environ.get('SWR_SETUP_GCC') == '1'
         if WIN:
-            cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
-            cc = cc if os.path.isfile(cc) else None
+            cl = os.path.join(HERE, 'clang', 'bin', 'clang.exe')
+            cc = cl if os.path.isfile(cl) and not use_gcc else None
             if not cc:
-                raise Fail('The bundled GCC is missing (recompiler\\gcc). Extract the release again.')
+                cc = os.path.join(HERE, 'gcc', 'Library', 'bin', 'gcc.exe')   # always the bundled one, never a gcc on PATH
+                cc = cc if os.path.isfile(cc) else None
+            if not cc:
+                raise Fail('The bundled compiler is missing (recompiler\\clang or recompiler\\gcc). Extract the release again.')
         else:
-            # $CC, else the GCC bundled next to this script (the AppImage's recompiler/gcc), else the system's
+            # $CC, else the Clang or GCC bundled next to this script (the AppImage's recompiler/), else the system's
             cc = shutil.which(os.environ['CC']) if os.environ.get('CC') else None
+            if not cc and not use_gcc and os.path.isfile(os.path.join(HERE, 'clang', 'bin', 'clang')):
+                cc = os.path.join(HERE, 'clang', 'bin', 'clang')
             for n in ('gcc', 'x86_64-buildroot-linux-gnu-gcc'):
                 if not cc and os.path.isfile(os.path.join(HERE, 'gcc', 'bin', n)):
                     cc = os.path.join(HERE, 'gcc', 'bin', n)
@@ -429,7 +438,7 @@ def main():
             msg = str(e.code)
             log(msg)
             first = msg.strip().splitlines()[0] if msg.strip() else 'unknown error'
-            print('@@E ' + ('GCC stopped: %s (full message in the log)' % first[:300]), flush=True)
+            print('@@E ' + ('The compiler stopped: %s (full message in the log)' % first[:300]), flush=True)
             sys.exit(3)
         raise
     except Exception as e:
@@ -486,7 +495,7 @@ def compile_all(files, cc, build, jobs, p0, p1):
         with lock:
             st['n'] += 1; st['bytes'] += sizes[src]
             n = st['n']
-            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling with GCC',
+            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling the game',
               '%d of %d files%s' % (n, len(files), (', %d reused from before' % st['reused']) if st['reused'] else ''))
             log('  compiled %s (%d/%d, %.0f s)' % (os.path.basename(src), n, len(files), time.time() - t0))
         return obj

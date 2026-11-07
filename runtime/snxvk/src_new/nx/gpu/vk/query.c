@@ -265,7 +265,7 @@ u64 vk_query_value(u32 ci, u64 first, u64 end) {
         if (g_qown[s % QN] == ci % QCH + 1) c->sum += snx_le64(g_qres[s % QN]) * g_qmul[s % QN]; /* the device's */
     if (end > c->sum_end) c->sum_end = end;
     if (c->whead != c->wtail) c->wtail++;
-    double area = (double)g_vk_scale * (double)g_vk_scale;
+    double area = (double)g_vk_ds * (double)g_vk_ds; /* SWR: the scale of the target drawn */
     u64 v = area == 1.0 ? c->sum : (u64)((double)c->sum / area + 0.5);
     return c->sum && !v ? 1 : v;
 }

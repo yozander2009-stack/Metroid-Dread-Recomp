@@ -1503,7 +1503,8 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                   g_vk_stage_sets,
                   g_vk_buffer_image_slots,
                   d->limits.maxPerStageDescriptorStorageImages,
-                  d->limits.maxDescriptorSetStorageImages};
+                  d->limits.maxDescriptorSetStorageImages,
+                  0x53570001u /* SWR translator revision: 1 = FragCoord scale from SNX_RS.y (per-target scales) */};
     /* a tree with changes builds under one commit name: the runtime's own bytes tell those builds apart. Not its
        modification time, which a copy of the same runtime (each game has one) changes */
     if (len >= 6 && !strcmp(commit + len - 6, "-dirty")) {

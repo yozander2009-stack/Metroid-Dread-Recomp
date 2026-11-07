@@ -483,6 +483,10 @@ typedef struct Surf {
 enum { VK_LRU_NONE, VK_LRU_TEX, VK_LRU_RT };
 /* resolution= in the .ini: render targets are made this much bigger (read once, at startup) */
 extern float g_vk_scale;
+extern float g_vk_ds;                    /* SWR: the scale of the target being drawn (surface.c) */
+extern int g_vk_shadow_res, g_vk_bloom_hq;  /* SWR: [Graphics] shadow_resolution, bloom_quality */
+float vk_rt_scale(u32 w, u32 h);          /* SWR: a render target's scale by its size */
+float vk_surf_scale(const Surf* s);       /* SWR: an image's scale, sw / w */
 u32 vk_sc(u32 v);      /* a size or coordinate scaled, at least 1 */
 float vk_scf(float v); /* the same for viewport values */
 /* w in pixels; pitch: bytes per row of a pitch-linear target (the register holds it in place of the width) */
@@ -493,6 +497,7 @@ Surf* vk_rt_find(u64 gva);
 Surf* vk_rt_snapshot(Surf* rt);                  /* copy a target so a draw can sample its contents while writing it */
 /* SWR: t, or its copy averaged down for a filtered read by a smaller draw at resolution 2 and up (texture.c) */
 Surf* vk_rt_prefiltered(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n);
+Surf* vk_rt_upsampled(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n);
 Surf* vk_rt_for_cpu(u64 cpu_addr, u32 w, u32 h); /* the render target the guest presents from that memory */
 /* a render target read where its guest memory is (a texture, a present): reload it if the GPU wrote its memory */
 void vk_rt_note_read(Surf* s);

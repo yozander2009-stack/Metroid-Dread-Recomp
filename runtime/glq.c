@@ -190,7 +190,7 @@ static void e_swap(void* p){
     if(gpu_gl_present_pacing()){
       if(!announced){announced=1;LOG("pacing: frame cap on presentation thread, guest frame reads synchronized\n");}
       extern volatile int g_pace_fps;int pf=g_pace_fps;   /* g_opt_fps, or 60 during the game's slow motion (main.c pace_update) */
-      u64 now=plat_ns(),period=pf>=30&&pf<=240?1000000000ull/(u64)pf:16666667ull;   /* 30: cinematics (main.c pace_update) */
+      extern u64 pace_period_ns(int);u64 now=plat_ns(),period=pace_period_ns(pf);   /* 30: cinematics (main.c pace_update); 60: the screen's exact rate */
       u64 next=deadline+period;if(deadline&&now<next)present_wait_deadline(next);now=plat_ns();
       if(pf>=120) deadline= deadline&&(i64)(now-next)<(i64)(period/2)? next : now;   /* high refresh: a late frame starts a new cadence instead of being followed by short catch-up frames */
       else deadline=deadline&&now-deadline<period*2?next:now;

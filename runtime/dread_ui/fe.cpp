@@ -484,7 +484,7 @@ static void page_graphics() {
     }
 #endif
     section("QUALITY");
-    draw_opt("antialiasing"); draw_opt("taa"); draw_opt("ambient_occlusion"); draw_opt("sharpening"); draw_opt("anisotropy"); draw_opt("shadows");
+    draw_opt("antialiasing"); draw_opt("taa"); draw_opt("ambient_occlusion"); draw_opt("sharpening"); draw_opt("anisotropy"); draw_opt("shadows"); draw_opt("shadow_resolution"); draw_opt("bloom_quality");
     draw_opt("dynamic_resolution"); if (getb("dynamic_resolution")) draw_opt("dynamic_resolution_min");
     draw_opt("game_dynamic_resolution");
     section("HDR");

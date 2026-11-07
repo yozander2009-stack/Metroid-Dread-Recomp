@@ -162,7 +162,24 @@ u32 vk_sc(u32 v) {
     u32 r = (u32)((float)v * g_vk_scale + 0.5f);
     return r ? r : 1;
 }
-float vk_scf(float v) { return v * g_vk_scale; }
+/* SwitchRecomp: render targets at their own scale, as the OpenGL renderer (gpu_gl.c rt_sf_s). Shadow maps (square
+   targets from 512 px) times [Graphics] shadow_resolution, at most 8192 px; the glow chain's small targets
+   (<= 480x270) at the guest size unless bloom_quality=1. g_vk_ds: the scale of the target a draw or clear writes
+   (render.c read_targets), for viewports, scissors and FragCoord (SNX_RS.y) */
+float g_vk_ds = 1.0f;
+int g_vk_shadow_res = 1, g_vk_bloom_hq = 0;
+float vk_rt_scale(u32 w, u32 h) {
+    float sc = g_vk_scale;
+    if (sc > 1.0f && w <= 480 && h <= 270) return 1.0f; /* bloom_quality=1 upsamples their reads instead (texture.c) */
+    if (w == h && w >= 512 && g_vk_shadow_res > 1) {
+        float m = sc * (float)g_vk_shadow_res;
+        if ((float)w * m > 8192.0f) m = 8192.0f / (float)w;
+        return m > sc ? m : sc;
+    }
+    return sc;
+}
+float vk_surf_scale(const Surf* s) { return s && s->w ? (float)s->sw / (float)s->w : g_vk_scale; }
+float vk_scf(float v) { return v * g_vk_ds; }
 
 static u64 g_rt_made; /* for the stats line */
 u64 vk_rt_made(void) { return g_rt_made; }
@@ -172,8 +189,9 @@ static Surf* surf_create(u64 gva, u32 w, u32 h, VkFmt f, u32 fkey, u32 bl, u32 b
     s->gva = gva;
     s->w = w;
     s->h = h;
-    s->sw = is_rt ? vk_sc(w) : w;
-    s->sh = is_rt ? vk_sc(h) : h;
+    { float k = is_rt ? vk_rt_scale(w, h) : 1.0f; u32 a = (u32)((float)w * k + 0.5f), b = (u32)((float)h * k + 0.5f);
+      s->sw = is_rt ? (a ? a : 1) : w;
+      s->sh = is_rt ? (b ? b : 1) : h; }
     s->layers = layers;
     s->levels = 1;
     s->fkey = fkey;
@@ -1497,12 +1515,12 @@ static int blit_depth(Surf* st, const Surf2D* s, const Surf2D* d, int dx, int dy
     vk_surf_touch(st); /* used now: making the destination may evict what wasn't */
     dt = vk_zt_array(d->addr, d->width, d->height, fmt, tile, 1, 0);
     if (!dt || dt == st || dt->f.vk != st->f.vk) return 0;
-    float S = g_vk_scale;
+    float S = vk_surf_scale(st), D = vk_surf_scale(dt); /* SWR: each at its own scale */
     i32 x0 = (i32)(sx * S), y0 = (i32)(sy * S), x1 = (i32)((sx + sdx * dw) * S + 0.5),
         y1 = (i32)((sy + sdy * dh) * S + 0.5);
-    i32 X1 = (i32)((dx + dw) * S + 0.5f), Y1 = (i32)((dy + dh) * S + 0.5f);
-    dx = (i32)(dx * S);
-    dy = (i32)(dy * S);
+    i32 X1 = (i32)((dx + dw) * D + 0.5f), Y1 = (i32)((dy + dh) * D + 0.5f);
+    dx = (i32)(dx * D);
+    dy = (i32)(dy * D);
     if (x1 > (i32)st->sw) x1 = (i32)st->sw;
     if (y1 > (i32)st->sh) y1 = (i32)st->sh;
     if (X1 > (i32)dt->sw) X1 = (i32)dt->sw;
@@ -1547,12 +1565,12 @@ int vk_blit2d(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, 
     if (!blit_ok(st->f.vk, VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !blit_ok(dt->f.vk, VK_FORMAT_FEATURE_BLIT_DST_BIT))
         return 0;
     /* in the images' pixels: targets are scaled */
-    float S = g_vk_scale;
+    float S = vk_surf_scale(st), D = vk_surf_scale(dt); /* SWR: each at its own scale */
     i32 x0 = (i32)(sx * S), y0 = (i32)(sy * S), x1 = (i32)((sx + sdx * dw) * S + 0.5),
         y1 = (i32)((sy + sdy * dh) * S + 0.5);
-    i32 X1 = (i32)((dx + dw) * S + 0.5f), Y1 = (i32)((dy + dh) * S + 0.5f);
-    dx = (i32)(dx * S);
-    dy = (i32)(dy * S);
+    i32 X1 = (i32)((dx + dw) * D + 0.5f), Y1 = (i32)((dy + dh) * D + 0.5f);
+    dx = (i32)(dx * D);
+    dy = (i32)(dy * D);
     if (x1 > (i32)st->sw) x1 = (i32)st->sw;
     if (y1 > (i32)st->sh) y1 = (i32)st->sh;
     if (X1 > (i32)dt->sw) X1 = (i32)dt->sw;

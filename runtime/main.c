@@ -117,7 +117,7 @@ int g_opt_aniso=0;         /* anisotropy: 0 = the game's, else at least that muc
 int g_opt_tex_threads=0;   /* texture_threads, read by gpu_gl.c pf_run: 0 auto, 1 off */
 int g_opt_ff=0, g_opt_ff_speed=3;   /* fast_forward (Tab / L3+R3 toggles a faster game clock), fast_forward_speed */
 int g_opt_volume=100;      /* [Audio] volume: master output level in percent (audio.c), live */
-float g_opt_resf=1.0f; int g_opt_shadows=1; int g_opt_cmp_low=1; int g_opt_resdyn=0; int g_opt_prof=0; float g_opt_resmin=0.6f;
+float g_opt_resf=1.0f; int g_opt_shadows=1; int g_opt_shadow_res=1; int g_opt_bloom_hq=0; int g_opt_cmp_low=1; int g_opt_resdyn=0; int g_opt_prof=0; float g_opt_resmin=0.6f;
 static char g_hints_path[1200];
 
 /* ============================================================ exports for the generated code */
@@ -347,6 +347,8 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"audio_channels")){ extern int g_opt_audio_51; g_opt_audio_51= !strcmp(v,"5.1"); }
     else if(!strcmp(k,"resolution")){ g_opt_resf=(float)atof(v); if(g_opt_resf<0.25f) g_opt_resf=0.25f; if(g_opt_resf>4) g_opt_resf=4; }
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
+    else if(!strcmp(k,"shadow_resolution")){ int s=atoi(v); g_opt_shadow_res= s>=4? 4 : s>=2? 2 : 1; }
+    else if(!strcmp(k,"bloom_quality")) g_opt_bloom_hq= atoi(v)>0;
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
     else if(!strcmp(k,"low_priority_shader_compiler")) g_opt_cmp_low=atoi(v);
     else if(!strcmp(k,"dynamic_resolution")) g_opt_resdyn=atoi(v);
@@ -419,6 +421,8 @@ static const IniOpt INI_GRAPHICS[]={
   {"hdr_peak","0","HDR output: brightest highlight in nits; 0 = what the display reports"},
   {"prebuild_shaders","0","1 = before the game draws, build every shader the game ships (romfs/system/shd) into the\n;   shader cache, so they don't compile the first time they're used. The first start takes longer; later starts only\n;   look at changed files. Native Vulkan: the game's shaders are translated in the background at start and the\n;   pipeline recipes (vulkan_native/pipeline_recipes.bin) made from them"},
   {"shadows","1","0 = disable shadow maps (more FPS)"},
+  {"shadow_resolution","1","1, 2 or 4: shadow map resolution on top of the resolution scale (sharper shadow edges; restart)"},
+  {"bloom_quality","0","0 = bloom and lens flares as the game draws them, 1 = smooth: spread over the screen with a cubic filter (no blocky steps at 2x and above)"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifndef SWR_RELEASE   /* the public release: no DLSS (GPL) and no frame generation in that build */
   {"dlss","0","1 = NVIDIA DLAA anti-aliasing (renderer=opengl or vulkan_native, RTX GPU, nvngx_dlss.dll in the game folder):\n;   DLSS at the internal resolution with the game's own motion vectors; the HUD is untouched. 0 = off"},
@@ -592,6 +596,11 @@ void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt
    the legs and dies. With a cap above 60, slow-motion frames are paced at 60, where it works as on the Switch.
    g_pace_fps is the cap the pacers use; SWR_NO_SLOWMO_60=1 = old behaviour (tests). */
 volatile int g_pace_fps=1;
+/* The pacers' period for a cap (30 for cinematics, 60..240). Pacing 60 FPS to a 59.93 Hz panel's own rate (Steam Deck)
+   measured no better (2026-11-07: more late frames), so 60 stays 60. g_disp_hz: the screen's rate where the backend
+   knows it (backend_x11.c, logged) */
+volatile double g_disp_hz;
+u64 pace_period_ns(int pf){ if(pf<30 || pf>240) pf=60; return 1000000000ull/(u64)pf; }
 void* g_code_mod;   /* the loaded game code module */
 static const volatile int* g_particle_pool;   /* swr_particle_pool in a patched code DLL: the game's particle vertex-buffer
                                                  pool size, set when the game makes the pool (1024 or 2048) */
@@ -678,7 +687,7 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
     }
   }
   /* while recording keep at least the 60 cap, uncapped + per-frame logic = sped up video */
-  if(g_opt_fps || g_rec_active){ int pf=g_pace_fps; u64 per= pf>=30 && pf<=240? 1000000000ull/(u64)pf : 16666667ull;
+  if(g_opt_fps || g_rec_active){ int pf=g_pace_fps; u64 per= pace_period_ns(pf);
     if(g_opt_fps>=10 && g_opt_fps<60){ static int said; if(!said){ said=1; WARN("fps_limit=%d would run the game at %d%% speed (one game step per image): using 60\n",g_opt_fps,g_opt_fps*100/60); } }
     u64 now=plat_ns(); u64 next=g_last_present+per;
     if(limiter_trace){trace_begin=now;trace_deadline=next;}

@@ -81,6 +81,8 @@ static void read_targets(GpuChannel* ch, Surf** rt, Surf** zt, u32* n) {
             *zt = vk_zt_array(za, r[0x48A], r[0x48B], r[0x3FA], r[0x3FB], layers, (u64)r[0x3FC] * 4);
         }
     }
+    /* SWR: viewports, scissors and FragCoord follow the scale of the target written (shadow maps, glow targets) */
+    g_vk_ds = (*n && rt[0]) ? vk_surf_scale(rt[0]) : *zt ? vk_surf_scale(*zt) : g_vk_scale;
 }
 
 /* opens a rendering pass on these targets, or keeps the open one if it is the same set. zt_ro: the depth target is
@@ -1132,6 +1134,28 @@ static int frame_consts(VkBuffer* buf, u64* off) {
     *off = o;
     return 1;
 }
+/* SwitchRecomp: SNX_RS for the target being drawn (its .y follows g_vk_ds, the target's own scale); one per distinct
+   scale a frame, the frame_consts one when it is the resolution scale */
+static int rs_consts(VkBuffer* buf, u64* off) {
+    if (g_vk_ds == g_vk_scale) return frame_consts(buf, off);
+    static u64 frame = ~0ull;
+    static float ds[8];
+    static VkBuffer bb[8];
+    static u64 oo[8];
+    static int n;
+    if (frame != vk_submit_number()) { n = 0; frame = vk_submit_number(); }
+    for (int i = 0; i < n; i++)
+        if (ds[i] == g_vk_ds) { *buf = bb[i]; *off = oo[i]; return 1; }
+    VkBuffer b; u64 o;
+    u8* p = vk_stage(16, vk_stage_align(), &b, &o);
+    if (!p) return 0;
+    float rs[4] = {1 / g_vk_scale, 1 / g_vk_ds, g_vk_scale, 0};
+    memcpy(p, rs, 16);
+    snx_le32_array(p, 4);
+    if (n < 8) { ds[n] = g_vk_ds; bb[n] = b; oo[n] = o; n++; }
+    *buf = b; *off = o;
+    return 1;
+}
 
 typedef struct {
     VkWriteDescriptorSet w[SNX_VKB_END];
@@ -1635,7 +1659,7 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
                   draw->map_off[stage ? 1 : 0], draw->map_size[stage ? 1 : 0]);
     VkBuffer cb;
     u64 co;
-    if (stage == 4 && frame_consts(&cb, &co))
+    if (stage == 4 && rs_consts(&cb, &co))
         dw_buffer(&d, set, SNX_VKB_RS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, cb, co, 16);
     u32 tcb = r[0x982];
     int nt = s->si.ntex > SH_MAXTEX ? SH_MAXTEX : s->si.ntex;
@@ -1712,11 +1736,13 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
                 LOG_LIMIT(1, "vulkan: a draw samples a target it renders to (read as empty)\n");
         } else {
             t = vk_rt_prefiltered(t, st, want, num, rt, n); /* SWR: the glow passes' averaged copy (texture.c) */
+            t = vk_rt_upsampled(t, st, want, num, rt, n);   /* SWR: bloom_quality=1, the glow spread smoothly (texture.c) */
             view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
         }
         const Surf* sampled = view ? t : NULL; /* the texture whose own view is bound, for the sampler */
-        if (scaled && sampled && (sampled->sw != sampled->w || sampled->sh != sampled->h))
-            *scaled |= 1ull << i;
+        { static int nts = -1; if (nts < 0) nts = getenv("SWR_VK_NO_TEXEL_SCALE") != NULL;   /* SWR test: no scaled pixel reads */
+        if (!nts && scaled && sampled && (sampled->sw != sampled->w || sampled->sh != sampled->h))
+            *scaled |= 1ull << i; }
         if (view && depth_ro) {
             *zt_ro = 1; /* render_begin moves it to the read-only layout */
             layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;

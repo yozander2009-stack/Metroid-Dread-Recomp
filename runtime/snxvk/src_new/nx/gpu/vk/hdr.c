@@ -519,3 +519,126 @@ VkImage vk_shrink(VkCommandBuffer cb, Surf* src, u32 sx, u32 sy, u32 sw, u32 sh,
                VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     return g_shr_img;
 }
+
+/* ------------------------------------------------------------ SWR: bloom upsample ([Graphics] bloom_quality=1)
+   A glow target at the game's own size drawn into dst (a copy at the size of the target that reads it, texture.c
+   vk_rt_upsampled) with shaders/up.frag: a cubic B-spline, so the game's soft glow spreads over the screen without the
+   blocky steps of one bilinear tap per pixel. As gpu_gl.c rt_upsampled. Pipelines per destination format */
+#include "nx/gpu/vk/up_spv.h"
+static VkDescriptorSetLayout g_up_dsl;
+static VkPipelineLayout g_up_layout;
+static VkPipeline g_up_pipe[4];
+static VkFormat g_up_fmt[4];
+static int g_up_n;
+static VkPipeline up_pipeline(VkFormat format) {
+    for (int i = 0; i < g_up_n; i++)
+        if (g_up_fmt[i] == format) return g_up_pipe[i];
+    if (g_up_n == 4) return VK_NULL_HANDLE;
+    if (!g_up_layout) {
+        VkDescriptorSetLayoutBinding b = {.binding = 0,
+                                          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                          .descriptorCount = 1,
+                                          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+        VkDescriptorSetLayoutCreateInfo dci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                          .setLayoutCount = 1,
+                                          .pSetLayouts = &g_up_dsl,
+                                          .pushConstantRangeCount = 1,
+                                          .pPushConstantRanges = &pc};
+        if (!VK_OK(vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_up_dsl))) return VK_NULL_HANDLE;
+        if (!VK_OK(vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &g_up_layout))) return VK_NULL_HANDLE;
+    }
+    VkShaderModule vs = vk_module_spv(g_hdr_out_vert, sizeof g_hdr_out_vert / 4),
+                   fs = vk_module_spv(g_up_frag, sizeof g_up_frag / 4);
+    VkPipelineShaderStageCreateInfo st[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vp = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL,
+                                                 .cullMode = VK_CULL_MODE_NONE,
+                                                 .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
+    VkPipelineColorBlendStateCreateInfo cb = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+                                        .colorAttachmentCount = 1,
+                                        .pColorAttachmentFormats = &format};
+    VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                                        .pNext = &ri,
+                                        .stageCount = 2,
+                                        .pStages = st,
+                                        .pVertexInputState = &vi,
+                                        .pInputAssemblyState = &ia,
+                                        .pViewportState = &vp,
+                                        .pRasterizationState = &rs,
+                                        .pMultisampleState = &ms,
+                                        .pColorBlendState = &cb,
+                                        .pDynamicState = &ds,
+                                        .layout = g_up_layout};
+    VkPipeline p = VK_NULL_HANDLE;
+    int ok = vs && fs && VK_OK(vkCreateGraphicsPipelines(g_vk.dev, vk_pipeline_cache(), 1, &gci, NULL, &p));
+    if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
+    if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);
+    if (!ok) return VK_NULL_HANDLE;
+    g_up_fmt[g_up_n] = format;
+    g_up_pipe[g_up_n++] = p;
+    LOG_LIMIT(1, "vulkan: glow upsampled with a cubic B-spline (bloom_quality=1)\n");
+    return p;
+}
+int vk_upsample_draw(Surf* src, Surf* dst) {
+    if (!src || !dst || !src->att || !dst->att || !layout_make()) return 0;
+    VkPipeline pipe = up_pipeline(dst->f.vk);
+    if (!pipe) return 0;
+    vk_render_end(); /* outside the game's pass */
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    vk_surf_use(cb, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkDescriptorImageInfo di = {g_samp, src->att, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                               .dstBinding = 0,
+                               .descriptorCount = 1,
+                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               .pImageInfo = &di};
+    VkDescriptorSet set = vk_rec_new_set(g_up_dsl, 1, &wr);
+    if (!set) return 0;
+    struct {
+        float tx, ty, ix, iy;
+    } pc = {1.0f / (float)src->sw, 1.0f / (float)src->sh, 1.0f / (float)dst->sw, 1.0f / (float)dst->sh};
+    VkExtent2D ext = {dst->sw, dst->sh};
+    VkRenderingAttachmentInfo at = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                    .imageView = dst->att,
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                          .renderArea = {{0, 0}, ext},
+                          .layerCount = 1,
+                          .colorAttachmentCount = 1,
+                          .pColorAttachments = &at};
+    VkViewport vp = {0, 0, (float)dst->sw, (float)dst->sh, 0, 1};
+    VkRect2D sci = {{0, 0}, ext};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sci);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_up_layout, 0, 1, &set, 0, NULL);
+    rec_CmdPushConstants(cb, g_up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+    vk_render_forget_state(); /* its pipeline and state, not a draw's: the next draw sets all again */
+    return 1;
+}

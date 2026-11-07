@@ -68,7 +68,15 @@ static u32 SC(u32 v){ u32 r=(u32)(v*g_scale+0.5f); return r? r : 1; }
 /* Render targets of 480x270 and under (the game's glow chain, 320x180 in Dread) stay at the guest size above 1x: their
    passes take taps a fixed guest texel apart, which on a scaled target land on the wrong pixels (the plaid around sparks,
    owner's screenshots 2026-11-01). At their own size those taps are exact, and the GPU does less. SWR_SCALE_SMALL_RT=1 = old */
-static float rt_sf(u32 w, u32 h){ static int old=-1; if(old<0) old=getenv("SWR_SCALE_SMALL_RT")!=NULL; return !old && g_scale>1.0f && w<=480 && h<=270? 1.0f : g_scale; }
+/* Shadow maps ([Graphics] shadow_resolution 1/2/4): Dread draws its shadows into square depth targets (512x512 and
+   2048x2048, depth-only passes; SWR_TRACE_RT=1 lists them). Square targets from 512 up get the resolution scale times
+   that factor, at most 8192 px. By size, so a depth target and a color target of the same size stay matched */
+extern int g_opt_shadow_res, g_opt_bloom_hq;
+static float rt_sf_s(u32 w, u32 h, float sc){ static int old=-1; if(old<0) old=getenv("SWR_SCALE_SMALL_RT")!=NULL;
+  if(!old && sc>1.0f && w<=480 && h<=270) return 1.0f;
+  if(w==h && w>=512 && g_opt_shadow_res>1){ float m=sc*(float)g_opt_shadow_res; if(w*m>8192.0f) m=8192.0f/(float)w; return m>sc? m : sc; }
+  return sc; }
+static float rt_sf(u32 w, u32 h){ return rt_sf_s(w,h,g_scale); }
 static u32 SF(u32 v, u32 w, u32 h){ u32 r=(u32)(v*rt_sf(w,h)+0.5f); return r? r : 1; }
 #define RW(t) SF((t)->w,(t)->w,(t)->h)
 #define RH(t) SF((t)->h,(t)->w,(t)->h)
@@ -239,7 +247,7 @@ static GlFmt rt_format(u32 f){
 typedef struct Tex {
   u64 gva; u32 w, h, d, levels, target; u32 fkey; GlFmt f;
   u32 bl, bh, bd, pitch; u64 size;
-  GLuint id; u64 hash; int is_rt, gpu_written; u32 frame_checked, last_used; GLint swz[4]; u64 tr_last; u32 stable, next_check; u64 video_gen; GLuint view; GLenum view_target; GLint vswz[4]; u32 wgen, crop_gen; struct Tex* crop; struct Tex* lay; struct Tex* vol; int skipclr, zero3d; u64 alias; u64 shash; u32 tfull;
+  GLuint id; u64 hash; int is_rt, gpu_written; u32 frame_checked, last_used; GLint swz[4]; u64 tr_last; u32 stable, next_check; u64 video_gen; GLuint view; GLenum view_target; GLint vswz[4]; u32 wgen, crop_gen; struct Tex* crop; struct Tex* lay; struct Tex* vol; int skipclr, zero3d, shtrace; GLuint up; u32 up_w, up_h, up_wgen; u64 alias; u64 shash; u32 tfull;
   GLuint pre; u32 pre_wgen, pre_w, pre_h; int pre_lv;   /* box-averaged copy for downsampling reads at a high resolution scale */
   GLuint pre1; u32 pre1_wgen; float pre1_scale;   /* the same at the guest size, for scales that are not a power of 2 */
   struct Tex* next;
@@ -1186,6 +1194,8 @@ static Tex* rt_texture(u64 gva, u32 w, u32 h, u32 fmt, u32 tile, int depth){
   for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==~0ull && t->alias==gva && t->is_rt && t->w==w && t->h==h && t->fkey==fkey && !rv) rv=t;
   for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt){ t->gva=~0ull; t->alias=gva; g_tmap_gen++; }
   if(rv && !getenv("SWR_NO_RT_ALIAS")){ rv->gva=gva; rv->alias=0; rv->last_used=g_frame; rv->hash=rt_sig(gva); rv->frame_checked=g_frame; return rv; }
+  { static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_RT")!=NULL;   /* diagnostic: each new render target */
+    if(tr) LOG("rt new: %ux%u fmt %x %s gva %llx frame %u\n",w,h,fmt,depth? "depth":"color",(unsigned long long)gva,g_frame); }
   Tex* t=tex_create(gva,w,h,1,1,GL_TEXTURE_2D,f,fkey,!((tile>>12)&1),(tile>>4)&15,(tile>>8)&15,0,1);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
   /* seed from memory in case the CPU wrote it */
@@ -1490,7 +1500,7 @@ void gpu_gl_skip_prompt(void){
   glDisable(GL_BLEND); glUseProgram(0); state_dirty(); }
 
 static void rs_update(void);
-static void ds_update(void){ float d= g_rt[0]? rt_sf(g_rt[0]->w,g_rt[0]->h) : g_scale; if(d!=g_ds){ g_ds=d; rs_update(); } }
+static void ds_update(void){ float d= g_rt[0]? rt_sf(g_rt[0]->w,g_rt[0]->h) : g_zt? rt_sf(g_zt->w,g_zt->h) : g_scale;   /* depth-only: the depth target's scale (shadow maps) */ if(d!=g_ds){ g_ds=d; rs_update(); } }
 static void apply_state(GpuChannel* ch){
   ds_update();
   u32* r=ch->r3d;
@@ -2299,6 +2309,57 @@ static int downsample_read(const Tex* t, const ShTex* st){
      profile). Glow is soft by nature, so the averaged copy loses nothing */
   return rt_sf(t->w,t->h)==g_scale && t->w<=480 && t->h<=270; }   /* only with SWR_SCALE_SMALL_RT=1: otherwise such a target is at its own size */
 
+/* Bloom and lens flares, High ([Graphics] bloom_quality=1): the glow chain stays at the game's own size (its blur, so
+   its softness, is the game's), and where a glow target is spread over a bigger target (the scene at the resolution
+   scale) the draw reads a copy upsampled to that target's real pixels with a Catmull-Rom cubic (it passes through the
+   texels, so the glow keeps the game's strength; kept within the 4 nearest texels, no ringing) instead of one bilinear
+   tap: no blocky steps at 2x and above. Only the final spread over a full-size target: the glow chain's own steps stay
+   the game's. Remade only when the glow target was written. Both renderers (Native Vulkan: snxvk texture.c
+   vk_rt_upsampled) */
+static GLuint g_up_prog, g_up_vao, g_up_fbo, g_up_samp; static GLint g_up_loc; static int g_up_drawn, g_up_failed; static u64 st_upsample;
+static const char* UP_FS="#version 430 core\nlayout(binding=0) uniform sampler2D t; uniform vec4 info; out vec4 o;\n"
+  "void main(){ ivec2 sz=textureSize(t,0); vec2 p=gl_FragCoord.xy*info.zw*vec2(sz)-0.5; vec2 fi=floor(p), f=p-fi; ivec2 i=ivec2(fi);\n"
+  "  vec2 w[4]; w[0]=f*(-0.5+f*(1.0-0.5*f)); w[1]=1.0+f*f*(-2.5+1.5*f); w[2]=f*(0.5+f*(2.0-1.5*f)); w[3]=f*f*(-0.5+0.5*f);\n"
+  "  vec4 c=vec4(0.0), lo=vec4(1e30), hi=vec4(-1e30);\n"
+  "  for(int y=0;y<4;y++) for(int x=0;x<4;x++){ vec4 s=texelFetch(t,clamp(i+ivec2(x-1,y-1),ivec2(0),sz-1),0); c+=w[x].x*w[y].y*s;\n"
+  "    if(x>=1&&x<=2&&y>=1&&y<=2){ lo=min(lo,s); hi=max(hi,s); } }\n"
+  "  o=clamp(c,lo,hi); }\n";
+static int upsample_read(const Tex* t, const ShTex* st, u32* W, u32* H){
+  if(!g_opt_bloom_hq || g_up_failed || g_scale<1.01f || !t || !t->is_rt || t->target!=GL_TEXTURE_2D || t->f.depth || t->f.is_int || st->fetch_only ||
+     st->type!=1 || st->array || st->shadow || t->w>480 || t->h>270 || RW(t)!=t->w) return 0;
+  const Tex* o=g_rt[0]; if(!o || o==t || o->w<=480 || o->h<=270) return 0;   /* only the final spread over a full-size target: the glow chain's own steps stay the game's */
+  u32 ow=RW(o), oh=RH(o); if(ow<t->w*3/2 || oh<t->h*3/2) return 0;   /* only where it is magnified */
+  if(ow>8192) ow=8192; if(oh>8192) oh=8192; *W=ow; *H=oh; return 1; }
+static GLuint rt_upsampled(Tex* t, u32 W, u32 H){
+  if(!g_up_prog){
+    char err[1024]; err[0]=0; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,UP_FS,err,sizeof err) : 0;
+    g_up_prog= a&&b? link2(a,b,0) : 0;
+    if(!g_up_prog){ g_up_failed=1; LOG("bloom (OpenGL): upsample program failed, off: %s\n",err); return 0; }
+    g_up_loc=glGetUniformLocation(g_up_prog,"info"); glGenVertexArrays(1,&g_up_vao); glGenFramebuffers(1,&g_up_fbo);
+    glGenSamplers(1,&g_up_samp); glSamplerParameteri(g_up_samp,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glSamplerParameteri(g_up_samp,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glSamplerParameteri(g_up_samp,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glSamplerParameteri(g_up_samp,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    LOG("bloom (OpenGL): glow upsampled with a cubic B-spline\n"); }
+  if(!t->up || t->up_w!=W || t->up_h!=H){
+    if(t->up) glDeleteTextures(1,&t->up);
+    glGenTextures(1,&t->up); glBindTexture(GL_TEXTURE_2D,t->up); glTexStorage2D(GL_TEXTURE_2D,1,t->f.ifmt,(GLsizei)W,(GLsizei)H);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    t->up_w=W; t->up_h=H; t->up_wgen=~0u; }
+  if(t->up_wgen==t->wgen) return t->up;
+  if(gp_on()) gp_mark("ours: bloom upsample");
+  glBindFramebuffer(GL_FRAMEBUFFER,g_up_fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,0,0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,t->up,0); { GLenum b=GL_COLOR_ATTACHMENT0; glDrawBuffers(1,&b); }
+  glDisable(GL_SCISSOR_TEST); glDisablei(GL_BLEND,0); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE); glDisable(GL_DEPTH_TEST);
+  glDisable(GL_FRAMEBUFFER_SRGB); glDisable(GL_POLYGON_OFFSET_FILL); glColorMaski(0,1,1,1,1); glViewportIndexedf(0,0,0,(float)W,(float)H);
+  glUseProgram(g_up_prog); glBindVertexArray(g_up_vao);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,t->id); glBindSampler(0,g_up_samp);
+  { float in[4]={1.0f/(float)t->w,1.0f/(float)t->h,1.0f/(float)W,1.0f/(float)H}; glUniform4fv(g_up_loc,1,in); }
+  glDrawArrays(GL_TRIANGLES,0,3);
+  glBindSampler(0,0); glBindFramebuffer(GL_FRAMEBUFFER,g_fbo);
+  t->up_wgen=t->wgen; g_up_drawn=1; st_upsample++;
+  if(gp_on()) gp_mark_rt();
+  return t->up; }
+
 static void bind_textures(GpuChannel* ch, int stage, Sh* s){
   u32* r=ch->r3d; u32 tcb=r[0x982];
   u64 tic_base=((u64)r[0x55D]<<32)|r[0x55E], tsc_base=((u64)r[0x557]<<32)|r[0x558];
@@ -2315,6 +2376,7 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     tids[i]=0;
     if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt)){ if(t->is_rt) dlg_read(t); GLuint use=t->id;
       if(want==GL_TEXTURE_2D && downsample_read(t,st)){ GLuint pf=rt_prefiltered(t); if(pf) use=pf; }
+      else if(want==GL_TEXTURE_2D){ u32 uw, uh; if(upsample_read(t,st,&uw,&uh)){ GLuint u=rt_upsampled(t,uw,uh); if(u) use=u; } }
       { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_PREFILTER_DEBUG")!=NULL;
         if(dbg && t->is_rt && g_rt[0] && g_rt[0]!=t && (t->w>g_rt[0]->w || t->h>g_rt[0]->h)){ static u64 seen[64]; static int ns; u64 k=((u64)t->w<<48)^((u64)t->h<<32)^((u64)g_rt[0]->w<<16)^g_rt[0]->h^((u64)st->fetch_only<<63)^((u64)stage<<60);
           int f=0; for(int q=0;q<ns;q++) if(seen[q]==k) f=1;
@@ -2691,6 +2753,9 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   TM(TM_STATE,bind_framebuffer(ch));
   if(g_nrt && g_rt[0]){ g_last_cw=g_rt[0]->w; g_last_ch=g_rt[0]->h; }
   { extern int g_opt_shadows; /* shadows=0: skip depth-only passes at a different size (shadow maps) */
+    { static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_RT")!=NULL;
+      if(tr && !g_nrt && g_zt && (g_zt->w!=g_last_cw || g_zt->h!=g_last_ch) && !g_zt->shtrace){ g_zt->shtrace=1;
+        LOG("rt shadow pass: depth %ux%u fmt %x gva %llx (scene %ux%u) frame %u\n",g_zt->w,g_zt->h,g_zt->fkey&0xFFFF,(unsigned long long)g_zt->gva,g_last_cw,g_last_ch,g_frame); } }
     if(!g_opt_shadows && !g_nrt && g_zt && (g_zt->w!=g_last_cw || g_zt->h!=g_last_ch)){ trace_note("DRAW SKIPPED: shadow\n");
       /* ...and clear the map to far (1.0) once a frame so it reads as fully lit instead of black */
       { extern int g_frames; if(g_zt->skipclr!=g_frames+1){ g_zt->skipclr=g_frames+1;
@@ -2732,6 +2797,11 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   TM(TM_GB,(bind_gbufs(0,vs), bind_gbufs(4,fs)));
   TM(TM_TEX,(bind_textures(ch,0,vs), bind_textures(ch,4,fs)));
   if(g_pf_blit){ g_pf_blit=0; state_dirty(); apply_state(ch); }
+  if(g_up_drawn){ g_up_drawn=0;   /* the bloom upsample drew: this draw's framebuffer, program, state and textures again */
+    bind_framebuffer(ch);
+    if(g_sep>0){ glUseProgram(0); p_bpp(g_pipe); g_pipe_on=1; p_ups(g_pipe,0x00000001,vpp); g_pipe_vs=vpp; p_ups(g_pipe,0x00000002,atp); g_pipe_fs=atp; }
+    else glUseProgram(p->p);
+    state_dirty(); apply_state(ch); mb_reset(); TM(TM_TEX,(bind_textures(ch,0,vs), bind_textures(ch,4,fs))); g_up_drawn=0; }
   dlg_draw();
   if(g_zt && g_dlg.chosen_z && g_zt->gva==g_dlg.chosen_z && dlg_ao()) ao_proj_note(r);
   if(g_dlg.need && dlg_eval()){   /* DLSS ran before this draw: its framebuffer, program and state again */
@@ -3551,8 +3621,8 @@ static void rt_rescale(float ns){
   int n=0;
   /* parked aliases (gva ~0, alias set) come back through rt_texture without a size check: resize them too */
   for(int k=0;k<TEXH;k++) for(Tex* t=texh[k];t;t=t->next){ if(!t->is_rt || (t->gva==~0ull && !t->alias)) continue;
-    if(rt_sf(t->w,t->h)!=g_scale) continue;   /* stays at the guest size */
-    u32 ow=(u32)(t->w*old+0.5f), oh=(u32)(t->h*old+0.5f), nw=(u32)(t->w*ns+0.5f), nh=(u32)(t->h*ns+0.5f); if(!ow) ow=1; if(!oh) oh=1; if(!nw) nw=1; if(!nh) nh=1;
+    float osf=rt_sf_s(t->w,t->h,old), nsf=rt_sf_s(t->w,t->h,ns); if(osf==nsf) continue;   /* stays at its size (small targets at the guest size) */
+    u32 ow=(u32)(t->w*osf+0.5f), oh=(u32)(t->h*osf+0.5f), nw=(u32)(t->w*nsf+0.5f), nh=(u32)(t->h*nsf+0.5f); if(!ow) ow=1; if(!oh) oh=1; if(!nw) nw=1; if(!nh) nh=1;
     GLuint nt=0; glGenTextures(1,&nt); glBindTexture(GL_TEXTURE_2D,nt); glTexStorage2D(GL_TEXTURE_2D,1,t->f.ifmt,nw,nh);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
     int ds= t->f.depth && t->f.fmt==GL_DEPTH_STENCIL;
