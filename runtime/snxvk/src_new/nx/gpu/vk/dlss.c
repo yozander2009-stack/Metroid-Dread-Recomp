@@ -13,6 +13,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+/* Every command here goes through the recording thread's ring (record.c rec_Cmd*: the same arguments, recorded in
+   order with the frame, or made directly when the thread is off), so TAA, ambient occlusion, the motion vectors and
+   ReShade's depth copy no longer need the thread off: with it off Native Vulkan lost ~40% of its frame rate at 240.
+   DLSS still does (NGX writes into the command buffer itself, snxvk_glue.c) */
+#define vkCmdBeginRendering rec_CmdBeginRendering
+#define vkCmdEndRendering rec_CmdEndRendering
+#define vkCmdBeginTransformFeedbackEXT rec_CmdBeginTransformFeedbackEXT
+#define vkCmdEndTransformFeedbackEXT rec_CmdEndTransformFeedbackEXT
+#define vkCmdBindTransformFeedbackBuffersEXT rec_CmdBindTransformFeedbackBuffersEXT
+#define vkCmdBindDescriptorSets rec_CmdBindDescriptorSets
+#define vkCmdBindPipeline rec_CmdBindPipeline
+#define vkCmdBindVertexBuffers rec_CmdBindVertexBuffers
+#define vkCmdBlitImage rec_CmdBlitImage
+#define vkCmdClearColorImage rec_CmdClearColorImage
+#define vkCmdCopyImage rec_CmdCopyImage
+#define vkCmdDispatch rec_CmdDispatch
+#define vkCmdDraw rec_CmdDraw
+#define vkCmdPipelineBarrier2 rec_CmdPipelineBarrier2
+#define vkCmdPushConstants rec_CmdPushConstants
+#define vkCmdSetScissor rec_CmdSetScissor
+#define vkCmdSetViewport rec_CmdSetViewport
 #ifndef SWR_NO_NGX
 extern char g_exedir[1024];
 #endif
@@ -1180,7 +1201,7 @@ static void reshade_depth(Surf* z, u32 w, u32 h) {
    ao_den.comp, ao_apply.frag; the same maths as the OpenGL renderer's gpu_gl.c AO_*): view-space depth MIPs, the AO
    term with normals from depth, one denoise pass, then the scene target is multiplied by it (blend dst * src) before
    post effects, bloom and the HUD. The camera projection comes from the game's scene draws (vertex constant bank 3,
-   render.c -> vk_ao_note). All AO images stay in GENERAL. Recorded directly, so only with the recording thread off. */
+   render.c -> vk_ao_note). All AO images stay in GENERAL. Recorded through the recording thread's ring (rec_Cmd*). */
 #include "nx/gpu/vk/ao_pre_spv.h"
 #include "nx/gpu/vk/ao_main_spv.h"
 #include "nx/gpu/vk/ao_den_spv.h"
@@ -1188,7 +1209,7 @@ static void reshade_depth(Surf* z, u32 w, u32 h) {
 extern int g_opt_ao;
 static int g_ao_failed;
 static struct { float p00, p11, a, b; int clip, ok; } g_vproj;
-static int dl_ao(void) { return g_opt_ao > 0 && !g_ao_failed && !vk_rec_threaded(); }
+static int dl_ao(void) { return g_opt_ao > 0 && !g_ao_failed; }
 
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip);
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip) {
