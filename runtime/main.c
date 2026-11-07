@@ -348,7 +348,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"resolution")){ g_opt_resf=(float)atof(v); if(g_opt_resf<0.25f) g_opt_resf=0.25f; if(g_opt_resf>4) g_opt_resf=4; }
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
     else if(!strcmp(k,"shadow_resolution")){ int s=atoi(v); g_opt_shadow_res= s>=4? 4 : s>=2? 2 : 1; }
-    else if(!strcmp(k,"bloom_quality")) g_opt_bloom_hq= atoi(v)>0;
+    else if(!strcmp(k,"bloom_quality")){ g_opt_bloom_hq= atoi(v); if(g_opt_bloom_hq<0||g_opt_bloom_hq>2) g_opt_bloom_hq=0; }
     else if(!strcmp(k,"game_fxaa")) g_opt_game_fxaa= atoi(v)>0;
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
     else if(!strcmp(k,"low_priority_shader_compiler")) g_opt_cmp_low=atoi(v);
@@ -424,7 +424,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"shadow_resolution","1","1, 2 or 4: shadow map resolution on top of the resolution scale (sharper shadow edges; restart)"},
   {"game_fxaa","0","1 = the game's own FXAA edge smoothing (softer). 0 = off: crisper (the default; at 2x and above it is always off)"},
-  {"bloom_quality","0","0 = bloom and lens flares as the game draws them, 1 = smooth: spread over the screen with a cubic filter (no blocky steps at 2x and above)"},
+  {"bloom_quality","0","0 = bloom and lens flares as the game draws them, 1 = smooth: spread over the screen with a cubic filter (no blocky steps at 2x and above), 2 = off: no glow"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifndef SWR_RELEASE   /* the public release: no DLSS (GPL) and no frame generation in that build */
   {"dlss","0","1 = NVIDIA DLAA anti-aliasing (renderer=opengl or vulkan_native, RTX GPU, nvngx_dlss.dll in the game folder):\n;   DLSS at the internal resolution with the game's own motion vectors; the HUD is untouched. 0 = off"},

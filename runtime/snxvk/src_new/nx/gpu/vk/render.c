@@ -1747,7 +1747,9 @@ static VkDescriptorSet stage_set_(GpuChannel* ch, int stage, VkSh* s, Surf** rt,
         } else {
             t = vk_rt_prefiltered(t, st, want, num, rt, n); /* SWR: the glow passes' averaged copy (texture.c) */
             t = vk_rt_upsampled(t, st, want, num, rt, n);   /* SWR: bloom_quality=1, the glow spread smoothly (texture.c) */
-            view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
+            { int vk_rt_bloom_off(const Surf*, const ShTex*, VkImageViewType, int, Surf**, u32);
+              if (vk_rt_bloom_off(t, st, want, num, rt, n)) t = NULL; } /* SWR: bloom_quality=2, no glow: the null view */
+            view = t ? vk_tex_bind_view(t, want, x->tic, x->tsc, num) : VK_NULL_HANDLE;
         }
         if (want == VK_IMAGE_VIEW_TYPE_CUBE && t) { /* SWR test: SWR_TRACE_CUBE, which cube each sampler gets */
             static int tr = -1;

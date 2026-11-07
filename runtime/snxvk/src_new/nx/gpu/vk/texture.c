@@ -1480,9 +1480,19 @@ Surf* vk_tex_from_tic_raw(const u32* tic) {
    draw into a bigger target, is read through a copy of that target's real size, drawn with a cubic B-spline
    (hdr.c vk_upsample_draw): the game's soft glow without blocky steps. Remade only when the glow target was written */
 #define PRE_UP 30u /* pre_lv of the upsampled copy */
+/* SWR: bloom_quality=2, no bloom: a full-size pass reading one of the game's small glow targets (at most 480x270, 16:9,
+   40 pixels wide or more: not a luminance or exposure target) reads nothing (the null view: black), as gpu_gl.c does */
+int vk_rt_bloom_off(const Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
+    if (g_vk_bloom_hq != 2 || !t || !t->is_rt || want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int ||
+        t->layers != 1 || st->use != 1 || st->type != 1 || st->array || st->shadow || t->w > 480 || t->h > 270 || t->w < 40 ||
+        !n || !rt[0] || rt[0] == t || rt[0]->w <= 480 || rt[0]->h <= 270)
+        return 0;
+    int d = (int)(t->w * 9) - (int)(t->h * 16);
+    return (d < 0 ? -d : d) <= (int)t->w;
+}
 int vk_upsample_draw(Surf* src, Surf* dst);
 Surf* vk_rt_upsampled(Surf* t, const ShTex* st, VkImageViewType want, int num, Surf** rt, u32 n) {
-    if (!g_vk_bloom_hq || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+    if (g_vk_bloom_hq != 1 || !t || !t->is_rt || t->pre_lv || t->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
         want != VK_IMAGE_VIEW_TYPE_2D || num || t->f.depth || t->f.is_int || t->layers != 1 || st->use != 1 ||
         st->type != 1 || st->array || st->shadow || !n || !rt[0] || rt[0] == t || t->w > 480 || t->h > 270 ||
         t->sw != t->w || t->sh != t->h || !t->att)

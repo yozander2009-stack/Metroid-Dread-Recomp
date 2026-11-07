@@ -39,5 +39,5 @@ void swr_r_save(int at_exit) {
 #include "vk.h"
 void swr_settings_quality(int shadow_res, int bloom_hq) {
     g_vk_shadow_res = shadow_res >= 4 ? 4 : shadow_res >= 2 ? 2 : 1;
-    g_vk_bloom_hq = bloom_hq ? 1 : 0;
+    g_vk_bloom_hq = bloom_hq >= 0 && bloom_hq <= 2 ? bloom_hq : 0; /* 1 smooth, 2 off */
 }

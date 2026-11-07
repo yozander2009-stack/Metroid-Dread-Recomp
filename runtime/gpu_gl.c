@@ -2328,8 +2328,15 @@ static const char* UP_FS="#version 430 core\nlayout(binding=0) uniform sampler2D
   "  for(int y=0;y<4;y++) for(int x=0;x<4;x++){ vec4 s=texelFetch(t,clamp(i+ivec2(x-1,y-1),ivec2(0),sz-1),0); c+=w[x].x*w[y].y*s;\n"
   "    if(x>=1&&x<=2&&y>=1&&y<=2){ lo=min(lo,s); hi=max(hi,s); } }\n"
   "  o=clamp(c,lo,hi); }\n";
+/* bloom_quality=2: no bloom. A full-size pass that reads one of the game's small glow buffers (at most 480x270,
+   16:9, 40 pixels wide or more: not a luminance or exposure buffer) gets a black texture, so no glow is added */
+static int bloom_off_read(const Tex* t, const ShTex* st){
+  if(g_opt_bloom_hq!=2 || !t || !t->is_rt || t->target!=GL_TEXTURE_2D || t->f.depth || t->f.is_int || st->fetch_only ||
+     st->type!=1 || st->array || st->shadow || t->w>480 || t->h>270 || t->w<40) return 0;
+  int d=(int)(t->w*9)-(int)(t->h*16); if(d<0) d=-d; if(d>(int)t->w) return 0;
+  const Tex* o=g_rt[0]; return o && o!=t && o->w>480 && o->h>270; }
 static int upsample_read(const Tex* t, const ShTex* st, u32* W, u32* H){
-  if(!g_opt_bloom_hq || g_up_failed || g_scale<1.01f || !t || !t->is_rt || t->target!=GL_TEXTURE_2D || t->f.depth || t->f.is_int || st->fetch_only ||
+  if(g_opt_bloom_hq!=1 || g_up_failed || g_scale<1.01f || !t || !t->is_rt || t->target!=GL_TEXTURE_2D || t->f.depth || t->f.is_int || st->fetch_only ||
      st->type!=1 || st->array || st->shadow || t->w>480 || t->h>270 || RW(t)!=t->w) return 0;
   const Tex* o=g_rt[0]; if(!o || o==t || o->w<=480 || o->h<=270) return 0;   /* only the final spread over a full-size target: the glow chain's own steps stay the game's */
   u32 ow=RW(o), oh=RH(o); if(ow<t->w*3/2 || oh<t->h*3/2) return 0;   /* only where it is magnified */
@@ -2380,6 +2387,7 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     tids[i]=0;
     if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt)){ if(t->is_rt) dlg_read(t); GLuint use=t->id;
       if(want==GL_TEXTURE_2D && downsample_read(t,st)){ GLuint pf=rt_prefiltered(t); if(pf) use=pf; }
+      else if(want==GL_TEXTURE_2D && bloom_off_read(t,st)){ GLuint z=null_tex(GL_TEXTURE_2D); if(z) use=z; }
       else if(want==GL_TEXTURE_2D){ u32 uw, uh; if(upsample_read(t,st,&uw,&uh)){ GLuint u=rt_upsampled(t,uw,uh); if(u) use=u; } }
       { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_PREFILTER_DEBUG")!=NULL;
         if(dbg && t->is_rt && g_rt[0] && g_rt[0]!=t && (t->w>g_rt[0]->w || t->h>g_rt[0]->h)){ static u64 seen[64]; static int ns; u64 k=((u64)t->w<<48)^((u64)t->h<<32)^((u64)g_rt[0]->w<<16)^g_rt[0]->h^((u64)st->fetch_only<<63)^((u64)stage<<60);
