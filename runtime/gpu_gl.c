@@ -1624,7 +1624,7 @@ static void bind_gbufs(int stage, Sh* s){
 /* persistent ring for cbufs (GL 4.4 buffer_storage): memcpy + glBindBufferRange, no 64K realloc per update.
    fences per segment so we never overwrite something the GPU is still reading */
 #define UR_SEGS 4
-static GLuint g_ur; static u8* g_ur_ptr; static u32 g_ur_size, g_ur_head, g_ur_align=256; static u64 g_ur_abs; static GLsync g_ur_f[UR_SEGS];
+static GLuint g_ur; static u8* g_ur_ptr; static u8* g_ur_shadow; static u32 g_ur_size, g_ur_head, g_ur_align=256; static u64 g_ur_abs; static GLsync g_ur_f[UR_SEGS];
 static PFNGLFENCESYNCPROC p_fs; static PFNGLCLIENTWAITSYNCPROC p_cws; static PFNGLDELETESYNCPROC p_ds;
 static u64 st_ur_wait; static u32 g_ub_bound[64];
 
@@ -1641,7 +1641,11 @@ static void ur_init(void){
   u8* ptr= glGetError()==GL_NO_ERROR? (u8*)mbr(GL_UNIFORM_BUFFER,0,(GLsizeiptr)g_ur_size+65536,fl) : NULL;
   while(glGetError()!=GL_NO_ERROR){}
   if(!ptr) return;
-  g_ur=b; g_ur_ptr=ptr; }
+  g_ur=b; g_ur_ptr=ptr;
+  /* a CPU copy of the ring for the reuse compare: the mapped buffer is write-combined memory, and reading it back for
+     memcmp took a third of the GPU-submit thread in heavy scenes (MEASURED 2026-11-06, acid fight at 240 FPS, 1311 of
+     3962 samples in memcmp). SWR_NO_UR_SHADOW=1 = compare against the mapped memory as before */
+  if(!getenv("SWR_NO_UR_SHADOW")) g_ur_shadow=malloc((size_t)g_ur_size+65536); }
 
 static u32 ur_alloc(u32 sz){
   u32 need=(sz+g_ur_align-1)/g_ur_align*g_ur_align, seg=g_ur_size/UR_SEGS;
@@ -1665,9 +1669,11 @@ static void upload_cbufs_ring(int stage, Sh* s){
     if(s->si.cbuf_max[i] && sz>s->si.cbuf_max[i]) sz=s->si.cbuf_max[i];   /* only the bytes the shader reads */
     UrC* e=&urc[(u32)((a>>4)^(a>>16)^(a>>28))&4095]; u32 off;
     /* same submit/address, not GPU-written, ring hasn't wrapped: reuse */
-    if(a && e->a==a && e->epoch==g_submit_epoch && e->sz>=sz && g_ur_abs-e->abs<g_ur_size/2 && !gpu_mem_dirty_since(e->gen,a,sz) && gmem_ptr(a,sz) && !memcmp(g_ur_ptr+e->off,gmem_ptr(a,sz),sz)){ off=e->off; st_cb_skip++; }
-    else { st_cb_bytes+=sz; off=ur_alloc(sz); u8* dst=g_ur_ptr+off; u8* src= a? gmem_ptr(a,sz) : NULL;
+    if(a && e->a==a && e->epoch==g_submit_epoch && e->sz>=sz && g_ur_abs-e->abs<g_ur_size/2 && !gpu_mem_dirty_since(e->gen,a,sz) && gmem_ptr(a,sz) && !memcmp((g_ur_shadow? g_ur_shadow : g_ur_ptr)+e->off,gmem_ptr(a,sz),sz)){ off=e->off; st_cb_skip++; }
+    else { st_cb_bytes+=sz; off=ur_alloc(sz); u8* src= a? gmem_ptr(a,sz) : NULL;
+      u8* dst= g_ur_shadow? g_ur_shadow+off : g_ur_ptr+off;
       if(src) memcpy(dst,src,sz); else if(a) gmem_read(a,dst,sz); else memset(dst,0,sz);
+      if(g_ur_shadow) memcpy(g_ur_ptr+off,dst,sz);
       if(a){ e->a=a; e->sz=sz; e->epoch=g_submit_epoch; e->gen=g_gw_gen; e->off=off; e->abs=g_ur_abs; } }
     if(g_ub_bound[bb+i]!=off+1){ glBindBufferRange(GL_UNIFORM_BUFFER,bb+i,g_ur,off,65536); g_ub_bound[bb+i]=off+1; } } }
 
