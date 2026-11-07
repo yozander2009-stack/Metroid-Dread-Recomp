@@ -15,6 +15,9 @@ static HWND g_hwnd; static HDC g_hdc; static HGLRC g_ctx, g_wctx;
 static HWND g_glwnd; static int g_want_vk;   /* renderer=vulkan: GL renders on the hidden g_glwnd, Vulkan presents on g_hwnd */
 static volatile int g_ww=1280, g_wh=720; static u64 keys_held,keys_tapped;static int test_tap_sample; static int g_fullscreen=0, g_want_fs=1;
 static WINDOWPLACEMENT g_wp={sizeof(WINDOWPLACEMENT)};
+/* test: SWR_TEST_WINDOW_AT=x,y creates the windows at that desktop position, so OpenGL starts on the GPU of that monitor (OpenGL always uses the GPU driving the window's screen) */
+static int test_window_at(int* x, int* y){ const char* e=getenv("SWR_TEST_WINDOW_AT"); return e && sscanf(e,"%d,%d",x,y)==2; }
+
 static int g_seconds=0; static char g_shot[1024]; static u64 g_start; static volatile int g_shot_req;
 static char g_script[8192];
 static HANDLE g_ready;
@@ -359,7 +362,8 @@ static void win_thread(void* arg){
   wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="MetroidDreadWnd";
   RegisterClassA(&wc);
   RECT r={0,0,1280,720}; AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
-  g_hwnd=CreateWindowA("MetroidDreadWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
+  { int wx=CW_USEDEFAULT, wy=CW_USEDEFAULT; test_window_at(&wx,&wy);
+  g_hwnd=CreateWindowA("MetroidDreadWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),wx,wy,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL); }
   { typedef UINT (WINAPI *GDFW)(HWND); GDFW gd=(GDFW)(void*)GetProcAddress(GetModuleHandleA("user32.dll"),"GetDpiForWindow");
     if(gd && g_hwnd) LOG("display: Windows scaling %u%% (the game works in real pixels)\n",gd(g_hwnd)*100/96); }
   if(arg){   /* front end first, in this window; the game continues in it after Play */
@@ -387,7 +391,7 @@ static void win_thread(void* arg){
   /* a window with a GL pixel format can't take a Vulkan swapchain reliably: with renderer=vulkan the GL
      context lives on a hidden window and the visible one is left to Vulkan */
   if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidDreadGL"; gc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH);   /* own class: its size must not reach wndproc */
-    RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidDreadGL","Metroid Dread GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
+    RegisterClassA(&gc); { int gx=0, gy=0; test_window_at(&gx,&gy); g_glwnd=CreateWindowA("MetroidDreadGL","Metroid Dread GL",WS_POPUP,gx,gy,64,64,NULL,NULL,hi,NULL); } }
   g_hdc=GetDC(g_glwnd? g_glwnd : g_hwnd);
   { extern int g_snxvk_want; if(!g_snxvk_want) set_pixel_format(g_hdc); }   /* native Vulkan: no GL pixel format on its window (set later if it falls back) */
   if(g_want_fs) set_fullscreen(1);
