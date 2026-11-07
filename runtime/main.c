@@ -117,7 +117,7 @@ int g_opt_aniso=0;         /* anisotropy: 0 = the game's, else at least that muc
 int g_opt_tex_threads=0;   /* texture_threads, read by gpu_gl.c pf_run: 0 auto, 1 off */
 int g_opt_ff=0, g_opt_ff_speed=3;   /* fast_forward (Tab / L3+R3 toggles a faster game clock), fast_forward_speed */
 int g_opt_volume=100;      /* [Audio] volume: master output level in percent (audio.c), live */
-float g_opt_resf=1.0f; int g_opt_shadows=1; int g_opt_shadow_res=1; int g_opt_bloom_hq=0; int g_opt_cmp_low=1; int g_opt_resdyn=0; int g_opt_prof=0; float g_opt_resmin=0.6f;
+float g_opt_resf=1.0f; int g_opt_shadows=1; int g_opt_shadow_res=1; int g_opt_bloom_hq=0; int g_opt_game_fxaa=0; int g_opt_cmp_low=1; int g_opt_resdyn=0; int g_opt_prof=0; float g_opt_resmin=0.6f;
 static char g_hints_path[1200];
 
 /* ============================================================ exports for the generated code */
@@ -349,6 +349,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
     else if(!strcmp(k,"shadow_resolution")){ int s=atoi(v); g_opt_shadow_res= s>=4? 4 : s>=2? 2 : 1; }
     else if(!strcmp(k,"bloom_quality")) g_opt_bloom_hq= atoi(v)>0;
+    else if(!strcmp(k,"game_fxaa")) g_opt_game_fxaa= atoi(v)>0;
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
     else if(!strcmp(k,"low_priority_shader_compiler")) g_opt_cmp_low=atoi(v);
     else if(!strcmp(k,"dynamic_resolution")) g_opt_resdyn=atoi(v);
@@ -422,6 +423,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"prebuild_shaders","0","1 = before the game draws, build every shader the game ships (romfs/system/shd) into the\n;   shader cache, so they don't compile the first time they're used. The first start takes longer; later starts only\n;   look at changed files. Native Vulkan: the game's shaders are translated in the background at start and the\n;   pipeline recipes (vulkan_native/pipeline_recipes.bin) made from them"},
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"shadow_resolution","1","1, 2 or 4: shadow map resolution on top of the resolution scale (sharper shadow edges; restart)"},
+  {"game_fxaa","0","1 = the game's own FXAA edge smoothing (softer). 0 = off: crisper (the default; at 2x and above it is always off)"},
   {"bloom_quality","0","0 = bloom and lens flares as the game draws them, 1 = smooth: spread over the screen with a cubic filter (no blocky steps at 2x and above)"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifndef SWR_RELEASE   /* the public release: no DLSS (GPL) and no frame generation in that build */
@@ -553,17 +555,17 @@ static void env_switch(const char* name, int on){
   if(on) setenv(name,"1",1); else unsetenv(name);
 #endif
   }
-/* The game's own FXAA (a post pass with 1x texel steps from its constants) at an internal resolution above 1x smears
-   edges in steps of whole guest pixels: stair-stepped, grainy edges on native Vulkan at 2x/3x. OpenGL never ran it
-   (its translator drops texel offsets on explicit-LOD reads, so all its neighbour reads are the centre). Above 1x
-   the supersampling already smooths the edges: the game's FXAA is switched off through SWR_NO_FXAA (theboy181's
-   flag, read by the game at 0x8153888), and back on at 1x. A SWR_NO_FXAA set from outside is left alone */
+/* The game's own FXAA (a post pass with 1x texel steps from its constants). Off by default ([Graphics] game_fxaa=0):
+   at 1x the picture is crisper without it (the owner's call, 2026-11-07), and above 1x it smears edges in steps of whole
+   guest pixels (stair-stepped edges on native Vulkan at 2x/3x), so it is always off there. Switched through SWR_NO_FXAA
+   (theboy181's flag, read by the game when its renderer starts at 0x8153888). A SWR_NO_FXAA set from outside is left
+   alone */
 static void game_fxaa_sync(void){
-  static int user=-1, was=-1; extern float g_opt_resf;
-  if(user<0) user= getenv("SWR_NO_FXAA")!=NULL || getenv("SWR_GAME_FXAA_ALWAYS")!=NULL;
+  static int user=-1, was=-1; extern float g_opt_resf; extern int g_opt_game_fxaa;
+  if(user<0) user= getenv("SWR_NO_FXAA")!=NULL;
   if(user) return;
-  int off= g_opt_resf>1.001f;
-  if(off!=was){ was=off; env_switch("SWR_NO_FXAA",off); if(off) LOG("game FXAA off above 1x (internal resolution x%.2f)\n",g_opt_resf); } }
+  int off= !g_opt_game_fxaa || g_opt_resf>1.001f;
+  if(off!=was){ was=off; env_switch("SWR_NO_FXAA",off); LOG("game FXAA %s\n",off? "off" : "on (game_fxaa=1, internal resolution 1x)"); } }
 const char* settings_get(const char* k, const char* def){ return ini_get(k,def); }
 static void settings_drain(void){
   char q[32][2][256]; int n; pm_lock(&g_setq_lock); n=g_setq_n; memcpy(q,g_setq,sizeof q); g_setq_n=0; pm_unlock(&g_setq_lock);

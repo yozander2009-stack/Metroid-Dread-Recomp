@@ -842,8 +842,8 @@ static void aw_write(const char* path, const void* d, size_t n, int append);
 
 /* common epilogue stuff: alpha test for FS, Y flip for VS */
 
-#define TR_VERSION 0x5174u   /* bump when the GLSL output changes, invalidates caches */
-#define TRANSLATED_PATH "shader_cache/translated_v5174.bin"
+#define TR_VERSION 0x5175u   /* bump when the GLSL output changes, invalidates caches */
+#define TRANSLATED_PATH "shader_cache/translated_v5175.bin"
 typedef struct {u32 idx,off,value;} TransDep;
 typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep dep[128];struct Translated*next;} Translated;
 static Translated* translated[512];static u32 translated_count,translated_hits;
@@ -3473,7 +3473,7 @@ static void APIENTRY gl_dbg(GLenum src, GLenum type, GLuint id, GLenum sev, GLsi
 /* ============================================================ shader pack
    every new program's GLSL (driver independent) gets appended to shader_cache/shader_pack.bin. at startup
    whatever isn't in the binary cache yet is compiled in the background. the pack can be moved to another PC */
-#define PACK_PATH "shader_cache/shader_pack_v3.bin"   /* versioned with the translator */
+#define PACK_PATH "shader_cache/shader_pack_v4.bin"   /* versioned with the translator */
 static u64* pk_keys; static u32 pk_n, pk_cap;
 
 static int pk_has(u64 k){ if(!pk_cap) return 0; u32 i=(u32)(k^(k>>29))&(pk_cap-1); while(pk_keys[i]){ if(pk_keys[i]==k) return 1; i=(i+1)&(pk_cap-1); } return 0; }
@@ -3577,7 +3577,7 @@ static void prebuild_shaders(void){
   while(plat_dir_next(&d)){ size_t l=strlen(d.name); if(d.is_dir || l<7 || l>=256 || strcmp(d.name+l-7,".bshdat")) continue;
     if(nf==cap){ cap= cap? cap*2 : 512; fl=realloc(fl,cap*sizeof *fl); } snprintf(fl[nf].name,256,"%s",d.name); fl[nf].size=d.size; nf++; }
   plat_dir_close(&d);
-  char donep[200]; snprintf(donep,sizeof donep,"shader_cache/prebuilt_%s.txt",g_pc_tag);
+  char donep[200]; snprintf(donep,sizeof donep,"shader_cache/prebuilt_%s_%x.txt",g_pc_tag,TR_VERSION);   /* a new translation pre-builds again */
   char* done=NULL; { FILE* f=fopen(donep,"rb"); if(f){ fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); done=calloc(1,(size_t)n+2); done[0]='\n'; if(fread(done+1,1,(size_t)n,f)){} fclose(f); } }
   u32 todo=0; for(u32 i=0;i<nf;i++){ char ln[300]; snprintf(ln,sizeof ln,"\n%s %llu\n",fl[i].name,(unsigned long long)fl[i].size);
     if(done && strstr(done,ln)) fl[i].size=~0ull; else todo++; }   /* size ~0: already built */

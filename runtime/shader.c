@@ -881,11 +881,17 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
       /* offset from a register. GLSL requires a constant expression here; NVIDIA lets it slide, AMD/Mesa
          reject the shader. when the driver refuses (g_texoff_emul, see gl_selftest) add it to the coord
          in level 0 texels instead */
-      if(ofs && !dc && dim==2 && !lod && !bias){
+      /* texel offsets (AOFFI) with an explicit level or a bias too: the game's FXAA reads its neighbours with LZ +
+         offset, and without them every neighbour read was the centre texel (FXAA did nothing on OpenGL). GLSL wants a
+         constant offset; NVIDIA takes a register one, other drivers refuse it (g_texoff_emul): then it is added to the
+         coordinates in texels of the level read */
+      if(ofs && !dc && dim==2){
         extern int g_texoff_emul;
-        if(g_texoff_emul) smp= array? T("texture(tex%d, %s + vec3(vec2(ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))/vec2(textureSize(tex%d,0).xy), 0.0))",s,cc,ofs,ofs,s)
-                                    : T("texture(tex%d, %s + vec2(ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))/vec2(textureSize(tex%d,0)))",s,cc,ofs,ofs,s);
-        else smp=T("textureOffset(tex%d, %s, ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))",s,cc,ofs,ofs); }
+        const char* o=T("ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4))",ofs,ofs);
+        if(g_texoff_emul){ const char* lv= lod? T("int(%s)",lod) : "0";
+          const char* moved= array? T("%s + vec3(vec2(%s)/vec2(textureSize(tex%d,%s).xy), 0.0)",cc,o,s,lv) : T("%s + vec2(%s)/vec2(textureSize(tex%d,%s))",cc,o,s,lv);
+          smp= lod? T("textureLod(tex%d, %s, %s)",s,moved,lod) : bias? T("texture(tex%d, %s, %s)",s,moved,bias) : T("texture(tex%d, %s)",s,moved); }
+        else smp= lod? T("textureLodOffset(tex%d, %s, %s, %s)",s,cc,lod,o) : bias? T("textureOffset(tex%d, %s, %s, %s)",s,cc,o,bias) : T("textureOffset(tex%d, %s, %s)",s,cc,o); }
     }
     emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++; write_masked(c,d,mask? mask : 15,"t_"); c->indent--; emitl(c,"}");
     break; }
