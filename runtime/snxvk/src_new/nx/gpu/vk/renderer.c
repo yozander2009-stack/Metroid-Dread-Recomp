@@ -555,6 +555,7 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
         }
         memcpy(was, is, sizeof was);
         last_present_ns = now_ns;
+        { void swr_vk_dump_rts(void); swr_vk_dump_rts(); } /* SWR test: SWR_VK_DUMP_RTS_AT=N */
         g_vk_present++;
         stats_frame(now_ns);
         g_bk[0] = plat_ns();
@@ -973,3 +974,70 @@ const Renderer vk_renderer = {
     .prepare = vk_pipeline_prepare,
 };
 const Renderer* g_renderer = &vk_renderer;
+
+/* SWR test: SWR_VK_DUMP_RTS_AT=N writes every colour render target used around present N as
+   captures/vkrt_<gva>_<w>x<h>.ppm (RGBA8 by a blit, at the image's own size), to compare with the OpenGL renderer's
+   dump (gpu_gl.c dump_rts, SWR_DUMP_RTS_AT_FRAME + SWR_DUMP_FULL=1) */
+int vk_rt_list(Surf** out, int max);
+void swr_vk_dump_rts_now(void);
+void swr_vk_dump_rts(void) {
+    static long at = -2;
+    if (at == -2) { const char* e = getenv("SWR_VK_DUMP_RTS_AT"); at = e ? atol(e) : -1; }
+    if (at < 0 || g_vk_present != (u32)at) return;
+    swr_vk_dump_rts_now();
+}
+void swr_vk_dump_rts_now(void) {
+    Surf* l[64];
+    int n = vk_rt_list(l, 64);
+    plat_mkdir("captures");
+    for (int i = 0; i < n; i++) {
+        char p[256];
+        snprintf(p, sizeof p, "captures/vkrt_%llx_%ux%u_f%x", (unsigned long long)l[i]->gva, l[i]->w, l[i]->h, l[i]->fkey);
+        surf_save(l[i], 0, 0, l[i]->sw, l[i]->sh, 0, p);
+    }
+    LOG("vulkan: %d render targets written to captures/ (present %u)\n", n, g_vk_present);
+}
+
+/* SWR test: SWR_VK_CUBE_DUMP_AT=N writes each cube texture bound at present N as captures/cube_<gva>_vk.bin (level 0
+   of its six faces, raw blocks) and captures/cube_<gva>_mem.bin (its guest memory, layer stride x 6) */
+void swr_vk_dump_cube(Surf* t);
+void swr_vk_dump_cube(Surf* t) {
+    static long at = -2;
+    static u64 done[16];
+    static int nd;
+    if (at == -2) { const char* e = getenv("SWR_VK_CUBE_DUMP_AT"); at = e ? atol(e) : -1; }
+    if (at < 0 || g_vk_present != (u32)at || nd >= 16) return;
+    for (int i = 0; i < nd; i++)
+        if (done[i] == t->gva) return;
+    done[nd++] = t->gva;
+    u32 bw = (t->w + 3) / 4, bh = (t->h + 3) / 4;
+    u64 face = (u64)bw * bh * 16, n = face * 6;
+    VkBuffer buf;
+    u8* p = vk_readback_buffer(n, &buf);
+    if (!p) return;
+    vk_render_end();
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy c = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {t->w, t->h, 1}};
+    rec_CmdCopyImageToBuffer(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                           .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    rec_CmdPipelineBarrier2(cb, &di);
+    vk_finish();
+    vk_readback_ready();
+    plat_mkdir("captures");
+    char fn[256];
+    snprintf(fn, sizeof fn, "captures/cube_%llx_%ux%u_vk.bin", (unsigned long long)t->gva, t->w, t->h);
+    FILE* f = fopen(fn, "wb");
+    if (f) { fwrite(p, 1, n, f); fclose(f); }
+    u8* m = gmem_host(t->gva, t->size);
+    snprintf(fn, sizeof fn, "captures/cube_%llx_%ux%u_mem.bin", (unsigned long long)t->gva, t->w, t->h);
+    f = fopen(fn, "wb");
+    if (f && m) fwrite(m, 1, t->size, f);
+    if (f) fclose(f);
+    LOG("cube dump: %llx %ux%u size %llu levels %u layers %u layer size %llu bh %u bd %u fbpp %u fbw %u fbh %u\n", (unsigned long long)t->gva, t->w, t->h, (unsigned long long)t->size, t->levels, t->layers, (unsigned long long)t->layer_size, t->bh, t->bd, t->f.bpp, t->f.bw, t->f.bh);
+}

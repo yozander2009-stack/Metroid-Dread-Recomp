@@ -3,6 +3,7 @@
    (no LLVM), FFmpeg video decode, and the shipped-shader pass (its loader and RomFS readers aren't ours). */
 #include "snx_settings.h"
 #include <stdlib.h>
+#include <string.h>
 void swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, int recording_thread) {
     g_settings.resolution_scale = resolution;
     g_settings.shadows = shadows;
@@ -15,6 +16,8 @@ void swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, 
     /* diagnostics (tests): GPU time per rendering pass, and what is copied between guest memory and buffers */
     g_settings.gpu_profile = getenv("SWR_VK_GPU_PROFILE") != NULL;
     g_settings.buffer_copy_stats = getenv("SWR_VK_BUFFER_STATS") != NULL;
+    { const char* t = getenv("SWR_VK_TRACE_TARGET"); /* tests: gpu_trace_target=address[:bytes] (render.c) */
+      if (t) { strncpy(g_settings.gpu_trace_target, t, sizeof g_settings.gpu_trace_target - 1); } }
 }
 int swr_settings_recording_thread(void) { return g_settings.vulkan_recording_thread; }
 /* [Graphics] prebuild_shaders: the shipped-shader pass over the RomFS's system/shd (snxvk_glue.c romfs_files), in the

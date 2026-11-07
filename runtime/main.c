@@ -553,6 +553,17 @@ static void env_switch(const char* name, int on){
   if(on) setenv(name,"1",1); else unsetenv(name);
 #endif
   }
+/* The game's own FXAA (a post pass with 1x texel steps from its constants) at an internal resolution above 1x smears
+   edges in steps of whole guest pixels: stair-stepped, grainy edges on native Vulkan at 2x/3x. OpenGL never ran it
+   (its translator drops texel offsets on explicit-LOD reads, so all its neighbour reads are the centre). Above 1x
+   the supersampling already smooths the edges: the game's FXAA is switched off through SWR_NO_FXAA (theboy181's
+   flag, read by the game at 0x8153888), and back on at 1x. A SWR_NO_FXAA set from outside is left alone */
+static void game_fxaa_sync(void){
+  static int user=-1, was=-1; extern float g_opt_resf;
+  if(user<0) user= getenv("SWR_NO_FXAA")!=NULL || getenv("SWR_GAME_FXAA_ALWAYS")!=NULL;
+  if(user) return;
+  int off= g_opt_resf>1.001f;
+  if(off!=was){ was=off; env_switch("SWR_NO_FXAA",off); if(off) LOG("game FXAA off above 1x (internal resolution x%.2f)\n",g_opt_resf); } }
 const char* settings_get(const char* k, const char* def){ return ini_get(k,def); }
 static void settings_drain(void){
   char q[32][2][256]; int n; pm_lock(&g_setq_lock); n=g_setq_n; memcpy(q,g_setq,sizeof q); g_setq_n=0; pm_unlock(&g_setq_lock);
@@ -972,6 +983,7 @@ int swr_main(int argc, char** argv){
     { static int lf=-1, still; if(g_vt_on){ if(g_frames!=lf){ lf=g_frames; still=0; } else if(++still==180){ vt_set(0); WARN("smooth recording: the game stopped presenting images; back to the normal clock (recording continues)\n"); } } else { lf=-1; still=0; } }
     frontend_frame();
     if(++tick%300==0) save_hints();
+    game_fxaa_sync();
     { extern void snxvk_tick(int); snxvk_tick(tick); }   /* native Vulkan: saves its pipeline cache every 5 s */
     /* dump thread states to threads.txt every 15s, useful when something hangs */
     if(tick%900==0){ extern __thread FILE* g_log_redirect; extern void kernel_dump_threads(void); char p[1200]; snprintf(p,sizeof p,"%sthreads.txt",g_exedir);

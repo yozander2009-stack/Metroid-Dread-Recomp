@@ -346,6 +346,7 @@ static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), 
   u32 depth3d= t->target==GL_TEXTURE_3D? t->d : 1;
   u64 layer_size=0; for(u32 l=0;l<t->levels;l++) layer_size+=bl_level_size(t->w,t->h,depth3d,f,t->bh,t->bd,l,NULL);
   if(t->bl && layers>1){ u64 al=512ull<<t->bh; layer_size=(layer_size+al-1)/al*al; }
+  if(t->target==GL_TEXTURE_CUBE_MAP && getenv("SWR_TRACE_CUBE")) LOG("cube upload: %llx %ux%u levels %u layer size %llu bh %u bd %u\n",(unsigned long long)t->gva,t->w,t->h,t->levels,(unsigned long long)layer_size,t->bh,t->bd);
   glBindTexture(t->target,t->id);
   glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
   int was_zero3d= t->target==GL_TEXTURE_3D? t->zero3d : 0; (void)was_zero3d;
@@ -938,9 +939,12 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   GLenum ty= stage==ST_VS? GL_VERTEX_SHADER : stage==ST_FS? GL_FRAGMENT_SHADER : stage==ST_GS? GL_GEOMETRY_SHADER : stage==ST_CS? GL_COMPUTE_SHADER : stage==ST_TCS? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER;
   (void)ty; if(!src) s->failed=1;
   if(stage==ST_VS) src=dlg_vs_xfb(src);   /* DLAA: positions captured for motion vectors */
+  { const char* rd=getenv("SWR_GLSL_REPLACE_DIR");   /* test: <dir>/shader_<hash>_<stage>.glsl replaces the translation */
+    if(rd && src){ char pth[1024]; snprintf(pth,sizeof pth,"%s/shader_%016llx_%d.glsl",rd,(unsigned long long)h,stage); FILE* f=fopen(pth,"rb");
+      if(f){ fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char* t=malloc(n+1); n=(long)fread(t,1,n,f); t[n]=0; fclose(f); free(src); src=t; LOG("shader %016llx: GLSL replaced from %s\n",(unsigned long long)h,pth); } } }
   s->src=src; src=NULL;   /* only compiled if it isn't in the disk cache */
   s->xfb= stage==ST_VS && s->src && strstr(s->src,"xfb_offset")!=NULL;
-  { static int dump=-1; if(dump<0){ dump=getenv("SWR_DUMP_SHADERS")!=NULL; } if(dump && s->src){ char pth[256]; snprintf(pth,sizeof pth,"shader_%016llx_%d.glsl",(unsigned long long)h,stage); FILE* f=fopen(pth,"w"); if(f){ fputs(s->src,f); fclose(f);} } }
+  { static int dump=-1; if(dump<0){ dump=getenv("SWR_DUMP_SHADERS")!=NULL; } if(dump && s->src){ char pth[256]; snprintf(pth,sizeof pth,"shader_%016llx_%d_%06llx.glsl",(unsigned long long)h,stage,(unsigned long long)(gva_code&0xffffff)); FILE* f=fopen(pth,"w"); if(f){ fputs(s->src,f); fclose(f);} } }
   free(src); free(tmp);
   s->next=shh[h&1023]; shh[h&1023]=s; return s; }
 
@@ -2418,6 +2422,8 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     if(srgb_raw) tsc[7]|=0x80000000u;
     if(mb) sids[i]=sampler_get(tsc); else glBindSampler(unit,sampler_get(tsc));
     /* TIC swizzle */
+    if(t && want==GL_TEXTURE_CUBE_MAP && getenv("SWR_TRACE_CUBE")){ static u64 seen[64]; static int ns; int k=0; for(;k<ns&&seen[k]!=t->gva;k++);
+      if(k==ns && ns<64){ seen[ns++]=t->gva; LOG("cube: gva %llx %ux%u levels %u tic0 %08x fmt %02x swz %u%u%u%u target %x want %x view %u is_rt %d bh %u bl %d tic3 %08x\n",(unsigned long long)t->gva,t->w,t->h,t->levels,tic[0],tic[0]&0x7F,(tic[0]>>19)&7,(tic[0]>>22)&7,(tic[0]>>25)&7,(tic[0]>>28)&7,t->target,want,t->view,t->is_rt,t->bh,t->bl,tic[3]); } }
     if(t && (t->target==want || (t->view && t->view_target==want))){ static const GLint sw[8]={GL_ZERO,GL_ZERO,GL_RED,GL_GREEN,GL_BLUE,GL_ALPHA,GL_ONE,GL_ONE};
       GLint m[4]={sw[(tic[0]>>19)&7],sw[(tic[0]>>22)&7],sw[(tic[0]>>25)&7],sw[(tic[0]>>28)&7]};
       /* RTs: only apply swizzles with constant 0/1 (e.g. an R8 HUD mask read as 1,1,1,R). pure reorders are
@@ -2690,6 +2696,7 @@ static void lighting_payload(Sh* fs){
   if(lp_count>=512)return;LightingPayload*p=&lp_current[lp_count++];memset(p,0,sizeof *p);p->hash=fs->hash;p->addr=g_cb.cb[4][3];
   u32 n=g_cb.cbsize[4][3];if(n>sizeof p->values)n=sizeof p->values;p->size=n;if(p->addr&&n)gmem_read(p->addr,p->values,n);
 }
+static void dump_rts(void);
 void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance, u32 instances){
   u32* r=ch->r3d; g_draws++;
   if(g_lfn && !(g_draws&15)) lsfg_pump();   /* push pending generated frames out on time even mid-frame */
@@ -2719,6 +2726,15 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   g_last_r3d=r;
   for(int i=1;i<6;i+=4){ u32 cfg=r[0x800+i*0x10]; if(i!=1 && !(cfg&1)) continue; u64 addr=code+r[0x801+i*0x10];
     if(i==1) TM(TM_SH,vs=shader_get(addr,ST_VS,attr_int,attr_sint)); else TM(TM_SH,fs=fs_get_keyed(ch,addr)); }
+  { /* test: SWR_STOP_AFTER_FS=hex, as in snxvk render.c */
+    static long stop_fs=-2, reset_fs=-1, stop_at=-1; static int stop_state, active, done, last_reset;
+    if(stop_fs==-2){ const char* e=getenv("SWR_STOP_AFTER_FS"); stop_fs= e? strtol(e,0,16) : -1; e=getenv("SWR_STOP_RESET_FS"); reset_fs= e? strtol(e,0,16) : -1;
+      e=getenv("SWR_STOP_AT_FRAME"); stop_at= e? atol(e) : -1; }   /* only in the first frame from this guest frame on, then the targets are dumped */
+    if(stop_fs>=0){ extern int g_frames; u64 fsa= (r[0x850]&1)? ((code+r[0x801+5*0x10])&0xffffff) : ~0ull; int rs= ((code+r[0x801+5*0x10])&0xffffff)==(u64)reset_fs;
+      if(rs && !last_reset){ stop_state=0; active= stop_at<0 || (!done && g_frames>=stop_at); } last_reset=rs;
+      int me= fsa==(u64)stop_fs;
+      if(me && stop_state==0) stop_state=1; else if(!me && stop_state==1){ stop_state=2; if(active && stop_at>=0 && !done){ done=1; dump_rts(); } }
+      if(stop_state==2 && active) return; } }
   if((r[0x820]|r[0x830]|r[0x840])&1){ /* tess / geometry: not translated yet, draw with just VS+FS */
     static u64 gseen[16]; static int ng; u64 ga=code+r[0x841]; int k=0; for(;k<ng;k++) if(gseen[k]==ga) break;
     if(k==ng && ng<16){ gseen[ng++]=ga; LOG("gpu: draw uses unsupported stages:%s%s%s (gs at %llx, rt0 %ux%u layers %u 3d %u) - drawn without them\n",(r[0x820]&1)?" TessCtrl":"",(r[0x830]&1)?" TessEval":"",(r[0x840]&1)?" Geometry":"",
@@ -3430,13 +3446,16 @@ static void dump_rts(void){
   for(int i=0;i<n;i++){ Tex* t=list[i]; u32 w=RW(t), h=RH(t); if(!w||!h||w>8192||h>8192) continue;
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,t->id,0);
     if(glCheckFramebufferStatus(GL_READ_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE){ LOG("  rt %llx %ux%u fmt=%x: cannot be read\n",(unsigned long long)t->gva,t->w,t->h,t->fkey); continue; }
-    u8* px=malloc((size_t)w*h*4); glReadBuffer(GL_COLOR_ATTACHMENT0); glPixelStorei(GL_PACK_ALIGNMENT,1); glReadPixels(0,0,(GLsizei)w,(GLsizei)h,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    u8* px=malloc((size_t)w*h*4); glReadBuffer(GL_COLOR_ATTACHMENT0); glPixelStorei(GL_PACK_ALIGNMENT,1);
+    /* read as floats and clamped here: a float target read as bytes isn't clamped (GL_CLAMP_READ_COLOR is FIXED_ONLY) */
+    { float* fp=malloc((size_t)w*h*16); glReadPixels(0,0,(GLsizei)w,(GLsizei)h,GL_RGBA,GL_FLOAT,fp);
+      for(size_t k=0;k<(size_t)w*h*4;k++){ float v=fp[k]; v= v!=v? 0.f : v<0.f? 0.f : v>1.f? 1.f : v; px[k]=(u8)(v*255.f+0.5f); } free(fp); }
     u64 sr=0,sg=0,sb=0,sa=0,nz=0; size_t np=(size_t)w*h;
     for(size_t k=0;k<np;k++){ u8* q=px+k*4; sr+=q[0]; sg+=q[1]; sb+=q[2]; sa+=q[3]; if(q[0]+q[1]+q[2]>12) nz++; }
     LOG("  rt %llx %ux%u fmt=%x used=%u  average color=(%llu,%llu,%llu,a%llu)  non-black=%llu%%\n",(unsigned long long)t->gva,t->w,t->h,t->fkey,t->last_used,
       (unsigned long long)(sr/np),(unsigned long long)(sg/np),(unsigned long long)(sb/np),(unsigned long long)(sa/np),(unsigned long long)(nz*100/np));
     /* downscaled, max 480 wide */
-    u32 step=(w+479)/480; if(!step) step=1; u32 ow=w/step, oh=h/step; char path[256]; snprintf(path,sizeof path,"captures/rt_%d_%02d_%llx_%ux%u.ppm",ndump,i,(unsigned long long)t->gva,t->w,t->h);
+    u32 step=(w+479)/480; if(!step || getenv("SWR_DUMP_FULL")) step=1;   /* SWR_DUMP_FULL=1: at the full size (tests) */ u32 ow=w/step, oh=h/step; char path[256]; snprintf(path,sizeof path,"captures/rt_%d_%02d_%llx_%ux%u.ppm",ndump,i,(unsigned long long)t->gva,t->w,t->h);
     FILE* f=fopen(path,"wb"); if(f){ fprintf(f,"P6\n%u %u\n255\n",ow,oh); for(u32 y=0;y<oh;y++) for(u32 x=0;x<ow;x++){ u8* q=px+(((size_t)(h-1-y*step))*w+x*step)*4; fwrite(q,1,3,f); } fclose(f); }
     free(px); }
   glBindFramebuffer(GL_READ_FRAMEBUFFER,0); glDeleteFramebuffers(1,&fb);

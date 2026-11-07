@@ -475,6 +475,9 @@ void vk_render_clear(GpuChannel* ch, u32 v) {
     if (g_rp.zt && g_rp.zt->layers < layers) layers = g_rp.zt->layers;
     if (layer >= layers) return;
     VkClearRect rect = {{{0, 0}, g_rp.ext}, layer, 1};
+    if (mask && slot < g_rp.n && g_rp.rt[slot] && trace_target(g_rp.rt[slot]))   /* SWR: what limits the clear */
+        LOG_LIMIT(64, "gpu-trace-target: clear control %08x scissor enable %x x %08x y %08x surface clip %08x %08x window origin %x ext %ux%u\n",
+                  r[0x43E], r[0x380], r[0x381], r[0x382], r[0x3FD], r[0x3FE], r[0x4EB], g_rp.ext.width, g_rp.ext.height);
     if (r3d_clear_scissored(r)) {
         u32 xs = r[0x381], ys = r[0x382];
         i32 x0 = (i32)vk_scf(xs & 0xFFFF), x1 = (i32)vk_scf(xs >> 16), y0 = (i32)vk_scf(ys & 0xFFFF),
@@ -1013,6 +1016,13 @@ VkImageView vk_tex_bind_view(Surf* t, VkImageViewType want, const u32* tic, cons
             m[k] = m[k] == VK_COMPONENT_SWIZZLE_R   ? VK_COMPONENT_SWIZZLE_B
                    : m[k] == VK_COMPONENT_SWIZZLE_B ? VK_COMPONENT_SWIZZLE_R
                                                     : m[k];
+    if (want == VK_IMAGE_VIEW_TYPE_CUBE) { /* SWR test: SWR_TRACE_CUBE logs cube textures, SWR_VK_CUBE_SWAP_RB swaps */
+        static int tr = -1, sw = -1;
+        if (tr < 0) { tr = getenv("SWR_TRACE_CUBE") != NULL; sw = getenv("SWR_VK_CUBE_SWAP_RB") != NULL; }
+        if (tr) LOG_LIMIT(16, "cube: gva %llx %ux%u levels %u tic0 %08x tic3 %08x vk format %d bgra %d\n", (unsigned long long)t->gva, t->w, t->h, t->levels, tic[0], tic[3], (int)t->f.vk, t->f.bgra);
+        if (sw) { VkComponentSwizzle x = m[0]; m[0] = m[2]; m[2] = x; }
+        if (tr) { void swr_vk_dump_cube(Surf* t); swr_vk_dump_cube(t); }
+    }
     if (t->f.depth) { /* depth in r, g and b, alpha 1 */
         m[0] = m[1] = m[2] = VK_COMPONENT_SWIZZLE_R;
         m[3] = VK_COMPONENT_SWIZZLE_ONE;
@@ -2587,6 +2597,28 @@ retry:
             return;
         }
     }
+    { /* SWR test: SWR_STOP_AFTER_FS=hex (low 24 bits of a fragment program's address): every frame, the draws after
+         that program's first run of draws are skipped (per-pass GL/Vulkan comparison) */
+        static long stop_fs = -2, reset_fs = -1, stop_at = -1; static int stop_state, active, done, last_reset;
+        if (stop_fs == -2) {
+            const char* e = getenv("SWR_STOP_AFTER_FS"); stop_fs = e ? strtol(e, 0, 16) : -1;
+            e = getenv("SWR_STOP_RESET_FS"); reset_fs = e ? strtol(e, 0, 16) : -1; /* the frame's first program */
+            e = getenv("SWR_STOP_AT_FRAME"); stop_at = e ? atol(e) : -1; /* one frame only, then the targets dumped */
+        }
+        if (stop_fs >= 0) {
+            u64 fsa = sh.fs0 ? ((code + r[0x851]) & 0xffffff) : ~0ull;
+            int rs = ((code + r[0x851]) & 0xffffff) == (u64)reset_fs;
+            if (rs && !last_reset) { stop_state = 0; active = stop_at < 0 || (!done && g_vk_present >= (u32)stop_at); }
+            last_reset = rs;
+            int me = fsa == (u64)stop_fs;
+            if (me && stop_state == 0) stop_state = 1;
+            else if (!me && stop_state == 1) {
+                stop_state = 2;
+                if (active && stop_at >= 0 && !done) { done = 1; void swr_vk_dump_rts_now(void); swr_vk_dump_rts_now(); }
+            }
+            if (stop_state == 2 && active) return;
+        }
+    }
     cb_prefetch(ch, 0, vs, 0);
     if (fs) cb_prefetch(ch, 4, fs, 0);
     draw_indices_prefetch(ch, indexed, first, count, 0);
@@ -2600,6 +2632,9 @@ retry:
                       "gpu-trace-target: draw color slot %u target=%llx %ux%u count=%u indexed=%d vs=%llx fs=%llx\n", i,
                       (unsigned long long)rt[i]->gva, rt[i]->w, rt[i]->h, count, indexed,
                       (unsigned long long)(code + r[0x811]), (unsigned long long)(code + r[0x851]));
+    if (vk_fmap_on()) /* SWR: each draw's programs in the frame map */
+        LOG("framemap:   draw count=%u indexed=%d vs=%llx fs=%llx\n", count, indexed,
+            (unsigned long long)(code + r[0x811]), (unsigned long long)(code + r[0x851]));
     if (trace_target(zt))
         LOG_LIMIT(64, "gpu-trace-target: draw depth target=%llx %ux%u count=%u indexed=%d vs=%llx fs=%llx\n",
                   (unsigned long long)zt->gva, zt->w, zt->h, count, indexed, (unsigned long long)(code + r[0x811]),

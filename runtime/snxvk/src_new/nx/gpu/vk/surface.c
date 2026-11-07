@@ -1783,3 +1783,13 @@ static void zt_restore(Surf* s) {
 }
 /* a load's reset: what an earlier state left unmatched goes */
 void vk_zt_forget(void) { zt_drop(); }
+
+/* SWR test: the colour render targets used in the last two presents (renderer.c swr_vk_dump_rts) */
+int vk_rt_list(Surf** out, int max) {
+    int n = 0;
+    for (int k = 0; k < SURFH; k++)
+        for (Surf* s = g_surfh[k]; s; s = s->next)
+            if (s->is_rt && !s->f.depth && !s->f.is_int && s->layers == 1 && s->w >= 64 && s->last_used + 2 >= g_vk_present && n < max)
+                out[n++] = s;
+    return n;
+}
