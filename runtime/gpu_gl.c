@@ -115,7 +115,7 @@ static GLuint link2(GLuint a, GLuint b, GLuint c3){
    text, and so its cached binaries, stay as they were (the binary cache is keyed by the text) */
 extern int snxvk_dlss_mode; extern int g_opt_taa; extern int g_gles;
 static char* dlg_vs_xfb(char* src){
-  static const char* decl="out gl_PerVertex { invariant vec4 gl_Position;";
+  static const char* decl="out gl_PerVertex { invariant vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8];";
   int want= g_opt_taa!=0;   /* TAA uses the same motion vectors (also in the release) */
 #ifndef SWR_RELEASE
   want|= snxvk_dlss_mode>0;
@@ -123,7 +123,10 @@ static char* dlg_vs_xfb(char* src){
   if(!want || g_gles || !src) return src;
   char* d=strstr(src,decl); char* nl=strchr(src,'\n'); if(!d || !nl || nl>d) return src;
   static const char* ext="#extension GL_ARB_enhanced_layouts : require\n";
-  static const char* nd="out gl_PerVertex { layout(xfb_buffer=0, xfb_offset=0) invariant vec4 gl_Position;";
+  /* every member at an explicit offset: with xfb_offset on gl_Position alone, NVIDIA captured more of the block (44 bytes a
+     vertex) than the 16 read back, so 2/3 of each capture was other data and the replay drew huge stray triangles (8-18 ms
+     a frame at 2x). This way the layout is DMV_STRIDE on every driver */
+  static const char* nd="out gl_PerVertex { layout(xfb_buffer=0, xfb_offset=0) invariant vec4 gl_Position; layout(xfb_buffer=0, xfb_offset=16) float gl_PointSize; layout(xfb_buffer=0, xfb_offset=20) float gl_ClipDistance[8];";
   size_t n=strlen(src)+strlen(ext)+strlen(nd)+1; char* o=malloc(n); if(!o) return src;
   size_t a=(size_t)(nl+1-src), b=(size_t)(d-src);
   memcpy(o,src,a); strcpy(o+a,ext); memcpy(o+a+strlen(ext),src+a,b-a); strcpy(o+a+strlen(ext)+(b-a),nd); strcat(o,d+strlen(decl));
@@ -1839,6 +1842,7 @@ static void dlg_draw(void){
    or test it EQUAL (prepass and G-buffer) move by a sub-pixel Halton(2,3) offset through the viewport */
 #define DMV_BYTES (64u<<20)
 #define DMV_MAX 2048
+#define DMV_STRIDE 52u   /* bytes a captured vertex: gl_Position, gl_PointSize, gl_ClipDistance[8] (dlg_vs_xfb) */
 typedef struct { u64 key; u32 occ, off, verts; float vp[4], vpj[4], dr[2], po[3]; int clip; } DmvRec;
 static struct { GLuint buf[2]; u32 used[2], nrec[2], cur; DmvRec rec[2][DMV_MAX];
   float jx, jy; u32 jframe; int jit_ok, jit_used, hold, misses, failed;
@@ -1917,7 +1921,7 @@ static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int inde
   if(g_tf_missing && !g_dmv.failed){ g_dmv.failed=1; LOG("dlaa (OpenGL): no transform feedback: no motion vectors\n"); }
   if(!vs->xfb || mode!=GL_TRIANGLES || topology!=4 || !dlg_scene_draw() || !(r[0x4BA] && r[0x4B3]) || ((r[0x820]|r[0x830]|r[0x840])&1)) return 0;
   u64 verts=(u64)count/3*3*instances; if(verts<3 || count%3) return 0;
-  u32 c=g_dmv.cur; u64 bytes=verts*16;
+  u32 c=g_dmv.cur; u64 bytes=verts*DMV_STRIDE;
   if(g_dmv.nrec[c]>=DMV_MAX || g_dmv.used[c]+bytes>DMV_BYTES) return 0;
   if(!g_dmv.buf[0]){
     glGenBuffers(2,g_dmv.buf);
@@ -1936,7 +1940,7 @@ static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int inde
   return 1; }
 static void dlg_capture_end(void){ dmv_tf(0); }
 /* the motion-vector image for this frame (render size); 0 when there is nothing to draw */
-static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){
+static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){ gp_mark("ours: motion vectors");
   u32 c=g_dmv.cur, pv=c^1;
   if(g_dmv.failed || !g_dmv.nrec[c] || getenv("SWR_DLSS_NO_MV")) return 0;
   if(!g_dmv.prog){
@@ -1967,8 +1971,8 @@ static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){
   for(u32 i=0;i<g_dmv.nrec[c];i++){ const DmvRec* d=&g_dmv.rec[c][i]; const DmvRec* q=NULL;
     for(u32 k=0;k<g_dmv.nrec[pv] && !q;k++){ const DmvRec* e=&g_dmv.rec[pv][k]; if(e->key==d->key && e->occ==d->occ && e->verts==d->verts) q=e; }
     if(!q) continue;   /* new this frame: no previous position, zero motion */
-    glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[c]); glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,16,(void*)(size_t)d->off);
-    glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[pv]); glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,16,(void*)(size_t)q->off);
+    glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[c]); glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,DMV_STRIDE,(void*)(size_t)d->off);
+    glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[pv]); glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,DMV_STRIDE,(void*)(size_t)q->off);
     glUniform4fv(g_dmv.loc_c,1,d->vp); glUniform4fv(g_dmv.loc_p,1,q->vp);
     glViewportIndexedf(0,d->vpj[0],d->vpj[1],d->vpj[2],d->vpj[3]); glDepthRangeIndexed(0,d->dr[0],d->dr[1]);
     if(p_clip && d->clip!=clip){ clip=d->clip; p_clip(0x8CA1,clip? 0x935F : 0x935E); }
