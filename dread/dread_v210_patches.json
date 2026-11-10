@@ -198,8 +198,66 @@
   },
   "code_014.c": {
    "pristine": "c2460052f58de568e42e0965163d19bd4dd6652aabd1d4eac7c291628ee51842",
-   "result": "093b1d04033e07ce67113d9d9b19e5f9529edb06c152c85c747736c44161f3c5",
+   "result": "8d794103a44a1e6feba50f0b28356a90e1c480465ec6a9396c392e3a31a66ce2",
    "hunks": [
+    [
+     18147,
+     18147,
+     [
+      "/* SWR Hor+ culling (ultrawide pop-in): with Hor+ (see code_017.c F_821CEE0) the projection shows more to the sides than",
+      "   the camera's horizontal field of view at +128 (the 16:9 one), but the camera's visibility data was still made from it:",
+      "   +124 tan(hfov/2), which F_81BD3F8 builds the culling frustum corners from, and +616..+632 sin, cos, 1/cos, cos^2 and tan",
+      "   of hfov/2 + 1 degree (the game's own margin). So scenery and objects in the extra width were culled and popped in at",
+      "   the screen edges. After each of the four camera updates writes them (F_81BCBB8, F_81BCD80, F_81BD098, F_81BF374),",
+      "   this rewrites them from the horizontal field of view actually shown, 2 atan(tan(hfov/2) aspect / (16/9)), plus a small",
+      "   cushion. +128 and the projection stay as they are. 16:9 and narrower are unchanged. SWR_NO_HORPLUS=1 or",
+      "   SWR_NO_HORPLUS_CULL=1 = the game's own */",
+      "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
+      "extern double tan(double); extern double atan(double); extern float sinf(float); extern float cosf(float);",
+      "static int swr_hpcull_on(void){ static int v=-1; if(v<0){ char b[8];",
+      "  v= !(GetEnvironmentVariableA(\"SWR_NO_HORPLUS\",b,sizeof b)>0 && b[0]=='1') && !(GetEnvironmentVariableA(\"SWR_NO_HORPLUS_CULL\",b,sizeof b)>0 && b[0]=='1'); }",
+      "  return v; }",
+      "static void swr_hpcull(u8* const M, u64 cam){",
+      "  if(!swr_hpcull_on()) return;",
+      "  f32 asp=RDF32(cam+148), hfov=RDF32(cam+128);",
+      "  if(!(asp>16.0f/9.0f+0.001f) || !(asp<10.0f) || !(hfov>1.0f) || !(hfov<170.0f)) return;",
+      "  double t=tan((double)hfov*0.5*3.14159265358979323846/180.0)*(double)asp*(9.0/16.0)*1.04;   /* 4% cushion */",
+      "  double he=atan(t);",
+      "  f32 a=(f32)he+0.0174532924f;   /* the game's +1 degree */",
+      "  if(!(a<1.5533f)) a=1.5533f;    /* < 89 degrees */",
+      "  f32 s=sinf(a), co=cosf(a), sec=1.0f/co;",
+      "  *(f32*)MP(cam+616)=s; *(f32*)MP(cam+620)=co; *(f32*)MP(cam+624)=sec; *(f32*)MP(cam+628)=co*co; *(f32*)MP(cam+632)=sec*s;",
+      "  *(f32*)MP(cam+124)=(f32)t; }"
+     ]
+    ],
+    [
+     18270,
+     18270,
+     [
+      " swr_hpcull(M, c->x[19]);   /* SWR Hor+ culling */"
+     ]
+    ],
+    [
+     18370,
+     18370,
+     [
+      " swr_hpcull(M, c->x[19]);   /* SWR Hor+ culling */"
+     ]
+    ],
+    [
+     18637,
+     18637,
+     [
+      " swr_hpcull(M, c->x[19]);   /* SWR Hor+ culling */"
+     ]
+    ],
+    [
+     21028,
+     21028,
+     [
+      " swr_hpcull(M, c->x[19]);   /* SWR Hor+ culling */"
+     ]
+    ],
     [
      39763,
      39763,
