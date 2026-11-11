@@ -500,6 +500,18 @@ static void aroute_trace(ARenderer*r,const u32*ih,const u8*input,u64 size,const 
 }
 extern int g_opt_audio_eos_sample_count;
 static void audio_eos_env(void){ static int done; if(!done){ done=1; if(getenv("SWR_AUDIO_OLD_EOS")) g_opt_audio_eos_sample_count=0; } }   /* tests only */
+/* The ADAM room's crackle loop (sounds/streams/fakeadam_loophigh, 32 kHz mono ADPCM) plays about 12.5 dB louder here
+   than in Citron (MEASURED by cross-correlating recordings of the room with the file; the room's other ambience
+   matches). Volume, routing, filters and priority look as the game sets them, so the cause is unknown: until it is
+   found, that one sound is turned down to Citron's level (GitHub #34/#36). Recognised by its ADPCM coefficients, which
+   no other sound in the game uses. SWR_AUDIO_NO_ADAM_FIX=1 = old level. */
+static float adam_crackle_gain(const u8*vi){
+  static const i16 k[16]={427,267,2346,-1121,825,881,2397,-545,1566,-461,3019,-1312,1696,213,2952,-951};
+  static int off=-1;if(off<0)off=getenv("SWR_AUDIO_NO_ADAM_FIX")!=NULL;
+  if(off||vi[0xB]!=6)return 1.f;u64 ep=au64(vi+0x48);if(au64(vi+0x50)<32||!avalid(ep,32)||memcmp(GP(ep),k,32))return 1.f;
+  static int said;if(!said){said=1;LOG("audio: ADAM room crackle played 12.5 dB quieter (as in Citron)\n");}
+  return 0.237f;
+}
 void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,u32 count,u8*status){
   audio_eos_env();
   if(!o->u[4]){ARenderer*r=calloc(1,sizeof *r);if(!r)return;r->voices=calloc(AV,sizeof(AVoice));r->samples=calloc(AM*24*AF,sizeof(float));if(!r->voices||!r->samples){free(r->voices);free(r->samples);free(r);return;}o->u[4]=(u64)(size_t)r;}
@@ -516,7 +528,7 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
       for(u8 n=vi[0x159];n&&v->nq;n--){apop(v);v->position=0;}
       if(play==1&&v->was_playing){atrace_voice("stop",id,v,vi,NULL);aclear(v,1);memset(v->filter,0,sizeof v->filter);}
       v->was_playing=play!=1;
-      if(play==0&&v->nq&&o->u[3]==0){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
+      if(play==0&&v->nq&&o->u[3]==0){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20)*adam_crackle_gain(vi);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
         double step=(double)rate*pitch/48000.0;u32 mix=au32(vi+0x58);if(mix>=AM)mix=0;u32 nc=r->mix[mix].valid?r->mix[mix].count:2;if(nc>24)nc=24;
         if(!r->logged_voice){r->logged_voice=1;LOG("audio: first voice %u, format %u, %u channels, %u Hz, volume %.3f, mix %u, %u buffers\n",id,vi[0xB],au32(vi+0x18),rate,volume,mix,v->nq);}
         if(!g_lz_ok)alz_init();if(g_lz_lin<0)g_lz_lin=getenv("SWR_AUDIO_LINEAR")!=NULL;
