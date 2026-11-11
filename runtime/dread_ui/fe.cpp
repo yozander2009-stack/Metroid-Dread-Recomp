@@ -933,6 +933,21 @@ static void handle_nav() {
     if (ImGui::IsKeyPressed(ImGuiKey_F11)) { bool fs = !backend_is_fullscreen(); backend_fe_fullscreen(fs); set("fullscreen", fs ? "1" : "0"); }
 }
 
+// ---------------------------------------------------------------- RecompLauncher (recomplauncher.com, recomplauncher.json)
+// Started from it (RECOMPLAUNCHER=1): the player already pressed Play there, so a set-up game starts at once instead of
+// showing our Play screen. Setup, a pending rebuild or an installed update still show their page. Big Picture mode
+// (RECOMPLAUNCHER_MODE=bigpicture) starts full screen.
+static void launcher_tick() {
+    static const char* rl = getenv("RECOMPLAUNCHER"); static bool done;
+    if (!rl || strcmp(rl, "1") || done || g_frame_no < 3) return;
+    done = true;
+    const char* mode = getenv("RECOMPLAUNCHER_MODE");
+    if (mode && !strcmp(mode, "bigpicture") && !getb("fullscreen")) { set("fullscreen", "1"); backend_fe_fullscreen(1); }
+    if (g_page != PG_PLAY || code_patches_stale()) return;
+    UpStage st = update_state().stage; if (st == UP_REBUILD || st == UP_INSTALLED) return;
+    GameCheck c = check_installed(); if (c.code_ok && c.data_ok) g_play = true;
+}
+
 // ---------------------------------------------------------------- test hooks (SWR_FE_TEST=1 only; inert otherwise)
 // SWR_FE_INPUT="FRAME:HEXBUTTONS,..." physical pad buttons from that front-end frame on (held until the next entry)
 // SWR_FE_SHOTS="FRAME,..." + SWR_FE_SHOT_PREFIX=path: the window as PPM at those frames
@@ -1121,7 +1136,7 @@ extern "C" int fe_run(void* hwnd) {
         const float clear[4] = {0.015f, 0.027f, 0.05f, 1};
         g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr); g_ctx->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        test_shot(); g_frame_no++; test_tick();
+        test_shot(); g_frame_no++; test_tick(); launcher_tick();
         g_sc->Present(1, 0);
         if (g_ini_dirty) { g_ini.save(); g_ini_dirty = false; }
     }
@@ -1315,7 +1330,7 @@ extern "C" int fe_run(void*) {
         ImGui::Render();
         glViewport(0, 0, x_w, x_h); glClearColor(0.015f, 0.027f, 0.05f, 1); glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        test_shot(); g_frame_no++; test_tick();
+        test_shot(); g_frame_no++; test_tick(); launcher_tick();
         glXSwapBuffers(x_dpy, x_win);
         if (g_rumble_off && ImGui::GetTime() >= g_rumble_off) { pads_rumble_off(); g_rumble_off = 0; }
         if (g_ini_dirty) { g_ini.save(); g_ini_dirty = false; }

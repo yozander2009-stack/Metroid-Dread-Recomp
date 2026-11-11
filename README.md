@@ -1,5 +1,7 @@
 # Metroid Dread — recompiled for PC
 
+[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/793-metroid-dread/)
+
 > **Work in progress.** This project was shared on Reddit and elsewhere before it was ready: the planned first proper
 > release is 1.0.0, and current builds (0.x) are early previews. Expect crashes, setup problems and rough edges on
 > hardware it has not been tested on. If something breaks, please open an issue and attach the `.log` file from the

@@ -1,0 +1,270 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Metroid Dread",
+  "repo": "yozander2009-stack/Metroid-Dread-Recomp",
+  "start": {
+    "program": [
+      "Metroid Dread.exe",
+      "Metroid_Dread-x86_64.AppImage"
+    ]
+  },
+  "saves": [
+    "{install}/Metroid Dread_data/save",
+    "{local}/MetroidDreadRecomp/Metroid Dread_data/save"
+  ],
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        {
+          "path": "{install}/Metroid Dread.ini",
+          "if": "{install}/Metroid Dread.exe"
+        },
+        {
+          "path": "{local}/MetroidDreadRecomp/Metroid Dread.ini"
+        }
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "id": "renderer",
+      "label": "Renderer",
+      "help": "Native Vulkan is smoothest at high frame rates on recent cards; OpenGL is best on older ones. Restart to apply.",
+      "choices": [
+        {
+          "label": "OpenGL",
+          "set": {
+            "Graphics/renderer": "opengl"
+          }
+        },
+        {
+          "label": "Native Vulkan",
+          "set": {
+            "Graphics/renderer": "vulkan_native"
+          }
+        }
+      ],
+      "defaults": {
+        "Graphics/renderer": "opengl"
+      }
+    },
+    {
+      "id": "resolution",
+      "label": "Internal resolution",
+      "help": "What the game draws at. 1x is the Switch's docked 1600x900.",
+      "choices": [
+        {
+          "label": "1x (900p)",
+          "set": {
+            "Graphics/resolution": "1"
+          }
+        },
+        {
+          "label": "1.2x (1080p)",
+          "set": {
+            "Graphics/resolution": "1.2"
+          }
+        },
+        {
+          "label": "1.6x (1440p)",
+          "set": {
+            "Graphics/resolution": "1.6"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "Graphics/resolution": "2"
+          }
+        },
+        {
+          "label": "2.4x (4K)",
+          "set": {
+            "Graphics/resolution": "2.4"
+          }
+        },
+        {
+          "label": "3x",
+          "set": {
+            "Graphics/resolution": "3"
+          }
+        }
+      ],
+      "defaults": {
+        "Graphics/resolution": "1"
+      }
+    },
+    {
+      "id": "fps_limit",
+      "label": "Frame rate",
+      "help": "The game keeps its speed at any rate; long slow-motion moments run at 60.",
+      "choices": [
+        {
+          "label": "60 FPS (console)",
+          "set": {
+            "Performance/fps_limit": "1"
+          }
+        },
+        {
+          "label": "90 FPS",
+          "set": {
+            "Performance/fps_limit": "90"
+          }
+        },
+        {
+          "label": "120 FPS",
+          "set": {
+            "Performance/fps_limit": "120"
+          }
+        },
+        {
+          "label": "144 FPS",
+          "set": {
+            "Performance/fps_limit": "144"
+          }
+        },
+        {
+          "label": "240 FPS",
+          "set": {
+            "Performance/fps_limit": "240"
+          }
+        },
+        {
+          "label": "Unlimited",
+          "set": {
+            "Performance/fps_limit": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "Performance/fps_limit": "1"
+      }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Window mode",
+      "choices": [
+        {
+          "label": "Fullscreen",
+          "set": {
+            "Display/fullscreen": "1"
+          }
+        },
+        {
+          "label": "Window",
+          "set": {
+            "Display/fullscreen": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "Display/fullscreen": "1"
+      }
+    },
+    {
+      "id": "aspect",
+      "label": "Picture shape",
+      "help": "16:10 suits the Steam Deck. 21:9 is experimental.",
+      "choices": [
+        {
+          "label": "16:9",
+          "set": {
+            "Display/aspect": "16:9"
+          }
+        },
+        {
+          "label": "16:10",
+          "set": {
+            "Display/aspect": "16:10"
+          }
+        },
+        {
+          "label": "21:9",
+          "set": {
+            "Display/aspect": "21:9"
+          }
+        }
+      ],
+      "defaults": {
+        "Display/aspect": "16:9"
+      }
+    },
+    {
+      "id": "taa",
+      "label": "Temporal anti-aliasing",
+      "help": "Smooths edges and shimmer. Restart to apply.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "Graphics/taa": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "Graphics/taa": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "Graphics/taa": "0"
+      }
+    },
+    {
+      "id": "ambient_occlusion",
+      "label": "Ambient occlusion",
+      "help": "Soft contact shadows (XeGTAO).",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "Graphics/ambient_occlusion": "0"
+          }
+        },
+        {
+          "label": "Low",
+          "set": {
+            "Graphics/ambient_occlusion": "40"
+          }
+        },
+        {
+          "label": "Medium",
+          "set": {
+            "Graphics/ambient_occlusion": "70"
+          }
+        },
+        {
+          "label": "High",
+          "set": {
+            "Graphics/ambient_occlusion": "100"
+          }
+        }
+      ],
+      "defaults": {
+        "Graphics/ambient_occlusion": "0"
+      }
+    }
+  ],
+  "looks": {
+    "graphics_key": "Graphics/renderer",
+    "in": "main"
+  },
+  "folders": {
+    "logs": [
+      {
+        "path": "{install}",
+        "if": "{install}/Metroid Dread.exe"
+      },
+      {
+        "path": "{local}/MetroidDreadRecomp"
+      }
+    ]
+  },
+  "exit_codes": {
+    "0": "ok"
+  }
+}

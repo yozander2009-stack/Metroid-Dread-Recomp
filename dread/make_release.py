@@ -203,9 +203,11 @@ def release(out, exe, version):
         'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Dread v2.1.0 patches\n'
         '(https://github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081.\n')
     open(os.path.join(dst, 'README.txt'), 'w', newline='\r\n').write(README)
+    # RecompLauncher (recomplauncher.com): how it starts the game, its settings and where the saves are; next to the EXE
+    cp(os.path.join(ROOT, 'dread', 'recomplauncher.json'), os.path.join(dst, 'recomplauncher.json'))
     update_files(out, version)
-    # one zip to download
-    z = os.path.join(out, 'MetroidDread-PC-v%s.zip' % version)
+    # one zip to download (RecompLauncher picks a release file by "Windows" and "x64" in its name)
+    z = os.path.join(out, 'MetroidDread-PC-v%s-Windows-x64.zip' % version)
     with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for dp, dn, fn in os.walk(dst):
             for n in fn:
@@ -329,6 +331,8 @@ def source(out):
 
 
 SOURCE_README = """# Metroid Dread — recompiled for PC
+
+[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/793-metroid-dread/)
 
 > **Work in progress.** This project was shared on Reddit and elsewhere before it was ready: the planned first proper
 > release is 1.0.0, and current builds (0.x) are early previews. Expect crashes, setup problems and rough edges on
