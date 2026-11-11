@@ -2146,7 +2146,8 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "uniform vec4 u_p;     /* radius, slices, steps per slice, noise index */\n"
   "const float PI=3.14159265, HPI=1.57079633;\n"
   "vec3 vpos(vec2 sp,float z){ return vec3((u_ndc.xy*sp+u_ndc.zw)*z,z); }\n"
-  "float fz(ivec2 p){ return texelFetch(vz,clamp(p,ivec2(0),ivec2(u_vp.xy)-1),0).r; }\n"
+  "uniform int u_lv;   /* 1: this pass runs at half resolution, on the view-depth level below */\n"
+  "float fz(ivec2 p){ return texelFetch(vz,clamp(p,ivec2(0),ivec2(u_vp.xy)-1),u_lv).r; }\n"
   "vec4 edges(float c,float l,float r,float t,float b){ vec4 e=vec4(l,r,t,b)-c; float slr=(e.y-e.x)*0.5, stb=(e.w-e.z)*0.5;\n"
   "  vec4 ea=e+vec4(slr,-slr,stb,-stb); e=min(abs(e),abs(ea)); return clamp(1.25-e/(c*0.011),0.0,1.0); }\n"
   "float packE(vec4 e){ e=floor(clamp(e,0.0,1.0)*2.9+0.5); return dot(e,vec4(64.0,16.0,4.0,1.0)/255.0); }\n"
@@ -2174,7 +2175,7 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "    for(float j=0.0;j<u_p.z;j++){\n"
   "      float ss=pow((j+fract(nz.y+(s+j*u_p.z)*0.6180339887498948))/u_p.z,2.0)+minS;\n"
   "      vec2 so=ss*om; float mip=clamp(log2(length(so))-3.3,0.0,4.0); so=floor(so+0.5)*u_vp.zw;\n"
-  "      vec2 s0=sp+so, s1=sp-so; vec3 d0=vpos(s0,textureLod(vz,s0,mip).r)-P, d1=vpos(s1,textureLod(vz,s1,mip).r)-P;\n"
+  "      vec2 s0=sp+so, s1=sp-so; vec3 d0=vpos(s0,textureLod(vz,s0,mip+float(u_lv)).r)-P, d1=vpos(s1,textureLod(vz,s1,mip+float(u_lv)).r)-P;\n"
   "      float l0=length(d0), l1=length(d1);\n"
   "      float c0=mix(lo0,dot(d0/l0,V),clamp(l0*fm+fa,0.0,1.0)), c1=mix(lo1,dot(d1/l1,V),clamp(l1*fm+fa,0.0,1.0));\n"
   "      hc0=max(hc0,c0); hc1=max(hc1,c1); }\n"
@@ -2184,7 +2185,7 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
 static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
   "layout(binding=0) uniform sampler2D aoT; layout(binding=1) uniform sampler2D edT; layout(binding=2) uniform sampler2D col;\n"
   "layout(r8,binding=0) writeonly uniform image2D oF;\n"
-  "uniform vec4 u_vp;\n"
+  "uniform vec4 u_vp; uniform int u_lv;\n"
   "ivec2 cl(ivec2 p){ return clamp(p,ivec2(0),ivec2(u_vp.xy)-1); }\n"
   "vec4 ue(ivec2 p){ uint v=uint(texelFetch(edT,cl(p),0).r*255.5); return clamp(vec4(float((v>>6)&3u),float((v>>4)&3u),float((v>>2)&3u),float(v&3u))/3.0,0.0,1.0); }\n"
   "float a(ivec2 p){ return texelFetch(aoT,cl(p),0).r; }\n"
@@ -2196,12 +2197,12 @@ static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_siz
   "  float sw=1.2, sum=a(p)*sw;\n"
   "  sum+=a(p+ivec2(-1,0))*eC.x+a(p+ivec2(1,0))*eC.y+a(p+ivec2(0,-1))*eC.z+a(p+ivec2(0,1))*eC.w; sw+=dot(eC,vec4(1.0));\n"
   "  sum+=a(p+ivec2(-1,-1))*wTL+a(p+ivec2(1,-1))*wTR+a(p+ivec2(-1,1))*wBL+a(p+ivec2(1,1))*wBR; sw+=wTL+wTR+wBL+wBR;\n"
-  "  vec3 c=texelFetch(col,p,0).rgb; c=max(c,vec3(0.0)); float l=dot(c/(1.0+max(c.r,max(c.g,c.b))),vec3(0.2126,0.7152,0.0722));\n"
+  "  vec3 c=texelFetch(col,p<<u_lv,0).rgb; c=max(c,vec3(0.0)); float l=dot(c/(1.0+max(c.r,max(c.g,c.b))),vec3(0.2126,0.7152,0.0722));\n"
   "  float r=mix(clamp(sum/sw*1.5,0.0,1.0),1.0,smoothstep(0.25,0.75,l));   /* AO dims indirect light: lit highlights keep their brightness */\n"
   "  imageStore(oF,p,vec4(r)); }\n";
 static const char* AO_APPLY_FS="#version 430 core\nlayout(binding=0) uniform sampler2D aoF; uniform vec4 u_a; out vec4 o;\n"
-  "void main(){ float a=texelFetch(aoF,ivec2(gl_FragCoord.xy),0).r; o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
-static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a; } g_ao;
+  "void main(){ float a=textureLod(aoF,gl_FragCoord.xy/u_a.zw,0.0).r; o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
+static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n, lv; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a, main_lv, den_lv; } g_ao;
 static GLuint ao_cs(const char* src){ char err[1024]; err[0]=0; GLuint s=compile(GL_COMPUTE_SHADER,src,err,sizeof err); GLuint p= s? link2(s,0,0) : 0;
   if(!p) LOG("ao: compute program failed: %s\n",err); return p; }
 static void ao_tex(GLuint* t, GLenum f, u32 w, u32 h, int levels){
@@ -2218,16 +2219,24 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
     if(!g_ao.pre || !g_ao.mainp || !g_ao.den || !g_ao.app){ g_ao_failed=1; LOG("ao: programs failed: AO off\n"); return 0; }
     g_ao.pre_dep=glGetUniformLocation(g_ao.pre,"u_dep"); g_ao.main_vp=glGetUniformLocation(g_ao.mainp,"u_vp"); g_ao.main_ndc=glGetUniformLocation(g_ao.mainp,"u_ndc");
     g_ao.main_p=glGetUniformLocation(g_ao.mainp,"u_p"); g_ao.den_vp=glGetUniformLocation(g_ao.den,"u_vp"); g_ao.app_a=glGetUniformLocation(g_ao.app,"u_a");
+    g_ao.main_lv=glGetUniformLocation(g_ao.mainp,"u_lv"); g_ao.den_lv=glGetUniformLocation(g_ao.den,"u_lv");
     glGenVertexArrays(1,&g_ao.vao); glGenFramebuffers(1,&g_ao.fbo);
     LOG("ao: XeGTAO on (OpenGL)\n"); }
-  if(g_ao.w!=w || g_ao.h!=h){
-    ao_tex(&g_ao.vz,GL_R32F,w,h,5); ao_tex(&g_ao.ao,GL_R8,w,h,1); ao_tex(&g_ao.ed,GL_R8,w,h,1); ao_tex(&g_ao.fin,GL_R8,w,h,1);
-    g_ao.w=w; g_ao.h=h; }
+  /* at a frame cap of 120+ and 2560x1440 and above the AO term is computed at half resolution (on the view-depth level
+     below) and filtered up: ~0.9 ms of GPU time at 2.2x, the largest of our passes (MEASURED owner settings, 240 cap:
+     233-237 -> 240 FPS). Thin contact shadows come out lighter, so at 60 it stays full. SWR_AO_FULL=1 = always full */
+  static int full=-1; if(full<0) full=getenv("SWR_AO_FULL")!=NULL;
+  extern int g_opt_fps;
+  u32 lv= !full && (g_opt_fps>=120 || g_opt_fps==0) && (u64)w*h>=2560ull*1440ull? 1 : 0, aw=(w+lv)>>lv, ah=(h+lv)>>lv;
+  if(g_ao.w!=w || g_ao.h!=h || g_ao.lv!=lv){
+    ao_tex(&g_ao.vz,GL_R32F,w,h,5); ao_tex(&g_ao.ao,GL_R8,aw,ah,1); ao_tex(&g_ao.ed,GL_R8,aw,ah,1); ao_tex(&g_ao.fin,GL_R8,aw,ah,1);
+    glBindTexture(GL_TEXTURE_2D,g_ao.fin); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    g_ao.w=w; g_ao.h=h; g_ao.lv=lv; LOG("ao: %ux%u (%s resolution)\n",aw,ah,lv? "half" : "full"); }
   /* constants (XeGTAO.h GTAOUpdateConstants): view depth = mul/(add-depth); NDC->view from the projection's scale */
   float A=g_proj.a, B=g_proj.b, mul, add;
   if(g_proj.clip){ mul=-B; add=-A; } else { mul=-0.5f*B; add=0.5f*(1.f-A); }   /* depth = -A + B/d, or its 0.5x+0.5 */
   float tx=1.f/g_proj.p00, ty=1.f/g_proj.p11, radius=30.f;   /* game units (~cm): contact shadows, not a broad haze */
-  float vp[4]={(float)w,(float)h,1.f/(float)w,1.f/(float)h}, ndc[4]={tx*2.f,ty*-2.f,-tx,ty};
+  float vp[4]={(float)aw,(float)ah,1.f/(float)aw,1.f/(float)ah}, ndc[4]={tx*2.f,ty*-2.f,-tx,ty};
   float pp[4]={radius,3.f,3.f,(float)(dlg_aa()? g_ao.n++%64 : 0)}, dep[4]={mul,add,radius,0};
   for(int u=0;u<3;u++) glBindSampler(u,0);
   /* 1: view depth and its MIPs */
@@ -2237,17 +2246,17 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
   glDispatchCompute((w+15)/16,(h+15)/16,1);
   glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
   /* 2: AO term and edges */
-  glUseProgram(g_ao.mainp); glUniform4fv(g_ao.main_vp,1,vp); glUniform4fv(g_ao.main_ndc,1,ndc); glUniform4fv(g_ao.main_p,1,pp);
+  glUseProgram(g_ao.mainp); glUniform4fv(g_ao.main_vp,1,vp); glUniform4fv(g_ao.main_ndc,1,ndc); glUniform4fv(g_ao.main_p,1,pp); glUniform1i(g_ao.main_lv,(GLint)lv);
   glBindTexture(GL_TEXTURE_2D,g_ao.vz);
   glBindImageTexture(0,g_ao.ao,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8); glBindImageTexture(1,g_ao.ed,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8);
-  glDispatchCompute((w+7)/8,(h+7)/8,1);
+  glDispatchCompute((aw+7)/8,(ah+7)/8,1);
   glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
   /* 3: denoise */
-  glUseProgram(g_ao.den); glUniform4fv(g_ao.den_vp,1,vp);
+  glUseProgram(g_ao.den); glUniform4fv(g_ao.den_vp,1,vp); glUniform1i(g_ao.den_lv,(GLint)lv);
   glBindTexture(GL_TEXTURE_2D,g_ao.ao); glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_ao.ed);
   glActiveTexture(GL_TEXTURE0+2); glBindTexture(GL_TEXTURE_2D,t->id);
   glBindImageTexture(0,g_ao.fin,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R8);
-  glDispatchCompute((w+7)/8,(h+7)/8,1);
+  glDispatchCompute((aw+7)/8,(ah+7)/8,1);
   glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT);
   /* 4: scene colour *= AO */
   glBindFramebuffer(GL_FRAMEBUFFER,g_ao.fbo);
@@ -2259,7 +2268,7 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
   glDisable(GL_POLYGON_OFFSET_FILL); glColorMaski(0,1,1,1,0); glViewportIndexedf(0,0,0,(float)w,(float)h);
   { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_AO_DEBUG")!=NULL;   /* test: the AO term alone in place of the scene */
     if(!dbg){ glEnablei(GL_BLEND,0); glBlendFuncSeparatei(0,GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE); } else glDisablei(GL_BLEND,0); }
-  glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,0,0}; glUniform4fv(g_ao.app_a,1,a); }
+  glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,(float)w,(float)h}; glUniform4fv(g_ao.app_a,1,a); }
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_ao.fin); glBindVertexArray(g_ao.vao);
   glDrawArrays(GL_TRIANGLES,0,3);
   glDisablei(GL_BLEND,0); glColorMaski(0,1,1,1,1);
