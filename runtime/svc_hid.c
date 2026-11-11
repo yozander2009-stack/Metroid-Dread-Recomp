@@ -2,6 +2,7 @@
    Licensed under the Apache License 2.0. See LICENSE.txt and NOTICE.txt;
    any copy or derived work must keep the credit to SwitchRecomp by MZ Labs. */
 /* hid. Games read the shared memory directly, so we fill it in the real layout (17 entry LIFOs). */
+#include <math.h>
 #include "rt.h"
 #include "hid_layout.h"
 
@@ -37,18 +38,32 @@ static void npad_setup(u8* base, int idx, u32 style, u32 devtype){
   u8 ftype= idx==8? 4 : 3; e[HO_HidNpadInternalState_applet_footer_ui_type]=ftype;   /* handheld / pro controller */
 }
 
+/* [Input] stick_sensitivity (percent, 100 = as read) scales both sticks after the dead zone (#35). stick_snapback (#54):
+   a released stick springs back past the centre for a moment; the game read that as a turn. Within 60 ms of a release
+   from a strong push, a left-stick reading in the opposite direction counts as centred */
+int g_opt_stick_sens=100, g_opt_snapback=0;
+static void stick_post(i32* x, i32* y, int left){
+  float fx=(float)*x, fy=(float)*y, m=sqrtf(fx*fx+fy*fy);
+  if(g_opt_stick_sens!=100 && m>0){ float nm=m*(float)g_opt_stick_sens/100.f; if(nm>32767.f) nm=32767.f; float k=nm/m; fx*=k; fy*=k; m=nm; }
+  if(left && g_opt_snapback){ static float dx, dy; static u64 strong_ns, rel_ns; extern u64 plat_ns(void); u64 now=plat_ns();
+    if(rel_ns && now-rel_ns<60000000ull && m>0 && (fx*dx+fy*dy)/m < -0.3f){ fx=fy=0; m=0; }   /* the bounce: centred */
+    else if(m>16000.f){ dx=fx/m; dy=fy/m; strong_ns=now; rel_ns=0; }
+    else if(m<6000.f && strong_ns && now-strong_ns<150000000ull && !rel_ns) rel_ns=now; }
+  *x=(i32)lrintf(fx); *y=(i32)lrintf(fy); }
 void hid_update(void){
   if(!g_hid_shm) return;
+  i32 lx=g_pad.lx, ly=g_pad.ly, rx=g_pad.rx, ry=g_pad.ry;   /* copies: g_pad is only rewritten by the next input poll */
+  stick_post(&lx,&ly,1); stick_post(&rx,&ry,0);
   u8* b=kshmem_ptr(g_hid_shm);
   g_samp++;
   u8 st[0x28]; memset(st,0,sizeof st);
   u64 btn=g_pad.buttons;
   /* sticks also set the stick-direction button bits, like hw */
-  if(g_pad.lx<-16000) btn|=1ull<<16; if(g_pad.ly>16000) btn|=1ull<<17; if(g_pad.lx>16000) btn|=1ull<<18; if(g_pad.ly<-16000) btn|=1ull<<19;
-  if(g_pad.rx<-16000) btn|=1ull<<20; if(g_pad.ry>16000) btn|=1ull<<21; if(g_pad.rx>16000) btn|=1ull<<22; if(g_pad.ry<-16000) btn|=1ull<<23;
+  if(lx<-16000) btn|=1ull<<16; if(ly>16000) btn|=1ull<<17; if(lx>16000) btn|=1ull<<18; if(ly<-16000) btn|=1ull<<19;
+  if(rx<-16000) btn|=1ull<<20; if(ry>16000) btn|=1ull<<21; if(rx>16000) btn|=1ull<<22; if(ry<-16000) btn|=1ull<<23;
   memcpy(st+HO_HidNpadCommonState_sampling_number,&g_samp,8);
   memcpy(st+HO_HidNpadCommonState_buttons,&btn,8);
-  i32 s4[4]={g_pad.lx,g_pad.ly,g_pad.rx,g_pad.ry}; memcpy(st+HO_HidNpadCommonState_analog_stick_l,s4,16);
+  i32 s4[4]={lx,ly,rx,ry}; memcpy(st+HO_HidNpadCommonState_analog_stick_l,s4,16);
   u32 attr=1; memcpy(st+HO_HidNpadCommonState_attributes,&attr,4);   /* IsConnected */
   /* No1 = pro / dual joycon, Handheld = attached */
   u8* e0=b+HO_HidSharedMemory_npad;

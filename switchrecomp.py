@@ -78,7 +78,13 @@ def cc_env(cc):
 
 def run_cc(cmd, cc, **kw):
     # compilers print in the console code page: never let a decode error hide the real message
-    r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=cc_env(cc), **kw)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=cc_env(cc), **kw)
+    except OSError as e:
+        # GitHub #57: Windows would not start the bundled compiler although the file is there (antivirus quarantine or
+        # a blocked program are the usual causes). Say what failed instead of a bare WinError
+        return ('could not start the compiler %s (%s). If an antivirus removed or blocked a file in this folder, '
+                'restore it or allow the game folder, then run setup again.' % (cmd[0], e))
     return (r.stderr or r.stdout or 'exit code %d' % r.returncode) if r.returncode else None
 
 

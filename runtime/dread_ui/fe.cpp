@@ -633,7 +633,7 @@ static void page_controls() {
       if (s.phys >> 30 & 1) dl->AddText({q.x + S(450), q.y + h - S(30)}, C_CYAN, "HOME / GUIDE pressed");
     }
     section("FEEL");
-    draw_opt("stick_deadzone"); draw_opt("rumble"); draw_opt("hd_rumble"); draw_opt("deck_trackpad_rumble");
+    draw_opt("stick_deadzone"); draw_opt("stick_sensitivity"); draw_opt("stick_snapback"); draw_opt("rumble"); draw_opt("hd_rumble"); draw_opt("deck_trackpad_rumble");
 #ifdef _WIN32
     if (row_button("##rt", "Test rumble", "PULSE")) { pads_rumble(atoi(get("rumble").c_str())); SetTimer(g_hwnd, 77, 300, nullptr); }
 #else
