@@ -243,7 +243,7 @@ int snxvk_start(void){
        GPU thread 98% busy) - it runs without, as when OpenGL is chosen */
     g_ww_ok=0; return 0; }
   g_snxvk_on=1;
-  LOG("renderer: native Vulkan (experimental, ScarletNX renderer; shaders translated to SPIR-V)\n");
+  LOG("renderer: native Vulkan (ScarletNX renderer; shaders translated to SPIR-V)\n");
   return 1; }
 
 void snxvk_submit(const void* entries, u32 n, u32 channel, u32 host_incs, u32 wait_id, u32 wait_val, u32 promised){

@@ -427,7 +427,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"shadow_resolution","1","1, 2 or 4: shadow map resolution on top of the resolution scale (sharper shadow edges; restart)"},
   {"game_fxaa","0","1 = the game's own FXAA edge smoothing (softer). 0 = off: crisper (the default; at 2x and above it is always off)"},
   {"bloom_quality","0","0 = bloom and lens flares as the game draws them, 1 = smooth: spread over the screen with a cubic filter (no blocky steps at 2x and above), 2 = off: no glow"},
-  {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
+  {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifndef SWR_RELEASE   /* the public release: no DLSS (GPL) and no frame generation in that build */
   {"dlss","0","1 = NVIDIA DLAA anti-aliasing (renderer=opengl or vulkan_native, RTX GPU, nvngx_dlss.dll in the game folder):\n;   DLSS at the internal resolution with the game's own motion vectors; the HUD is untouched. 0 = off"},
 #endif

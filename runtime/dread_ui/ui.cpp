@@ -499,8 +499,9 @@ static std::vector<Opt> build_options() {
 #ifdef _WIN32
       {"vulkan", "Vulkan output"},
 #endif
-      {"vulkan_native", "Native Vulkan (experimental)"}},
-      "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
+      {"vulkan_native", "Native Vulkan"}},
+      "Native Vulkan: ScarletNX's Vulkan renderer draws everything; smoothest at high frame rates. OpenGL: best on older graphics cards "
+      "(Native Vulkan builds its shaders the first time it sees them). Vulkan output: OpenGL draws, Vulkan presents.");
     B("antialiasing", "Graphics", "Graphics", "Anti-aliasing (FXAA)", LIVE_YES, "0", "Smooths jagged edges on the final picture. Not needed above 1\xC3\x97 resolution.");
     B("taa", "Graphics", "Graphics", "Temporal anti-aliasing (TAA)", LIVE_RESTART, "0", "Smooths edges and shimmer using the previous frames. OpenGL and Native Vulkan. Not used while DLAA runs.");
     C("ambient_occlusion", "Graphics", "Graphics", "Ambient occlusion (XeGTAO)", LIVE_YES, "0", {{"0", "Off"}, {"40", "Low"}, {"70", "Medium"}, {"100", "High"}},

@@ -196,7 +196,8 @@ static Rec recommend() {
     // renderer: above 60 FPS on a discrete NVIDIA / AMD card native Vulkan is clearly smoother (2026-10-23, RTX 5070, 240 cap:
     // seconds under 200 FPS 2 vs 33-35 with OpenGL, whose driver-call thread is the limit in heavy rooms). At 60 both hold 60, and
     // OpenGL is the most tested; integrated graphics stay on OpenGL (native Vulkan untested there). It falls back to OpenGL by itself.
-    // 2026-10-23 owner: OpenGL stays the pick for now (native Vulkan is still experimental). When it becomes the default:
+    // 2026-10-23 owner: OpenGL stays the pick for now. 2026-11-11: native Vulkan no longer labelled experimental (Deck + PC
+    // regressions, menu, soak), but the pick is still OpenGL. When it becomes the default:
     //   r.renderer = !g_hw.integrated && (NVIDIA or AMD/Radeon in g_hw.gpu) && r.fps != "1" ? "vulkan_native" : "opengl";
     r.renderer = "opengl";
     r.summary = fmt("Resolution %s, %s, picture %s, anisotropic filtering %s\xC3\x97%s, %s, fullscreen.",
@@ -204,7 +205,7 @@ static Rec recommend() {
                     r.sharp != "0" ? ", light sharpening" : "", r.renderer == "vulkan_native" ? "Native Vulkan (smoothest at high frame rates)" : "OpenGL");
     if (g_hw.ram_gb && g_hw.ram_gb < 8) r.note = fmt("This PC has %d GB of memory; the game needs about 4 GB, so 8 GB is recommended. Close other programs before playing.", g_hw.ram_gb);
 #ifndef SWR_RELEASE   // the public release has no DLSS
-    else if (g_hw.rtx) r.note = "Optional: Graphics > Native Vulkan + NVIDIA DLAA gives the cleanest edges on RTX cards (experimental renderer).";
+    else if (g_hw.rtx) r.note = "Optional: Graphics > Native Vulkan + NVIDIA DLAA gives the cleanest edges on RTX cards.";
 #endif
     return r;
 }
