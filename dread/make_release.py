@@ -81,7 +81,7 @@ LICENSES = [
     ('runtime/snxvk/LICENSE', 'ScarletNX-GPL-3.0.txt'), ('runtime/snxvk/NOTICE', 'ScarletNX-NOTICE.txt'),
     ('runtime/imgui/LICENSE.txt', 'DearImGui-MIT.txt'), ('runtime/vp9/LICENSE-libvpx.txt', 'libvpx-BSD.txt'),
     ('runtime/oh264/LICENSE', 'OpenH264-BSD.txt'), ('runtime/bcn/LICENSE_texture2ddecoder.txt', 'texture2ddecoder.txt'),
-    ('python/LICENSE_PYTHON.txt', 'Python-PSF.txt'), ('runtime/xegtao/LICENSE.txt', 'XeGTAO-MIT.txt'),
+    ('python/LICENSE_PYTHON.txt', 'Python-PSF.txt'), ('runtime/xegtao/LICENSE.txt', 'XeGTAO-MIT.txt'), ('runtime/ryujinx-reverb/LICENSE.txt', 'Ryujinx-reverb-MIT.txt'),
 ]
 ZLIB_TXT = """zlib (zlib1.dll) and SDL2 (SDL2.dll) are under the zlib licence:
 

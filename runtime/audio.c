@@ -36,8 +36,9 @@ typedef struct {
   ABuffer q[8];int nq;double position,played_fraction;u64 played;u32 consumed;
   u8 submitted[4],was_playing,format_warned; i16 h1[AC],h2[AC];
   float filter[AC][2][4];
+  float hist[AC][4]; float vol_prev; u8 vol_ok;   /* last 4 source samples before q[0] (resampler taps); volume of the last frame (ramp) */
 } AVoice;
-typedef struct {u8 valid,used;u32 count,dest;float volume,matrix[24][24];} AMix;
+typedef struct {u8 valid,used,gprev_ok;u32 count,dest;float volume,matrix[24][24],gprev[24][24];} AMix;
 /* I3DL2 reverb (effect type 5). Dread runs one in place on buffers 6-11 of its 24-buffer submix with a dry gain of
    0.25: without it that whole send bus played dry at 4x (+12 dB, ADAM's voice among it) and with no room sound.
    Own implementation of the I3DL2 model: room/HF input gain, a pre-delay with early-reflection taps, two diffusion
@@ -49,7 +50,8 @@ typedef struct {
   float pre[RV_PRE],line[4][RV_LINE],ap[2][RV_AP],lp[4],inlp;u32 pos;
   u8 key[0x48];float room,hf,inlp_c,refl,rev,dry,diff,g[4],damp[4];u32 refl_d,rev_d,len[4],ap_len[2];
 } AReverb;
-typedef struct {u8 type,enabled,is_new;u32 mix;u8 param[0xA0];AReverb*rv;} AEffect;
+struct AR3d;
+typedef struct {u8 type,enabled,is_new;u32 mix;u8 param[0xA0];AReverb*rv;struct AR3d*r3;} AEffect;
 #define AE 32
 typedef struct {
   AVoice *voices;AMix mix[AM];u8 resources[AR][0x70];u8 resource_valid[AR];
@@ -63,8 +65,27 @@ static void atrace_voice(const char*event,u32 id,AVoice*v,const u8*vi,const u8*w
   if(wb&&bytes>=16&&avalid(addr,16))for(int k=0;k<16;k++)sprintf(hex+k*2,"%02x",((u8*)GP(addr))[k]);
   fprintf(f,"%llu,%s,%u,%llu,%u,%d,%u,%u,%u,%llx,%llu,%d,%d,%u,%u,%llx,%llu,%s\n",(unsigned long long)plat_ns(),event,id,(unsigned long long)v->played,v->consumed,v->nq,vi[0xA],au32(vi+0xC),vi[0xB],(unsigned long long)addr,(unsigned long long)bytes,wb?ai32(wb+0x10):0,wb?ai32(wb+0x14):0,wb?wb[0x18]:0,wb?wb[0x19]:0,(unsigned long long)(wb?au64(wb+0x20):0),(unsigned long long)(wb?au64(wb+0x28):0),hex);fflush(f);
 }
-static void apop(AVoice*v){if(!v->nq)return;free(v->q[0].pcm);memmove(v->q,v->q+1,(v->nq-1)*sizeof(v->q[0]));v->nq--;v->consumed++;}
-static void aclear(AVoice*v,int reset){while(v->nq)apop(v);v->position=0;v->played_fraction=0;if(reset)v->played=0;}
+static void ahist_push(AVoice*v,const ABuffer*b){   /* keep the buffer's last samples for the next buffer's first taps */
+  if(!b->pcm||!b->frames||!b->channels)return;u32 take=b->frames<4?b->frames:4;
+  for(u32 ch=0;ch<AC;ch++){u32 c=ch<b->channels?ch:0;for(u32 k=0;k<4-take;k++)v->hist[ch][k]=v->hist[ch][k+take];
+    for(u32 k=0;k<take;k++)v->hist[ch][4-take+k]=b->pcm[(size_t)(b->frames-take+k)*b->channels+c];}}
+static void apop(AVoice*v){if(!v->nq)return;ahist_push(v,&v->q[0]);free(v->q[0].pcm);memmove(v->q,v->q+1,(v->nq-1)*sizeof(v->q[0]));v->nq--;v->consumed++;}
+static void aclear(AVoice*v,int reset){while(v->nq)apop(v);v->position=0;v->played_fraction=0;if(reset){v->played=0;v->vol_ok=0;}memset(v->hist,0,sizeof v->hist);}
+/* source sample k of channel ch, counted from the start of q[0]: earlier ones from hist, later ones from the queued
+   buffers (a looping q[0] wraps). Past the end of what is queued: the last sample */
+static float asrc_at(const AVoice*v,u32 ch,i64 k){
+  if(k<0)return k>=-4?v->hist[ch][4+k]:v->hist[ch][0];
+  float last=0;for(int i=0;i<v->nq;i++){const ABuffer*b=&v->q[i];if(!b->pcm||!b->frames)continue;u32 c=ch<b->channels?ch:0;
+    if(i==0&&b->loop){k%=b->frames;return b->pcm[(size_t)k*b->channels+c];}
+    if(k<b->frames)return b->pcm[(size_t)k*b->channels+c];
+    last=b->pcm[(size_t)(b->frames-1)*b->channels+c];k-=b->frames;}
+  return last;}
+/* resampler: 8-tap Lanczos (a=4), 256 phases. Linear interpolation left images of 22 kHz voices (ADAM) above 11 kHz,
+   heard as harsh distortion (MEASURED: -51.6 dB above 11 kHz while ADAM speaks vs -73 dB without). SWR_AUDIO_LINEAR=1 = old */
+static float g_lz[257][8];static int g_lz_ok,g_lz_lin=-1;
+static void alz_init(void){for(int ph=0;ph<=256;ph++){double f=ph/256.0,sum=0,w[8];
+    for(int t=0;t<8;t++){double x=(t-3)-f;double s=fabs(x)<1e-9?1.0:sin(M_PI*x)/(M_PI*x),l=fabs(x)<1e-9?1.0:(fabs(x)<4?sin(M_PI*x/4)/(M_PI*x/4):0);w[t]=s*l;sum+=w[t];}
+    for(int t=0;t<8;t++)g_lz[ph][t]=(float)(w[t]/sum);}g_lz_ok=1;}
 /* DSP ADPCM: each 8-byte frame has one predictor/scale byte and 14 signed
    four-bit samples. Coefficients are signed Q11; histories are saturated PCM16. */
 static i16 adpcm_sample(const u8*data,u32 sample,const i16*coef,i16*h1,i16*h2){
@@ -358,14 +379,90 @@ static void areverb(AReverb*v,float*const*io,int nch,int lfe){
 }
 /* effects of one mix, run after its voices and child mixes are summed and before it is routed on. Only I3DL2 reverb
    is modelled; a disabled in-place effect is a bypass, as on the console */
+/* I3DL2 reverb as the console's audio DSP runs it: a C port of Ryujinx's Reverb3dCommand / Reverb3dState
+   (MIT License, Copyright (c) Ryujinx Team and Contributors; see licenses). Dread runs it in place on the dialogue bus
+   (buffers 6-11 of submix 1) with a dry gain of 0.25, so ADAM's voice is mostly this effect's wet signal. The earlier
+   approximation (4 early taps, input averaged over the channels) made that wet signal much quieter and duller than the
+   console's (20 early taps, input summed): ADAM was buried under the background (#34) and sounded off (#36).
+   SWR_AUDIO_OLD_REVERB=1 = the approximation */
+typedef struct {float*b;u32 max,cnt,cur,last;float sr;} R3Line;
+static void r3_init(R3Line*l,float srk,float tmax){l->sr=srk;l->max=(u32)lroundf(srk*tmax);l->b=calloc(l->max+1,sizeof(float));l->cur=0;l->last=0;l->cnt=0;}
+static void r3_cfg(R3Line*l,u32 n){if(l->max>=n){l->cnt=n;l->last=(l->cur+n)%(l->max+1);}}
+static void r3_set(R3Line*l,float t){r3_cfg(l,(u32)lroundf(l->sr*t));}
+static float r3_read(const R3Line*l){return l->b?l->b[l->cur]:0;}
+static float r3_upd(R3Line*l,float v){if(!l->b)return 0;if(!isfinite(v))v=0;l->b[l->last++]=v;float o=l->b[l->cur];l->cur++;if(l->cur>=l->max)l->cur=0;if(l->last>=l->max)l->last=0;return o;}
+static float r3_tap(const R3Line*l,u32 idx,int off){if(!l->b)return 0;int t=(int)l->last-((int)idx+off);if(t<0)t+=(int)l->max+1;if(t<0||t>(int)l->max)return 0;return l->b[t];}
+typedef struct {R3Line l;float rate;} R3Decay;
+static float r3d_upd(R3Decay*d,float v){float x=r3_read(&d->l),p=v-d->rate*x;return r3_upd(&d->l,p)+p*d->rate;}
+typedef struct AR3d {
+  u8 key[0x48];int ok;
+  R3Line fdn[4],pre,fc;R3Decay d1[4],d2[4];
+  float dry,prev_pre,prev_pre_gain,target_pre_gain,early_gain,late_gain,decay_direct[4],decay_cur_fdn[4],decay_cur_out[4],prev_fb[4];
+  u32 early_t[20],refl_t;
+} AR3d;
+static float r3_pow10(float x){if(x>=0)return 1;if(x<=-5.3f)return 0;return powf(10.f,x);}
+static float r3_cosd(float d){return cosf(d*3.14159265f/180.f);}
+static float r3_sind(float d){return sinf(d*3.14159265f/180.f);}
+static const float r3_fdn_min[4]={5.0f,6.0f,13.0f,14.0f},r3_fdn_max[4]={45.704f,82.782f,149.94f,271.58f},
+  r3_dd1[4]={17.0f,13.0f,9.0f,7.0f},r3_dd2[4]={19.0f,11.0f,10.0f,6.0f},
+  r3_early_t[20]={0.017136f,0.059154f,0.16173f,0.39019f,0.42526f,0.45541f,0.68974f,0.74591f,0.83384f,0.8595f,0.0f,0.075024f,0.16879f,0.2999f,0.33744f,0.3719f,0.59901f,0.71674f,0.81786f,0.85166f},
+  r3_early_g[20]={0.67096f,0.61027f,1.0f,0.35680f,0.68361f,0.65978f,0.51939f,0.24712f,0.45945f,0.45021f,0.64196f,0.54879f,0.92925f,0.38270f,0.72867f,0.69794f,0.5464f,0.24563f,0.45214f,0.44042f};
+static void ar3_param(AR3d*s,const u8*q){
+  float sr=(float)au32(q+0x14);if(!(sr>=8000&&sr<=192000))sr=48000;float srk=(float)(au32(q+0x14)/1000);if(!(srk>=8))srk=48;
+  float room_hf=af32(q+0x18),hf_ref=af32(q+0x1C),decay=af32(q+0x20),hf_ratio=af32(q+0x24),room=af32(q+0x28),refl=af32(q+0x2C),rev=af32(q+0x30),
+    diffusion=af32(q+0x34),refl_delay=af32(q+0x38),rev_delay=af32(q+0x3C),density=af32(q+0x40);
+  if(!(decay>0))decay=0.1f;if(!(hf_ratio>0))hf_ratio=0.1f;
+  if(!s->ok){for(int i=0;i<4;i++){r3_init(&s->fdn[i],srk,r3_fdn_max[i]);r3_set(&s->fdn[i],r3_fdn_max[i]);r3_init(&s->d1[i].l,srk,r3_dd1[i]);r3_set(&s->d1[i].l,r3_dd1[i]);
+      r3_init(&s->d2[i].l,srk,r3_dd2[i]);r3_set(&s->d2[i].l,r3_dd2[i]);}
+    r3_init(&s->pre,srk,400);r3_set(&s->pre,400);r3_init(&s->fc,srk,5);r3_set(&s->fc,5);s->ok=1;}
+  s->dry=af32(q+0x44);if(!isfinite(s->dry))s->dry=0;
+  memset(s->prev_fb,0,sizeof s->prev_fb);s->prev_pre=0;
+  s->early_gain=r3_pow10(fminf(room+refl,5000.f)/2000.f);s->late_gain=r3_pow10(fminf(room+rev,5000.f)/2000.f);
+  float hfg=r3_pow10(room_hf/2000.f);
+  if(hfg<1.f){float a=1.f-hfg,b=2.f-((2.f*hfg)*r3_cosd(256.f*hf_ref/sr)),c=sqrtf(fmaxf(b*b-4.f*(1.f-hfg)*(1.f-hfg),0.f));s->prev_pre_gain=(b-c)/(2.f*a);s->target_pre_gain=1.f-s->prev_pre_gain;}
+  else{s->prev_pre_gain=0;s->target_pre_gain=1;}
+  s->refl_t=(u32)lroundf(srk*(1000.f*(refl_delay+rev_delay)));
+  float echo=0.6f*diffusion*0.01f;
+  for(int i=0;i<4;i++){r3_set(&s->fdn[i],r3_fdn_min[i]+(density/100.f*(r3_fdn_max[i]-r3_fdn_min[i])));
+    u32 n=s->fdn[i].cnt+s->d1[i].l.cnt+s->d2[i].l.cnt;
+    float ta=(-60.f*(float)n)/(decay*sr),tb=ta/hf_ratio,tc=r3_cosd(128.f*0.5f*hf_ref/sr)/r3_sind(128.f*0.5f*hf_ref/sr),td=r3_pow10((tb-ta)/40.f),te=r3_pow10((tb+ta)/40.f)*0.7071f;
+    s->decay_direct[i]=te*((td*tc)+1.f)/(tc+td);s->decay_cur_fdn[i]=te*(1.f-(td*tc))/(tc+td);s->decay_cur_out[i]=(tc-td)/(tc+td);
+    s->d1[i].rate=echo;s->d2[i].rate=echo*-0.9f;}
+  for(int i=0;i<20;i++){u32 n=(u32)lroundf(srk*((refl_delay*1000.f)+(r3_early_t[i]*1000.f*((rev_delay*0.9998f)+0.02f))));if(n>s->pre.max)n=s->pre.max;s->early_t[i]=n;}
+}
+static void ar3_run(AR3d*s,float*const*in,float*const*out,int nch){
+  static const int oe_mono[20]={0},oe_st[20]={0,0,0,1,1,1,1,0,0,0,1,1,1,0,0,0,0,1,1,1},oe_quad[20]={0,0,0,1,1,1,1,2,2,2,1,1,1,0,0,0,0,3,3,3},
+    oe_sur[40]={4,5,0,5,0,5,1,5,1,5,1,5,1,5,2,5,2,5,2,5,1,5,1,5,1,5,0,5,0,5,0,5,0,5,3,5,3,5,3,5},
+    te_sur[40]={0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15,16,16,17,17,18,18,19,19},
+    fb_mono[1]={0},fb_st[2]={0,1},fb_quad[4]={0,1,2,3},fb_sur[6]={0,1,2,3,-1,3};
+  const int*oe,*fbt;int ne,nfb;static const int te_id[20]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19};const int*te=te_id;
+  if(nch==1){oe=oe_mono;ne=20;fbt=fb_mono;nfb=1;}else if(nch==2){oe=oe_st;ne=20;fbt=fb_st;nfb=2;}else if(nch==4){oe=oe_quad;ne=20;fbt=fb_quad;nfb=4;}
+  else if(nch==6){oe=oe_sur;te=te_sur;ne=40;fbt=fb_sur;nfb=6;}else return;
+  for(int n=0;n<AF;n++){float ov[6]={0},ci[6]={0},fbo[4],fb[4],val[4];
+    float tap=r3_tap(&s->pre,s->refl_t,1);
+    for(int i=0;i<ne;i++){int ei=te[i];int oi=oe[ei];ov[oi]+=r3_tap(&s->pre,s->early_t[ei],1)*r3_early_g[ei];}
+    float pv=0;for(int c=0;c<nch;c++){ci[c]=in[c]?in[c][n]:0;pv+=ci[c];}
+    for(int c=0;c<nch;c++)ov[c]*=s->early_gain;
+    s->prev_pre=(pv*s->target_pre_gain)+(s->prev_pre*s->prev_pre_gain);if(!isfinite(s->prev_pre))s->prev_pre=0;
+    r3_upd(&s->pre,s->prev_pre);
+    for(int i=0;i<4;i++){float f=r3_read(&s->fdn[i]);float o=f*s->decay_direct[i]+s->prev_fb[i];s->prev_fb[i]=(f*s->decay_cur_fdn[i])+(o*s->decay_cur_out[i]);if(!isfinite(s->prev_fb[i]))s->prev_fb[i]=0;fbo[i]=o;}
+    fb[0]=fbo[2]+fbo[1];fb[1]=-fbo[0]-fbo[3];fb[2]=fbo[0]-fbo[3];fb[3]=fbo[1]-fbo[2];
+    for(int i=0;i<4;i++){float t=r3d_upd(&s->d1[i],tap*s->late_gain+fb[i]);val[i]=r3d_upd(&s->d2[i],t);r3_upd(&s->fdn[i],val[i]);}
+    for(int c=0;c<nfb;c++){int t=fbt[c];if(t>=0&&out[c])out[c][n]=ov[c]+val[t]+ci[c]*s->dry;}
+    if(nch==1&&out[0])out[0][n]+=val[1];
+    if(nch==6&&out[4])out[4][n]+=(ov[4]+r3_upd(&s->fc,(val[2]-val[3])*0.5f)+ci[4]*s->dry);}
+}
 static void aeffects_run(ARenderer*r,u32 mix){
   for(u32 i=0;i<r->effect_count;i++){AEffect*f=&r->effect[i];if(f->mix!=mix||!f->enabled)continue;
     if(f->type==5){const u8*q=f->param;int nch=au32(q+0xE)&0xFFFF;if(nch<1||nch>6)continue;
-      if(!f->rv){f->rv=calloc(1,sizeof *f->rv);if(!f->rv)continue;}
-      areverb_setup(f->rv,q);float*io[6]={0};
+      static int oldrv=-1;if(oldrv<0)oldrv=getenv("SWR_AUDIO_OLD_REVERB")!=NULL;
+      float*io[6]={0};
       for(int c=0;c<nch;c++){int in=(signed char)q[c],out=(signed char)q[6+c];if(in<0||in>=24||out<0||out>=24)continue;
         float*src=r->samples+((size_t)mix*24+in)*AF,*dst=r->samples+((size_t)mix*24+out)*AF;if(dst!=src)memcpy(dst,src,AF*sizeof(float));io[c]=dst;}
-      areverb(f->rv,io,nch,nch==6?3:-1);}
+      if(oldrv){if(!f->rv){f->rv=calloc(1,sizeof *f->rv);if(!f->rv)continue;}areverb_setup(f->rv,q);areverb(f->rv,io,nch,nch==6?3:-1);}
+      else{if(nch!=1&&nch!=2&&nch!=4&&nch!=6)continue;if(!f->r3){f->r3=calloc(1,sizeof *f->r3);if(!f->r3)continue;}
+        if(!f->r3->ok||memcmp(f->r3->key,q,0x48)){memcpy(f->r3->key,q,0x48);ar3_param(f->r3,q);}
+        ar3_run(f->r3,io,io,nch);}}
     else{static u32 warned;if(f->type<32&&!(warned&(1u<<f->type))){warned|=1u<<f->type;LOG("audio: effect type %u is not modelled (mix %u)\n",f->type,mix);}}}
 }
 static void agroups(ARenderer*r,double*e){for(int g=0;g<4;g++)for(int c=0;c<6;c++){const float*x=r->samples+((size_t)24+g*6+c)*AF;for(int n=0;n<AF;n++)e[g]+=(double)x[n]*x[n];}}
@@ -422,8 +519,14 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
       if(play==0&&v->nq&&o->u[3]==0){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
         double step=(double)rate*pitch/48000.0;u32 mix=au32(vi+0x58);if(mix>=AM)mix=0;u32 nc=r->mix[mix].valid?r->mix[mix].count:2;if(nc>24)nc=24;
         if(!r->logged_voice){r->logged_voice=1;LOG("audio: first voice %u, format %u, %u channels, %u Hz, volume %.3f, mix %u, %u buffers\n",id,vi[0xB],au32(vi+0x18),rate,volume,mix,v->nq);}
+        if(!g_lz_ok)alz_init();if(g_lz_lin<0)g_lz_lin=getenv("SWR_AUDIO_LINEAR")!=NULL;
+        float vol0=v->vol_ok?v->vol_prev:volume;   /* the console ramps a voice's volume across the frame; a jump clicks */
         for(int n=0;n<AF&&v->nq;n++){ABuffer*b=&v->q[0];u32 at=(u32)v->position;if(at>=b->frames)at=b->frames-1;u32 next=at+1;if(next>=b->frames)next=b->loop?0:at;float fraction=(float)(v->position-at);
-          for(u32 ch=0;ch<b->channels;ch++){float value=b->pcm[at*b->channels+ch]+(b->pcm[next*b->channels+ch]-b->pcm[at*b->channels+ch])*fraction;value=abiquad(v,vi,ch,value)*volume;
+          float vol_n=vol0+(volume-vol0)*((float)(n+1)/AF);int ph=(int)(fraction*256.f+0.5f);if(ph>256)ph=256;if(ph<0)ph=0;const float*lw=g_lz[ph];
+          for(u32 ch=0;ch<b->channels;ch++){float value;
+            if(g_lz_lin)value=b->pcm[at*b->channels+ch]+(b->pcm[next*b->channels+ch]-b->pcm[at*b->channels+ch])*fraction;
+            else{value=0;for(int t=0;t<8;t++){i64 k=(i64)at+t-3;float x= k>=0&&k<b->frames? b->pcm[(size_t)k*b->channels+ch] : asrc_at(v,ch,k);value+=x*lw[t];}}
+            value=abiquad(v,vi,ch,value)*vol_n;
             u32 resource=au32(vi+0x140+ch*4);const u8*res=resource<AR&&r->resource_valid[resource]?r->resources[resource]:NULL;
             for(u32 dst=0;dst<nc;dst++){float gain=res?af32(res+4+dst*4):(b->channels==1?1.f:dst==ch?1.f:0.f);if(gain)r->samples[((size_t)mix*24+dst)*AF+n]+=value*gain;}}
           v->position+=step;v->played_fraction+=step;u64 whole=(u64)v->played_fraction;v->played+=whole;v->played_fraction-=whole;
@@ -433,6 +536,7 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
             if(g_opt_audio_eos_sample_count&&v->q[0].eos){v->played=(u64)v->position;v->played_fraction=v->position-v->played;}
             apop(v);}
         }
+        v->vol_prev=volume;v->vol_ok=1;
       }
     }
     memcpy(status+i*16,&v->played,8);memcpy(status+i*16+8,&v->consumed,4);
@@ -441,7 +545,11 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
      invalid destinations are ignored instead of recursively feeding audio. */
   u8 done[AM]={0};done[0]=1;
   for(int pass=0;pass<AM;pass++){int progressed=0;for(u32 id=1;id<AM;id++){AMix*m=&r->mix[id];if(done[id]||!m->valid||!m->used)continue;int child=0;for(u32 k=1;k<AM;k++)if(!done[k]&&r->mix[k].valid&&r->mix[k].used&&r->mix[k].dest==id){child=1;break;}if(child)continue;done[id]=1;progressed=1;aeffects(r,id);u32 dest=m->dest;if(dest>=AM||dest==id)continue;u32 dc=r->mix[dest].valid?r->mix[dest].count:2;
-    for(u32 src=0;src<m->count;src++)for(u32 d=0;d<dc;d++){float gain=m->matrix[src][d]*m->volume;if(!isfinite(gain)||!gain)continue;float*s=r->samples+((size_t)id*24+src)*AF,*out=r->samples+((size_t)dest*24+d)*AF;for(int n=0;n<AF;n++)out[n]+=s[n]*gain;}}
+    for(u32 src=0;src<m->count;src++)for(u32 d=0;d<dc;d++){float gain=m->matrix[src][d]*m->volume;if(!isfinite(gain))gain=0;
+      float g0=m->gprev_ok?m->gprev[src][d]:gain;m->gprev[src][d]=gain;if(!gain&&!g0)continue;   /* ramped like the console's mix volume */
+      float*s=r->samples+((size_t)id*24+src)*AF,*out=r->samples+((size_t)dest*24+d)*AF;
+      if(g0==gain)for(int n=0;n<AF;n++)out[n]+=s[n]*gain;else for(int n=0;n<AF;n++)out[n]+=s[n]*(g0+(gain-g0)*((float)(n+1)/AF));}
+    m->gprev_ok=1;}
     if(!progressed)break;}
   aeffects(r,0);
   if(o->u[3]==0){i16 pcm[AF*2];extern int g_opt_volume;float final_volume=(r->mix[0].valid?r->mix[0].volume:1)*(float)g_opt_volume*0.01f;   /* [Audio] volume, live */float peak=0;
