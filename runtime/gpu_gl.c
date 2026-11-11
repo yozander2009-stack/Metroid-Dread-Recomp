@@ -1673,16 +1673,37 @@ static void ur_init(void){
      3962 samples in memcmp). SWR_NO_UR_SHADOW=1 = compare against the mapped memory as before */
   if(!getenv("SWR_NO_UR_SHADOW")) g_ur_shadow=malloc((size_t)g_ur_size+65536); }
 
+/* Retire during setup, fence at the next draw: the current draw can use both
+   sides of a boundary. Sealed spans cannot be reused after their last-use fence.
+   VS+FS allocate at most 36*64 KB per draw, less than one 8 MB segment. */
+static u32 g_ur_pending, g_ur_closed;
+static void ur_begin_draw(void){
+  for(u32 s=0;s<UR_SEGS;s++) if(g_ur_pending&(1u<<s)){
+    if(g_ur_f[s]) p_ds(g_ur_f[s]);
+    g_ur_f[s]=p_fs(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+    if(!g_ur_f[s]) glFinish();   /* failed fence: finish before any later overwrite */
+  }
+  g_ur_pending=0; }
+static int ur_reusable(u32 off,u32 sz){
+  u32 seg=g_ur_size/UR_SEGS;
+  for(u32 s=off/seg;s<=(off+sz-1)/seg;s++) if(g_ur_closed&(1u<<s)) return 0;
+  return 1; }
+static void ur_wait(u32 s){
+  if(g_ur_f[s]){ GLenum rr=p_cws(g_ur_f[s],GL_SYNC_FLUSH_COMMANDS_BIT,0);
+    if(rr==GL_TIMEOUT_EXPIRED){ st_ur_wait++;
+      do{ rr=p_cws(g_ur_f[s],GL_SYNC_FLUSH_COMMANDS_BIT,2000000000ull); }while(rr==GL_TIMEOUT_EXPIRED); }
+    if(rr!=GL_ALREADY_SIGNALED && rr!=GL_CONDITION_SATISFIED){
+      WARN("gpu: uniform-ring fence wait failed; finishing GPU work before reuse\n"); glFinish(); }
+    p_ds(g_ur_f[s]); g_ur_f[s]=0;
+  }
+  g_ur_closed&=~(1u<<s); }
 static u32 ur_alloc(u32 sz){
   u32 need=(sz+g_ur_align-1)/g_ur_align*g_ur_align, seg=g_ur_size/UR_SEGS;
   u32 off=g_ur_head; if(off+need>g_ur_size){ g_ur_abs+=g_ur_size-off; off=0; }
-  u32 cs=g_ur_head/seg; if(cs>=UR_SEGS) cs=UR_SEGS-1;
-  u32 es=(off+need-1)/seg; if(es>=UR_SEGS) es=UR_SEGS-1;
-  while(cs!=es){ if(g_ur_f[cs]) p_ds(g_ur_f[cs]); g_ur_f[cs]=p_fs(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
-    cs=(cs+1)%UR_SEGS;
-    if(g_ur_f[cs]){ GLenum rr=p_cws(g_ur_f[cs],GL_SYNC_FLUSH_COMMANDS_BIT,0);
-      if(rr==GL_TIMEOUT_EXPIRED){ st_ur_wait++; p_cws(g_ur_f[cs],GL_SYNC_FLUSH_COMMANDS_BIT,2000000000ull); }
-      p_ds(g_ur_f[cs]); g_ur_f[cs]=0; } }
+  u32 cs=(g_ur_head? g_ur_head-1 : 0)/seg;
+  u32 es=(off+need-1)/seg;
+  while(cs!=es){ g_ur_pending|=1u<<cs; g_ur_closed|=1u<<cs;
+    cs=(cs+1)%UR_SEGS; ur_wait(cs); }
   g_ur_head=off+need; g_ur_abs+=need; return off; }
 typedef struct { u64 a, gen, abs; u32 sz, epoch, off; } UrC;
 static UrC urc[4096];
@@ -1695,7 +1716,7 @@ static void upload_cbufs_ring(int stage, Sh* s){
     if(s->si.cbuf_max[i] && sz>s->si.cbuf_max[i]) sz=s->si.cbuf_max[i];   /* only the bytes the shader reads */
     UrC* e=&urc[(u32)((a>>4)^(a>>16)^(a>>28))&4095]; u32 off;
     /* same submit/address, not GPU-written, ring hasn't wrapped: reuse */
-    if(a && e->a==a && e->epoch==g_submit_epoch && e->sz>=sz && g_ur_abs-e->abs<g_ur_size/2 && !gpu_mem_dirty_since(e->gen,a,sz) && gmem_ptr(a,sz) && !memcmp((g_ur_shadow? g_ur_shadow : g_ur_ptr)+e->off,gmem_ptr(a,sz),sz)){ off=e->off; st_cb_skip++; }
+    if(a && e->a==a && e->epoch==g_submit_epoch && e->sz>=sz && g_ur_abs-e->abs<g_ur_size/2 && ur_reusable(e->off,sz) && !gpu_mem_dirty_since(e->gen,a,sz) && gmem_ptr(a,sz) && !memcmp((g_ur_shadow? g_ur_shadow : g_ur_ptr)+e->off,gmem_ptr(a,sz),sz)){ off=e->off; st_cb_skip++; }
     else { st_cb_bytes+=sz; off=ur_alloc(sz); u8* src= a? gmem_ptr(a,sz) : NULL;
       u8* dst= g_ur_shadow? g_ur_shadow+off : g_ur_ptr+off;
       if(src) memcpy(dst,src,sz); else if(a) gmem_read(a,dst,sz); else memset(dst,0,sz);
@@ -2838,7 +2859,7 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     u32 fn=r[0x4C5]; int f= fn>=0x200 && fn<=0x207? (int)(fn-0x200) : fn>=1 && fn<=8? (int)fn-1 : 7; float ref; memcpy(&ref,&r[0x4C4],4);
     float at[4]={ (r[0x4BB]&1)? 1.f : 0.f, (float)f, ref, 0 };
     if(g_sep>0){ if(!fs->lu_ok || memcmp(fs->lu,at,16)){ memcpy(fs->lu,at,16); fs->lu_ok=1; glProgramUniform4fv(atp,atl,1,at); } } else glProgramUniform4fv(atp,atl,1,at); }
-  TM(TM_CB,(upload_cbufs(0,vs), upload_cbufs(4,fs)));
+  TM(TM_CB,(ur_begin_draw(), upload_cbufs(0,vs), upload_cbufs(4,fs)));
   TM(TM_GB,(bind_gbufs(0,vs), bind_gbufs(4,fs)));
   TM(TM_TEX,(bind_textures(ch,0,vs), bind_textures(ch,4,fs)));
   if(g_pf_blit){ g_pf_blit=0; state_dirty(); apply_state(ch); }
