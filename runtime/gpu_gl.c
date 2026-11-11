@@ -1372,7 +1372,7 @@ static int g_state_ok; static u32 g_state_sig[256]; static u64 st_state_skip;
 /* native 0..1 depth (GL 4.5 clip control). remapping z*2-w in the shader loses precision far away */
 static PFNGLCLIPCONTROLPROC p_clip; static int g_clip_mode=-1;
 static float g_dl_jx, g_dl_jy;              /* DLAA: this draw's sub-pixel jitter (0 unless a jittered scene draw) */
-static float g_dl_vp[4], g_dl_dr[2], g_dl_po[3];   /* the draw's unjittered viewport, depth range, polygon offset (for the replay) */
+static float g_dl_vp[4], g_dl_dr[2], g_dl_po[3]; static int g_dl_yflip;   /* the draw's unjittered viewport, depth range, polygon offset (for the replay) */
 static int g_gs_ok;
 
 static void state_dirty(void){ g_state_ok=0; g_gs_ok=0; }
@@ -1532,7 +1532,7 @@ static void apply_state(GpuChannel* ch){
     float x0=tx-fabsf_(sx), y0=ty-fabsf_(sy), w=2*fabsf_(sx), h=2*fabsf_(sy);
     if(w<1||h<1){ u32 vx=r[0x300], vy=r[0x301]; x0=(float)(vx&0xFFFF); w=(float)(vx>>16); y0=(float)(vy&0xFFFF); h=(float)(vy>>16); }
     glViewportIndexedf(0,x0*g_ds+g_dl_jx,y0*g_ds+g_dl_jy,w*g_ds,h*g_ds);
-    g_dl_vp[0]=x0*g_ds; g_dl_vp[1]=y0*g_ds; g_dl_vp[2]=w*g_ds; g_dl_vp[3]=h*g_ds;
+    g_dl_vp[0]=x0*g_ds; g_dl_vp[1]=y0*g_ds; g_dl_vp[2]=w*g_ds; g_dl_vp[3]=h*g_ds; g_dl_yflip= sy<0 && 2*fabsf_(sx)>=1 && 2*fabsf_(sy)>=1;   /* as the front-face rule below */
     float n, f; memcpy(&n,&r[0x302],4); memcpy(&f,&r[0x303],4);
     /* depth goes through the viewport transform (z*scale_z+translate_z) like on hw / yuzu's vk backend.
        SMO's fog pass draws at z=1 with NOTEQUAL to skip the sky, so this has to be exact */
@@ -1843,10 +1843,10 @@ static void dlg_draw(void){
 #define DMV_BYTES (64u<<20)
 #define DMV_MAX 2048
 #define DMV_STRIDE 52u   /* bytes a captured vertex: gl_Position, gl_PointSize, gl_ClipDistance[8] (dlg_vs_xfb) */
-typedef struct { u64 key; u32 occ, off, verts; float vp[4], vpj[4], dr[2], po[3]; int clip; } DmvRec;
+typedef struct { u64 key; u32 occ, off, verts; float vp[4], vpj[4], dr[2], po[3]; int clip, yflip; } DmvRec;
 static struct { GLuint buf[2]; u32 used[2], nrec[2], cur; DmvRec rec[2][DMV_MAX];
   float jx, jy; u32 jframe; int jit_ok, jit_used, hold, misses, failed;
-  GLuint prog, vao, fbo, mv; u32 mvw, mvh; GLint loc_c, loc_p; } g_dmv;
+  GLuint prog, vao, fbo, mv; u32 mvw, mvh; GLint loc_c, loc_p, loc_y; } g_dmv;
 extern void* glq_alloc(size_t sz, size_t extra, void (*ex)(void*)); extern void glq_commit(void); extern int glq_active(void);
 typedef void (APIENTRY* PFN_BTF)(GLenum); typedef void (APIENTRY* PFN_ETF)(void);
 static PFN_BTF r_btf; static PFN_ETF r_etf;
@@ -1933,7 +1933,7 @@ static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int inde
   d->occ=0; for(u32 i=0;i<g_dmv.nrec[c];i++) if(g_dmv.rec[c][i].key==d->key) d->occ++;
   d->off=g_dmv.used[c]; d->verts=(u32)verts;
   memcpy(d->vp,g_dl_vp,16); d->vpj[0]=g_dl_vp[0]+g_dl_jx; d->vpj[1]=g_dl_vp[1]+g_dl_jy; d->vpj[2]=g_dl_vp[2]; d->vpj[3]=g_dl_vp[3];
-  memcpy(d->dr,g_dl_dr,8); memcpy(d->po,g_dl_po,12); d->clip=r[0x35F]&1;
+  memcpy(d->dr,g_dl_dr,8); memcpy(d->po,g_dl_po,12); d->clip=r[0x35F]&1; d->yflip=g_dl_yflip;
   glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER,0,g_dmv.buf[c],(GLintptr)d->off,(GLsizeiptr)bytes);
   dmv_tf(1);
   g_dmv.nrec[c]++; g_dmv.used[c]+=(u32)bytes;
@@ -1946,12 +1946,12 @@ static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){ gp_mark("ours: motion vectors")
   if(!g_dmv.prog){
     static const char* vs="#version 430 core\nlayout(location=0) in vec4 cur; layout(location=1) in vec4 prev; out vec4 vc; out vec4 vp;\n"
       "invariant gl_Position;\nvoid main(){ vc=cur; vp=prev; gl_Position=cur; }";
-    static const char* fs="#version 430 core\nin vec4 vc; in vec4 vp; uniform vec4 vcur; uniform vec4 vprev; out vec2 mv;\n"
-      "void main(){ vec2 nc=vc.xy/vc.w, np=vp.xy/vp.w; vec2 sc=vcur.xy+(nc*0.5+0.5)*vcur.zw; vec2 sp=vprev.xy+(np*0.5+0.5)*vprev.zw; mv=sp-sc; }";
+    static const char* fs="#version 430 core\nin vec4 vc; in vec4 vp; uniform vec4 vcur; uniform vec4 vprev; uniform float ys; out vec2 mv;\n"
+      "void main(){ vec2 nc=vc.xy/vc.w, np=vp.xy/vp.w; vec2 sc=vcur.xy+(nc*0.5+0.5)*vcur.zw; vec2 sp=vprev.xy+(np*0.5+0.5)*vprev.zw; mv=(sp-sc)*vec2(1.0,ys); }";
     char err[512]; GLuint a=compile(GL_VERTEX_SHADER,vs,err,sizeof err), b=compile(GL_FRAGMENT_SHADER,fs,err,sizeof err);
     g_dmv.prog= a&&b? link2(a,b,0) : 0;
     if(!g_dmv.prog){ g_dmv.failed=1; LOG("dlaa (OpenGL): motion-vector program failed: no motion vectors\n"); return 0; }
-    g_dmv.loc_c=glGetUniformLocation(g_dmv.prog,"vcur"); g_dmv.loc_p=glGetUniformLocation(g_dmv.prog,"vprev");
+    g_dmv.loc_c=glGetUniformLocation(g_dmv.prog,"vcur"); g_dmv.loc_p=glGetUniformLocation(g_dmv.prog,"vprev"); g_dmv.loc_y=glGetUniformLocation(g_dmv.prog,"ys");
     glGenVertexArrays(1,&g_dmv.vao); glGenFramebuffers(1,&g_dmv.fbo); }
   if(g_dmv.mvw!=w || g_dmv.mvh!=h){
     if(g_dmv.mv) glDeleteTextures(1,&g_dmv.mv);
@@ -1974,6 +1974,7 @@ static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){ gp_mark("ours: motion vectors")
     glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[c]); glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,DMV_STRIDE,(void*)(size_t)d->off);
     glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[pv]); glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,DMV_STRIDE,(void*)(size_t)q->off);
     glUniform4fv(g_dmv.loc_c,1,d->vp); glUniform4fv(g_dmv.loc_p,1,q->vp);
+    glUniform1f(g_dmv.loc_y,d->yflip? -1.0f : 1.0f);   /* a flipped viewport (sy<0) is drawn with y mirrored: motion along y is mirrored too (MEASURED: TAA smeared vertically before) */
     glViewportIndexedf(0,d->vpj[0],d->vpj[1],d->vpj[2],d->vpj[3]); glDepthRangeIndexed(0,d->dr[0],d->dr[1]);
     if(p_clip && d->clip!=clip){ clip=d->clip; p_clip(0x8CA1,clip? 0x935F : 0x935E); }
     if((int)d->po[0]!=po || po){ po=(int)d->po[0]; if(po){ glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(d->po[1],d->po[2]); } else glDisable(GL_POLYGON_OFFSET_FILL); }
@@ -2031,6 +2032,7 @@ static const char* TAA_FS="#version 430 core\n"
   "  if(info.x>0.5 && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))){\n"
   "    vec3 h=clamp(ycc(hs(uv)),m1-1.25*sd,m1+1.25*sd); o=mix(rgb(h),c0,info.z); }\n"
   "  o=clamp(o,vec3(0.0),vec3(0.999));   /* the clip box in YCoCg can reach outside RGB */\n"
+  "  if(info.w>0.5){ vec2 v=texelFetch(mvt,p,0).xy; o= v==vec2(0.0)? vec3(0.0,0.0,0.35) : vec3(clamp(abs(v)*0.25,0.0,0.999),0.0); }   /* test: motion vectors (blue = none) */\n"
   "  oh=vec4(o,1.0); oc=vec4(itm(o),1.0); }\n";
 static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){ gp_mark("ours: TAA");
   if(g_dmv.failed){ g_taa_failed=1; LOG("taa (OpenGL): no motion vectors on this driver: TAA off\n"); return 0; }
@@ -2061,7 +2063,7 @@ static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){ gp_mark("ours: 
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,t->id);
   glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_taa.hist[c^1]);
   glActiveTexture(GL_TEXTURE0+2); glBindTexture(GL_TEXTURE_2D,mv? mv : g_taa.hist[c^1]);
-  { float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, 0.f }; glUniform4fv(g_taa.loc,1,in);
+  { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_TAA_DEBUG_MV")!=NULL; float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, dbg? 1.f : 0.f }; glUniform4fv(g_taa.loc,1,in);
     static float js=0, jk=0; if(!jk){ const char* e=getenv("SWR_TAA_JSIGN"); js= e? (float)atof(e) : 1.f; e=getenv("SWR_TAA_K"); jk= e? (float)atof(e) : 8.f; }   /* tests: sign +1 and a narrow kernel measured sharpest */
     float j[4]={ g_dmv.jit_used? js*g_dmv.jx : 0.f, g_dmv.jit_used? js*g_dmv.jy : 0.f, jk, 0.f }; glUniform4fv(g_taa.loc_j,1,j); }
   glDrawArrays(GL_TRIANGLES,0,3);
