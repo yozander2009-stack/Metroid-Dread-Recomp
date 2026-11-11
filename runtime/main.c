@@ -882,7 +882,7 @@ static void menu_trace(void){
         FILE* fp=fopen(path,"wb"); if(fp){ fwrite((const void*)GP(o),1,65536,fp); fclose(fp); } } }
     p= *e==','? e+1 : e; } }
 
-static void frametimer_poll(void){ extern void cheats_tick(void); frametimer_trace(); menu_trace(); cheats_tick(); }
+static void frametimer_poll(void){ extern void cheats_tick(void), amiibo_tick(void); frametimer_trace(); menu_trace(); cheats_tick(); amiibo_tick(); }
 
 /* menu_buttons=swap (#13): A and B exchanged while the game shows a menu, so confirm is on the bottom button and
    back on the right one there, while jump stays where it is. In a menu = no scenario loaded yet (title, file select:
@@ -970,6 +970,7 @@ int swr_main(int argc, char** argv){
   load_hints();
   if(loader_load()) fatal("Could not load the game executables from %sexefs/",g_datadir);
   { extern void cheats_init(void); cheats_init(); }   /* cheats.c: <game>_data/cheats/*.txt */
+  { extern void amiibo_init(void); amiibo_init(); }   /* amiibo.c: <game>_data/amiibo/*.bin */
   { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
     extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
     if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; } fclose(f); }

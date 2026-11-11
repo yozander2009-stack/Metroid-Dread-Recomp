@@ -715,7 +715,8 @@ void svc_core_init(void){
   svc_register("bsd:u",new_bsd); svc_register("bsd:s",new_bsd); svc_register("ssl",new_ssl);
   svc_register("prepo:u",new_prepo); svc_register("prepo:a",new_prepo); svc_register("prepo:a2",new_prepo); svc_register("psm",new_psm);
   svc_register("fatal:u",new_fatal); svc_register("csrng",new_csrng); svc_register("mm:u",new_mm);
-  svc_register("nfp:user",new_nfp); svc_register("nfc:user",new_nfp); svc_register("caps:u",new_caps); svc_register("caps:a",new_caps); svc_register("caps:su",new_caps); svc_register("caps:ss",new_caps);
+  { extern SvcObj* amiibo_new_service(void); svc_register("nfp:user",amiibo_new_service); }   /* amiibo.c */
+  svc_register("nfc:user",new_nfp); svc_register("caps:u",new_caps); svc_register("caps:a",new_caps); svc_register("caps:su",new_caps); svc_register("caps:ss",new_caps);
   svc_register("bcat:u",new_bcat); svc_register("bcat:a",new_bcat); svc_register("aoc:u",new_aoc); svc_register("irs",new_irs);
   svc_register("mii:e",new_mii); svc_register("mii:u",new_mii); svc_register("ldn:u",new_ldn); svc_register("ectx:aw",new_ectx); svc_register("spl:",new_spl); svc_register("spl:mig",new_spl);
 }

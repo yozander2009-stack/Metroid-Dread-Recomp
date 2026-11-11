@@ -27,6 +27,7 @@
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
 extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); void cheats_set(int, int); }   // runtime cheats.c
+extern "C" { int amiibo_count(void); const char* amiibo_name(int); const char* amiibo_status(void); int amiibo_place(int); const char* amiibo_dir(void); void amiibo_rescan(void); }   // runtime amiibo.c
 
 extern "C" {
 void settings_queue(const char* k, const char* v);
@@ -118,7 +119,13 @@ void tab_content(int t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
     case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("shadow_resolution"); opt_row("bloom_quality"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
-    case 2: if (cheats_count() > 0) { section("CHEATS");
+    case 2: { static int seen = -100; if (g_frames - seen > 30) amiibo_rescan(); seen = g_frames;   // re-read the folder each time the menu opens
+                section("AMIIBO");
+                for (int i = 0; i < amiibo_count(); i++) if (row_button(fmt("##ovam%d", i).c_str(), amiibo_name(i), "SCAN")) amiibo_place(i);
+                const char* st = amiibo_status();
+                help_text(*st ? st : amiibo_count() ? "SCAN puts the figure on the reader; the game reads it when it asks for an amiibo."
+                                                   : fmt("Put amiibo dumps (.bin) in %s", amiibo_dir()).c_str()); }
+            if (cheats_count() > 0) { section("CHEATS");
                 for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue;
                     bool on = cheats_is_on(i) != 0; if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on)) cheats_set(i, on ? 1 : 0); } }
             section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
