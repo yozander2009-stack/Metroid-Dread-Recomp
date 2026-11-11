@@ -323,7 +323,7 @@ static void update_rows(bool banner) {
     UpdateState u = update_state();
     std::string have = u.installed.empty() ? std::string("an older version") : u.installed;
     if (code_patches_stale() && u.stage != UP_DOWNLOADING && u.stage != UP_REBUILD && u.stage != UP_INSTALLED) {
-        if (row_button("##updp", "This version has game fixes your game code doesn't have yet (a few minutes)", "REBUILD", true)) start_rebuild(false);
+        if (row_button(banner ? "##updpb" : "##updp", "This version has game fixes your game code doesn't have yet (a few minutes)", "REBUILD", true)) start_rebuild(false);
         if (banner) return;
     }
     switch (u.stage) {
