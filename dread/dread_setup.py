@@ -434,7 +434,9 @@ def main():
         with open(os.path.join(data, 'setup.ok'), 'w') as f:
             json.dump({'game': 'Metroid Dread', 'title_id': '%016X' % TITLE_ID, 'version': VERSION, 'build_id': BUILD_ID,
                        'format': SETUP_FORMAT, 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                       'dll_sha256': hashlib.sha256(open(dll, 'rb').read()).hexdigest()}, f, indent=1)
+                       'dll_sha256': hashlib.sha256(open(dll, 'rb').read()).hexdigest(),
+                       # the front end rebuilds when the recompiler's patches differ (a newer package unpacked by hand)
+                       'patches_sha256': hashlib.sha256(open(PATCHES, 'rb').read()).hexdigest()}, f, indent=1)
         P(100, 'Done', '')
         log('Setup complete.')
         print('@@D', flush=True)

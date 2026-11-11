@@ -322,6 +322,10 @@ static void start_rebuild(bool restart_after) {
 static void update_rows(bool banner) {
     UpdateState u = update_state();
     std::string have = u.installed.empty() ? std::string("an older version") : u.installed;
+    if (code_patches_stale() && u.stage != UP_DOWNLOADING && u.stage != UP_REBUILD && u.stage != UP_INSTALLED) {
+        if (row_button("##updp", "This version has game fixes your game code doesn't have yet (a few minutes)", "REBUILD", true)) start_rebuild(false);
+        if (banner) return;
+    }
     switch (u.stage) {
     case UP_AVAILABLE:
         if (row_button("##upd", fmt("Version %s is available (you have %s)", u.latest.c_str(), have.c_str()).c_str(), "UPDATE", true)) update_install_async();
@@ -378,7 +382,9 @@ static void page_play() {
     if (big_button("##play", "PLAY", {S(420), S(86)})) { if (ready) g_play = true; else go(PG_SETUP); }
     ImGui::Dummy({1, S(14)});
 #ifdef _WIN32
-    { UpStage st = update_state().stage; if (st == UP_AVAILABLE || st == UP_DOWNLOADING || st == UP_REBUILD || (st == UP_INSTALLED && update_state().restart)) { update_rows(true); ImGui::Dummy({1, S(10)}); } }
+    { UpStage st = update_state().stage; if (st == UP_AVAILABLE || st == UP_DOWNLOADING || st == UP_REBUILD || (st == UP_INSTALLED && update_state().restart) || code_patches_stale()) { update_rows(true); ImGui::Dummy({1, S(10)}); } }
+#else
+    if (code_patches_stale()) { update_rows(true); ImGui::Dummy({1, S(10)}); }
 #endif
     // three tiles
     float w = ImGui::GetContentRegionAvail().x, tw = (w - S(24)) / 3, th = S(108);

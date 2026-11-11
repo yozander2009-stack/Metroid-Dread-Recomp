@@ -122,6 +122,17 @@ static std::string sha256_file(const std::string& path) {
     return out;
 }
 
+bool code_patches_stale() {
+    static std::string last; static bool stale = false;
+    std::string ok = read_text(P.setup_ok);
+    if (ok == last) return stale;   // checked again only when setup.ok changes (after a setup)
+    last = ok;
+    std::string pj = join(join(P.recompiler, "dread"), "dread_v210_patches.json");
+    if (ok.empty() || !file_exists(P.code) || !file_exists(pj)) return stale = false;
+    std::string h = sha256_file(pj);
+    return stale = !h.empty() && ok.find(h) == std::string::npos;
+}
+
 static std::string local_path(const std::string& rel) { std::string p = rel; for (auto& c : p) if (c == '/') c = '\\'; return join(P.exedir, p); }
 static bool differs(const ManFile& f) { std::string p = local_path(f.path); return !file_exists(p) || file_size(p) != f.size || sha256_file(p) != f.sha; }
 

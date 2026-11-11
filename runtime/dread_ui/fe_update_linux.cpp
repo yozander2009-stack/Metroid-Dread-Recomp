@@ -112,6 +112,16 @@ static std::string sha256_file(const std::string& path) {
     std::string out; if (run({"sha256sum", "--", path}, &out) != 0 || out.size() < 64) return "";
     return out.substr(0, 64);
 }
+bool code_patches_stale() {
+    static std::string last; static bool stale = false;
+    std::string ok = read_text(P.setup_ok);
+    if (ok == last) return stale;   // checked again only when setup.ok changes (after a setup)
+    last = ok;
+    std::string pj = join(join(P.recompiler, "dread"), "dread_v210_patches.json");
+    if (ok.empty() || !file_exists(P.code) || !file_exists(pj)) return stale = false;
+    std::string h = sha256_file(pj);
+    return stale = !h.empty() && ok.find(h) == std::string::npos;
+}
 static bool copy_file_to(const std::string& s, const std::string& d) {
     FILE* a = fopen(s.c_str(), "rb"); if (!a) return false; FILE* b = fopen(d.c_str(), "wb"); if (!b) { fclose(a); return false; }
     char buf[1 << 16]; size_t n; bool ok = true; while ((n = fread(buf, 1, sizeof buf, a)) > 0) if (fwrite(buf, 1, n, b) != n) { ok = false; break; }
