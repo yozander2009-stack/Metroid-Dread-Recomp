@@ -426,10 +426,15 @@ static u64 fast_hash(const u8* p, u64 size, int sampled){
 static u64 sample_hash(u64 gva, u64 len); static int g_nosample;
 
 static u64 mem_hash(u64 gva, u64 size){
-  /* quick sample: one word per 64 bytes + the first 4K */
-  u64 h=1469598103934665603ull; u8* p=gmem_ptr(gva,size);
-  if(p) return fast_hash(p,size,1);
-  for(u64 o=0;o<size;o+=4096){ u64 v[8]; gmem_read(gva+o,v,size-o<64? size-o : 64); for(int i=0;i<8;i++){ h^=v[i]; h*=1099511628211ull; } }
+  /* This is the full check, including the scheduled fallback after sample_hash.
+     Sampling here too missed sparse CPU writes indefinitely (the map's reveal
+     mask, issue #52). Hash every byte, also for non-contiguous guest mappings. */
+  u64 h=1469598103934665603ull, piece[4096/8]; u8* p=gmem_ptr(gva,size);
+  for(u64 o=0;o<size;o+=4096){
+    u64 n=size-o<4096? size-o : 4096;
+    if(!p) gmem_read(gva+o,piece,n);
+    h=(h^fast_hash(p? p+o : (const u8*)piece,n,0))*1099511628211ull;
+  }
   return h; }
 
 static u64 rt_sig(u64 gva){ u8* p=gmem_ptr(gva,4096); if(p) return fast_hash(p,4096,0); u8 b[4096]; gmem_read(gva,b,4096); return fast_hash(b,4096,0); }
@@ -764,23 +769,27 @@ static Tex* tex_from_tic_(u32* tic){
   for(Tex* t=texh[hkey(gva)];t;t=t->next){
     if(t->gva==gva && t->w==w && t->h==h && t->d==d && t->fkey==fkey && t->target==target && !t->is_rt){
       t->last_used=g_frame;
-      /* Video frames are explicit host writes; never delay them behind static-texture polling. */
+      /* A new video revision uploads immediately. An unchanged revision does
+         not prove memory unchanged: the CPU may reuse an old video allocation
+         for a texture, so it must still reach the normal full checks (#52). */
       u64 vg=video_surface_generation(gmem_ptr(gva,1),t->size);
-      if(vg){ if(vg!=t->video_gen){ tex_upload(t); t->video_gen=vg; t->frame_checked=g_frame; t->stable=0; } return t; }
+      if(vg && vg!=t->video_gen){ tex_upload(t); t->video_gen=vg; t->frame_checked=g_frame; t->stable=0; return t; }
       /* Diagnostic mode for gameplay: check CPU textures every frame without polling backoff. */
-      if(getenv("SWR_TEXTURE_COHERENCE_TEST")){ if(t->frame_checked!=g_frame){ t->frame_checked=g_frame; u64 hh=mem_hash(gva,t->size); if(hh!=t->hash){ t->hash=hh; tex_upload(t); } } return t; }
-      /* change check: frequent at first, backs off while the texture stays the same, capped in MB per frame */
-      if(t->frame_checked!=g_frame && (i32)(g_frame-t->next_check)>=0){
+      if(getenv("SWR_TEXTURE_COHERENCE_TEST")){ if(t->frame_checked!=g_frame){ t->frame_checked=g_frame; t->tfull=g_frame; u64 hh=mem_hash(gva,t->size); if(hh!=t->hash){ t->hash=hh; tex_upload(t); } } return t; }
+      /* Budget limits routine checks; a full check overdue by 120 presents must
+         still run, so textures drawn after a busy scene cannot starve (#52). */
+      int overdue=(i32)(g_frame-t->tfull)>=120;
+      if(t->frame_checked!=g_frame && ((i32)(g_frame-t->next_check)>=0 || overdue)){
         if(g_tex_bud_frame!=g_frame){ g_tex_bud_frame=g_frame; g_tex_bud=24u<<20; }
-        /* long-stable: cheap sampled check every 20 frames, sampled-hash check every 120 */
+        /* long-stable: cheap sampled check every 20 frames, full check every 120 */
         if(g_nosample<0) g_nosample=getenv("SWR_NO_SAMPLE_CHECK")!=NULL;
-        if(!g_nosample && t->stable>=40 && t->size>=16384 && (i32)(g_frame-t->tfull)<120){
+        if(!g_nosample && t->stable>=40 && t->size>=16384 && !overdue){
           u64 sh=sample_hash(gva,t->size); t->frame_checked=g_frame;
           if(sh==t->shash){ t->next_check=g_frame+20+((u32)(gva>>9)&7); return t; }
           t->stable=0; }
-        if(g_tex_bud>0 || t->stable<4){ t->frame_checked=g_frame; g_tex_bud-=(i64)(t->size>>(t->size>65536? 1 : 0)); st_tex_chk+=t->size;
+        if(g_tex_bud>0 || t->stable<4 || overdue){ t->frame_checked=g_frame; t->tfull=g_frame; g_tex_bud-=(i64)(t->size>>(t->size>65536? 1 : 0)); st_tex_chk+=t->size;
           u64 hh=mem_hash(gva,t->size); if(hh!=t->hash){ t->hash=hh; tex_upload(t); t->stable=0; } else if(t->stable<100000) t->stable++;
-          if(t->stable>=39 && t->size>=16384){ t->shash=sample_hash(gva,t->size); t->tfull=g_frame; }
+          if(t->stable>=39 && t->size>=16384) t->shash=sample_hash(gva,t->size);
           t->next_check=g_frame+(t->stable<4? 4 : t->stable<12? 8 : 20)+((u32)(gva>>9)&3); } }
       return t; } }
   { /* debug: a texture that lives inside an RT is being read from memory */
@@ -791,7 +800,7 @@ static Tex* tex_from_tic_(u32* tic){
   Tex* t=tex_create(gva,w,h,d,levels,target,f,fkey,bl,bh,bd,pitch,0);
   u64 sz=0; u32 dd= target==GL_TEXTURE_3D? d : 1; for(u32 l=0;l<levels;l++) sz+=bl? bl_level_size(w,h,dd,&f,bh,bd,l,NULL) : (u64)pitch*((h+f.bh-1)/f.bh);
   if(target!=GL_TEXTURE_3D) sz*=d;
-  t->size=sz; t->hash=mem_hash(gva,sz); t->frame_checked=g_frame; t->last_used=g_frame;
+  t->size=sz; t->hash=mem_hash(gva,sz); t->frame_checked=g_frame; t->tfull=g_frame; t->last_used=g_frame;
   tex_upload(t); t->video_gen=video_surface_generation(gmem_ptr(gva,1),sz);
   return t; }
 
