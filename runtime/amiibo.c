@@ -87,7 +87,10 @@ void amiibo_rescan(void){
 
 void amiibo_init(void){
   g_trace= getenv("SWR_AMIIBO_TRACE")!=NULL;
-  lk(); if(!g_act){ g_act=kevent_new("nfp activate",0); g_deact=kevent_new("nfp deactivate",0); g_avail=kevent_new("nfp availability",0); } ulk();
+  /* the service keeps its own reference: kevent_new starts at 0, and the game closes its handles on every Finalize,
+     which would otherwise free the events the next screen visit hands out again (heap corruption) */
+  lk(); if(!g_act){ g_act=kevent_new("nfp activate",0); g_deact=kevent_new("nfp deactivate",0); g_avail=kevent_new("nfp availability",0);
+    kobj_ref(&g_act->o); kobj_ref(&g_deact->o); kobj_ref(&g_avail->o); } ulk();
   amiibo_rescan(); if(g_nfiles) LOG("amiibo: %d dump(s) in %samiibo\n",g_nfiles,g_datadir);
   const char* a=getenv("SWR_AMIIBO_AUTO"); if(a && *a) place_path(a,"test amiibo"); }
 
