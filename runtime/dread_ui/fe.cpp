@@ -196,10 +196,30 @@ static Rec recommend() {
     // renderer: above 60 FPS on a discrete NVIDIA / AMD card native Vulkan is clearly smoother (2026-10-23, RTX 5070, 240 cap:
     // seconds under 200 FPS 2 vs 33-35 with OpenGL, whose driver-call thread is the limit in heavy rooms). At 60 both hold 60, and
     // OpenGL is the most tested; integrated graphics stay on OpenGL (native Vulkan untested there). It falls back to OpenGL by itself.
-    // 2026-10-23 owner: OpenGL stays the pick for now. 2026-11-11: native Vulkan no longer labelled experimental (Deck + PC
-    // regressions, menu, soak), but the pick is still OpenGL. When it becomes the default:
-    //   r.renderer = !g_hw.integrated && (NVIDIA or AMD/Radeon in g_hw.gpu) && r.fps != "1" ? "vulkan_native" : "opengl";
-    r.renderer = "opengl";
+    // 2026-11-11 (owner: Vulkan where it runs better, OpenGL elsewhere):
+    //  - modern discrete cards only (NVIDIA RTX / GTX 16, AMD RX 5000 and newer). Older cards (GTX 1080 tester) stall on
+    //    native Vulkan's first-time pipeline builds (~110 ms each, 9 s in 3 min), so they stay on OpenGL; so do integrated
+    //    graphics and Intel (untested on native Vulkan).
+    //  - NVIDIA: native Vulkan above 60 FPS only; at 60 both hold 60 and OpenGL is the most tested.
+    //  - AMD on Windows: native Vulkan at any rate (AMD's OpenGL driver: issues #12/#39/#49/#55/#62 crash in atio6axx, and
+    //    native Vulkan ran for those reporters). On Linux Mesa's OpenGL is fine, so the NVIDIA rule.
+    {
+        std::string g = g_hw.gpu; for (auto& c : g) c = (char)toupper((unsigned char)c);
+        auto has = [&](const char* s) { return g.find(s) != std::string::npos; };
+        bool nv_modern = has("NVIDIA") && (has("RTX") || has("GTX 16"));
+        int rx = 0; size_t p = g.find("RX "); if (p != std::string::npos) rx = atoi(g.c_str() + p + 3);
+        bool amd_modern = (has("AMD") || has("RADEON")) && rx >= 5000;
+        bool vk = false;
+        if (!g_hw.integrated && nv_modern && r.fps != "1") vk = true;
+        if (!g_hw.integrated && amd_modern) {
+#ifdef _WIN32
+            vk = true;
+#else
+            vk = r.fps != "1";
+#endif
+        }
+        r.renderer = vk ? "vulkan_native" : "opengl";
+    }
     r.summary = fmt("Resolution %s, %s, picture %s, anisotropic filtering %s\xC3\x97%s, %s, fullscreen.",
                     res_text(r.res, true, r.asp.c_str()).c_str(), r.fps == "1" ? "60 FPS" : (r.fps + " FPS").c_str(), r.asp.c_str(), r.af.c_str(),
                     r.sharp != "0" ? ", light sharpening" : "", r.renderer == "vulkan_native" ? "Native Vulkan (smoothest at high frame rates)" : "OpenGL");
