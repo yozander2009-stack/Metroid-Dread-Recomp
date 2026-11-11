@@ -122,14 +122,14 @@ static char* dlg_vs_xfb(char* src){
 #endif
   if(!want || g_gles || !src) return src;
   char* d=strstr(src,decl); char* nl=strchr(src,'\n'); if(!d || !nl || nl>d) return src;
-  static const char* ext="#extension GL_ARB_enhanced_layouts : require\n";
-  /* every member at an explicit offset: with xfb_offset on gl_Position alone, NVIDIA captured more of the block (44 bytes a
-     vertex) than the 16 read back, so 2/3 of each capture was other data and the replay drew huge stray triangles (8-18 ms
-     a frame at 2x). This way the layout is DMV_STRIDE on every driver */
-  static const char* nd="out gl_PerVertex { layout(xfb_buffer=0, xfb_offset=0) invariant vec4 gl_Position; layout(xfb_buffer=0, xfb_offset=16) float gl_PointSize; layout(xfb_buffer=0, xfb_offset=20) float gl_ClipDistance[8];";
-  size_t n=strlen(src)+strlen(ext)+strlen(nd)+1; char* o=malloc(n); if(!o) return src;
-  size_t a=(size_t)(nl+1-src), b=(size_t)(d-src);
-  memcpy(o,src,a); strcpy(o+a,ext); memcpy(o+a+strlen(ext),src+a,b-a); strcpy(o+a+strlen(ext)+(b-a),nd); strcat(o,d+strlen(decl));
+  /* the position alone, 16 bytes a vertex, through its own output written at the end of main: capturing the gl_PerVertex
+     block (52 bytes with explicit offsets; NVIDIA took 44 when only gl_Position had one) made the depth prepass 1.6 ms
+     slower at 2.2x (MEASURED: 240 FPS locked without TAA, 200-205 with). The block itself stays as the translator wrote it */
+  static const char* ext="#extension GL_ARB_enhanced_layouts : require\nlayout(xfb_buffer=0, xfb_offset=0, xfb_stride=16) out vec4 swr_xfb_pos;\n#define main swr_vs_main\n";
+  static const char* tail="\n#undef main\nvoid main(){ swr_vs_main(); swr_xfb_pos=gl_Position; }\n";
+  (void)d; size_t n=strlen(src)+strlen(ext)+strlen(tail)+1; char* o=malloc(n); if(!o) return src;
+  size_t a=(size_t)(nl+1-src);
+  memcpy(o,src,a); o[a]=0; strcat(o,ext); strcat(o,src+a); strcat(o,tail);
   free(src); return o; }
 
 /* ============================================================ formats */
@@ -1872,7 +1872,7 @@ static void dlg_draw(void){
    or test it EQUAL (prepass and G-buffer) move by a sub-pixel Halton(2,3) offset through the viewport */
 #define DMV_BYTES (64u<<20)
 #define DMV_MAX 2048
-#define DMV_STRIDE 52u   /* bytes a captured vertex: gl_Position, gl_PointSize, gl_ClipDistance[8] (dlg_vs_xfb) */
+#define DMV_STRIDE 16u   /* bytes a captured vertex: swr_xfb_pos = gl_Position (dlg_vs_xfb) */
 typedef struct { u64 key; u32 occ, off, verts; float vp[4], vpj[4], dr[2], po[3]; int clip; } DmvRec;
 static struct { GLuint buf[2]; u32 used[2], nrec[2], cur; DmvRec rec[2][DMV_MAX];
   float jx, jy; u32 jframe; int jit_ok, jit_used, hold, misses, failed;
@@ -1949,6 +1949,7 @@ static void dlg_jitter(u32* r){
 /* r3d_draw_gl, around the draw call: capture a prepass draw's positions. 1 = capturing (end it after the draw) */
 static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int indexed, u32 first, u32 count, u32 base_vertex, u32 instances){
   if(g_tf_missing && !g_dmv.failed){ g_dmv.failed=1; LOG("dlaa (OpenGL): no transform feedback: no motion vectors\n"); }
+  { static int nx=-1; if(nx<0) nx=getenv("SWR_TEST_NO_XFB")!=NULL; if(nx) return 0; }   /* test: no capture */
   if(!vs->xfb || mode!=GL_TRIANGLES || topology!=4 || !dlg_scene_draw() || !(r[0x4BA] && r[0x4B3]) || ((r[0x820]|r[0x830]|r[0x840])&1)) return 0;
   u64 verts=(u64)count/3*3*instances; if(verts<3 || count%3) return 0;
   u32 c=g_dmv.cur; u64 bytes=verts*DMV_STRIDE;
@@ -2967,17 +2968,19 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     } else {
       if(idx_bound) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,idx_id);   /* read and uploaded before the attributes */
       else buf_cached(GL_ELEMENT_ARRAY_BUFFER,ia+(u64)first*isz,(u64)count*isz);   /* just this draw's range */
-      int cap=dlg_capture_begin(r,vs,mode,(int)topology,1,first,count,base_vertex,instances);
       glDrawElementsInstancedBaseVertexBaseInstance(mode,count,it,(void*)0,instances,(GLint)base_vertex,base_instance);
-      if(cap) dlg_capture_end();
+      if(dlg_capture_begin(r,vs,mode,(int)topology,1,first,count,base_vertex,instances)){   /* TAA/DLAA positions: a second, vertex-only run */
+        glEnable(GL_RASTERIZER_DISCARD); glDrawElementsInstancedBaseVertexBaseInstance(mode,count,it,(void*)0,instances,(GLint)base_vertex,base_instance);
+        glDisable(GL_RASTERIZER_DISCARD); dlg_capture_end(); }
     }
   } else {
     if(topology==7){ u32 nq=count/4; u32* idx=malloc((size_t)nq*24+4); for(u32 k=0;k<nq;k++){ u32 b=first+k*4; u32 t6[6]={b,b+1,b+2,b,b+2,b+3}; memcpy(idx+k*6,t6,24); }
       glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,g_ibuf); glBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)nq*24,idx,GL_STREAM_DRAW); free(idx);
       glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES,nq*6,GL_UNSIGNED_INT,0,instances,0,base_instance); }
-    else { int cap=dlg_capture_begin(r,vs,mode,(int)topology,0,first,count,0,instances);
-      glDrawArraysInstancedBaseInstance(mode,first,count,instances,base_instance);
-      if(cap) dlg_capture_end(); }
+    else { glDrawArraysInstancedBaseInstance(mode,first,count,instances,base_instance);
+      if(dlg_capture_begin(r,vs,mode,(int)topology,0,first,count,0,instances)){
+        glEnable(GL_RASTERIZER_DISCARD); glDrawArraysInstancedBaseInstance(mode,first,count,instances,base_instance);
+        glDisable(GL_RASTERIZER_DISCARD); dlg_capture_end(); } }
   }
   g_tm[TM_DRAW]+=plat_ns()-tb0_;
   tr_draw(ch,vs,fs,code+r[0x801+1*0x10],(r[0x800+5*0x10]&1)? code+r[0x801+5*0x10] : 0,indexed,topology,count,instances);
