@@ -437,7 +437,8 @@ static int audren_obj(SvcObj* o, IpcCtx* c){
     case 5: o->u[3]=0; return 0;
     case 6: o->u[3]=1; return 0;
     case 7: out_copy_h(c,ev_handle(g_aud_ev)); return 0;
-    case 8: case 9: return 0;
+    case 8: o->u[6]=in32(c,0)|0x100000000ull; return 0;   /* SetRenderingTimeLimit (percent) */
+    case 9: out32(c,o->u[6]?(u32)o->u[6]:100); return 0;   /* GetRenderingTimeLimit: 100 until set, as on the console */
     case 11: out32(c,0); return 0;
   }
   return quiet_ok(o,c); }
