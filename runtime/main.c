@@ -626,9 +626,14 @@ static void pace_update(void){
   int f=g_opt_fps;
   if(f>60 && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
     if(o && o<(1ull<<40)){ float s; u32 v=*(volatile u32*)GP(o+1700); memcpy(&s,&v,4);
-      static int was; int slow= s>0.0f && s<0.95f;
-      if(slow!=was){ was=slow; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",slow?"started":"ended",s,slow?60:f); }
-      if(slow) f=60; } }
+      /* hit pauses (a hit or a counter: scale 0.01 for ~0.2 s, 10 times in a 9-minute owner session) also dip below
+         0.95; pacing those at 60 showed as frame drops. Only slow motion that lasts 0.4 s gets 60: the E.M.M.I.
+         slide (~2 s) still does, just 0.4 s later, which only extends the slow motion it is already in */
+      static int was; static u64 t0; int slow= s>0.0f && s<0.95f; u64 now=plat_ns();
+      if(!slow) t0=0; else if(!t0) t0=now;
+      int lng= slow && now-t0>=400000000ull;
+      if(lng!=was){ was=lng; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",lng?"lasting":"ended",s,lng?60:f); }
+      if(lng) f=60; } }
   /* Particle vertex-buffer pool. The game keeps 1024 of them (F_8173910; [GOT+2000] -> the count in use; F_8174D48 takes
      array[count] and count++ with no check). Effects take them every frame and give them back about 0.5 s later, so at
      high frame rates more are in use at once, and an acid splash takes ~125 in one or two frames. At 1025 the game read

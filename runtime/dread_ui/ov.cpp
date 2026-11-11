@@ -263,7 +263,11 @@ extern "C" int ov_pad(unsigned long long phys, int lx, int ly) {
     if (sc == "l3_r3") { bool both = (phys >> 4 & 1) && (phys >> 5 & 1); if (both) { if (!g_hold_t0) g_hold_t0 = now; else if (g_hold_t0 > 0 && now - g_hold_t0 >= 1.0) { toggle = true; g_hold_t0 = -1; } } else g_hold_t0 = 0; }
     g_prev_phys = phys;
     bool open;
-    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else g_q.open = false; } open = g_q.open; }
+    // buttons held when the menu opened (the shortcut itself) are ignored until released: with "- and +" the menu's
+    // Close (+, acts on release) otherwise closed it again the moment the combo was let go
+    static unsigned long long held_at_open;
+    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; held_at_open = phys; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else g_q.open = false; } open = g_q.open; }
+    held_at_open &= phys; phys &= ~held_at_open;
     if (open) {
         g_latch = true; g_open_seen = true;
         { Lock k; memcpy(g_nav.bind, g_q.bind, sizeof g_nav.bind); g_nav.enabled = g_q.nav_on; }
