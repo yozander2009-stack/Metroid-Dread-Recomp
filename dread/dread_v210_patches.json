@@ -271,6 +271,20 @@
     ]
    ]
   },
+  "code_097.c": {
+   "pristine": "f28dcb754fa4f22454d0c765b19674dec0970fcfe419dffa51918b7385f34ba8",
+   "result": "4e8172b68d99c8a31614a11e55026362a515bd1f1c0ebccaff3083ee5aa3df44",
+   "hunks": [
+    [
+     2005,
+     2005,
+     [
+      " /* SWR #53: map pan velocities are tuned per 60 Hz frame; zoom already uses the incoming delta. */",
+      " SETS(2,c->v[2].f[0]*(60.0f*c->v[8].f[0]));"
+     ]
+    ]
+   ]
+  },
   "code_127.c": {
    "pristine": "85c70563edb6e3e593b5de9e71f32bc2416e1cb5a1066971c8dd96a0e023beb7",
    "result": "9e65e8ffc05ac3dcca4f1c84966569f0616aa51eae0b4120ef88aab51cf5e1e6",
