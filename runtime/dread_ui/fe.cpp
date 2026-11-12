@@ -347,6 +347,10 @@ static void update_rows(bool banner) {
     }
     switch (u.stage) {
     case UP_AVAILABLE:
+        if (u.compiler) {   // same version, only the bundled Clang is missing (installs updated from 0.5.0 or older)
+            if (row_button("##upd", fmt("Get the faster game compiler (Clang, %lld MB): the game code is then rebuilt with it, ~6%% faster in heavy scenes", u.extra_mb).c_str(), "GET", true)) update_install_async();
+            break;
+        }
         if (row_button("##upd", fmt("Version %s is available (you have %s)", u.latest.c_str(), have.c_str()).c_str(), "UPDATE", true)) update_install_async();
         if (row_button("##updn", "What's new in it", "OPEN")) open_in_explorer(update_notes_url());
         if (!banner) help_text("Only the files that changed are downloaded, each one is checked before anything is replaced, and the "

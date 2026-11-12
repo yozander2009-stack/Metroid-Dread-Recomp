@@ -166,6 +166,26 @@ def update_files(out, version):
     for r in own:
         f = os.path.join(dst, r.replace('/', os.sep))
         lines.append('file %s %d %s' % (sha(f), os.path.getsize(f), r))
+    # the bundled Clang as a package of its own (extra / xfile lines, which updaters before 0.5.10 skip): an install
+    # without recompiler\clang (updated from 0.5.0 or older, or a launcher's older download) fetches it once, then the
+    # game code is rebuilt with it. Updates themselves stay small. Publish clang-<version>.zip as a release asset too
+    cl = os.path.join(dst, 'recompiler', 'clang')
+    if os.path.isdir(cl):
+        xs = []
+        for dp, dn, fn in os.walk(cl):
+            for n in fn:
+                xs.append(os.path.relpath(os.path.join(dp, n), dst).replace(os.sep, '/'))
+        xs.sort()
+        xpkg = 'clang-%s.zip' % version
+        xz = os.path.join(out, xpkg)
+        with zipfile.ZipFile(xz, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            for r in xs:
+                zf.write(os.path.join(dst, r.replace('/', os.sep)), r)
+        lines.append('extra %s %s %d' % (xpkg, sha(xz), os.path.getsize(xz)))
+        for r in xs:
+            f = os.path.join(dst, r.replace('/', os.sep))
+            lines.append('xfile %s %d %s' % (sha(f), os.path.getsize(f), r))
+        print('compiler: %s (%.1f MB, %d files)' % (xz, os.path.getsize(xz) / 2**20, len(xs)))
     for f in (os.path.join(dst, 'update.txt'), os.path.join(out, 'update.txt')):
         with open(f, 'w', newline='\n') as h:
             h.write('\n'.join(lines) + '\n')

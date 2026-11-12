@@ -120,6 +120,8 @@ struct UpdateState {
     UpStage stage = UP_IDLE; std::string installed, latest, what, error; float pct = 0; int files = 0;
     bool rebuild = false;   // a recompiler file changed: the game code must be rebuilt (setup with the game's own _data)
     bool restart = false;   // the EXE changed: start it again to use it
+    bool compiler = false;  // the release's Clang (an extra package) is missing here: available even at the same version
+    long long extra_mb = 0; // its download size
 };
 std::string installed_version();
 void update_check_async();
