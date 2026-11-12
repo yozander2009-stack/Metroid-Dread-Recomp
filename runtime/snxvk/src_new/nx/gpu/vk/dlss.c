@@ -375,8 +375,15 @@ void vk_dlss_frame(void) {
     if (!dl_active()) return;
     if (g_dl.small_seen && g_dl.frame_best) {
         g_dl.missing = 0;
-        if (g_dl.frame_best == g_dl.stable) g_dl.streak = 0;
-        else if (!g_dl.stable || ++g_dl.streak >= 30) {
+        if (g_dl.frame_best == g_dl.stable) {
+            g_dl.streak = 0;
+            if (g_dl.frame_best_z && g_dl.frame_best_z != g_dl.stable_z) { /* same colour target, another depth: follow it */
+                static int n;
+                if (n++ < 4) LOG("scene point (Vulkan): depth %llx -> %llx\n", (unsigned long long)g_dl.stable_z, (unsigned long long)g_dl.frame_best_z);
+                g_dl.stable_z = g_dl.frame_best_z;
+                g_dl.reset = 1;
+            }
+        } else if (!g_dl.stable || ++g_dl.streak >= 30) {
             g_dl.stable = g_dl.frame_best;
             g_dl.stable_z = g_dl.frame_best_z;
             g_dl.streak = 0;

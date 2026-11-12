@@ -2267,7 +2267,7 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
   glDisable(GL_SCISSOR_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE); glDisable(GL_DEPTH_TEST); glDisable(GL_FRAMEBUFFER_SRGB);
   glDisable(GL_POLYGON_OFFSET_FILL); glColorMaski(0,1,1,1,0); glViewportIndexedf(0,0,0,(float)w,(float)h);
   { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_AO_DEBUG")!=NULL;   /* test: the AO term alone in place of the scene */
-    if(!dbg){ glEnablei(GL_BLEND,0); glBlendFuncSeparatei(0,GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE); } else glDisablei(GL_BLEND,0); }
+    if(!dbg){ glEnablei(GL_BLEND,0); glBlendEquationSeparatei(0,GL_FUNC_ADD,GL_FUNC_ADD); glBlendFuncSeparatei(0,GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE); } else glDisablei(GL_BLEND,0); }
   glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,(float)w,(float)h}; glUniform4fv(g_ao.app_a,1,a); }
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_ao.fin); glBindVertexArray(g_ao.vao);
   glDrawArrays(GL_TRIANGLES,0,3);
@@ -2296,7 +2296,10 @@ static void dlg_frame(void){
   if(!dlg_on()) return;
   if(dlg_dlss()){ static int started; if(!started){ started=1; dlgl_queue(0,0,0,0,0,0,0.0f,0.0f,0); } }   /* NGX up now, not at the first DLAA frame */
   if(g_dlg.small_seen && g_dlg.frame_best){ g_dlg.missing=0;
-    if(g_dlg.frame_best==g_dlg.stable) g_dlg.streak=0;
+    if(g_dlg.frame_best==g_dlg.stable){ g_dlg.streak=0;
+      if(g_dlg.frame_best_z && g_dlg.frame_best_z!=g_dlg.stable_z){   /* same colour target, another depth: follow it (AO/motion read it) */
+        static int n; if(n++<4) LOG("scene point (OpenGL): depth %llx -> %llx\n",(unsigned long long)g_dlg.stable_z,(unsigned long long)g_dlg.frame_best_z);
+        g_dlg.stable_z=g_dlg.frame_best_z; g_dlg.reset=1; } }
     else if(!g_dlg.stable || ++g_dlg.streak>=30){ g_dlg.stable=g_dlg.frame_best; g_dlg.stable_z=g_dlg.frame_best_z; g_dlg.streak=0; g_dlg.reset=1; } }
   else if(++g_dlg.missing>=30) g_dlg.stable=0;
   g_dlg.chosen=g_dlg.stable; g_dlg.chosen_z=g_dlg.stable_z;
