@@ -108,7 +108,7 @@ static bool http_get(const std::string& url, std::string* body, const std::strin
     if (body) *body = out;
     return true;
 }
-static std::string sha256_file(const std::string& path) {
+std::string sha256_file(const std::string& path) {
     std::string out; if (run({"sha256sum", "--", path}, &out) != 0 || out.size() < 64) return "";
     return out.substr(0, 64);
 }
