@@ -82,6 +82,7 @@ void fatal(const char* fmt, ...){
     static u32 black[64*36]; for(int i=0;i<150;i++){ gpu_gl_present_cpu(black,64,36,64*4); plat_sleep_ns(200000000); } }
 #endif
   log_flush(); fflush(NULL);
+  { extern void amd_test_report(void); amd_test_report(); }   /* AMD test mode: the report (main.c) */
   _exit(1);
 }
 

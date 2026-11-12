@@ -144,6 +144,7 @@ static void dead_free(Frame* f) {
         if (d->view) vkDestroyBufferView(g_vk.dev, d->view, NULL);
         if (d->img) vk_image_destroy(d->img, d->mem);
         if (d->buf) {
+            if (getenv("SWR_VK_BL_LOG")) LOG("vulkan: deferred buffer %p destroyed\n", (void*)d->buf);
             vk_mem_untrack(d->mem);
             vmaDestroyBuffer(g_vk.vma, d->buf, d->mem);
         }
@@ -239,6 +240,8 @@ static int ring_misplaced(const Ring* r, const VmaBudget* b) {
 static void ring_reset(Ring* r, const VmaBudget* budget) {
     r->small = r->cap > STAGE_MIN && r->used <= r->cap / 4 ? r->small + 1 : 0;
     if (r->small >= 300 || (budget && r->buf && ring_misplaced(r, budget))) {
+        if (getenv("SWR_VK_BL_LOG"))
+            LOG("vulkan: staging ring %p destroyed (%s)\n", (void*)r->buf, r->small >= 300 ? "small" : "misplaced");
         vk_mem_untrack(r->mem);
         vmaDestroyBuffer(g_vk.vma, r->buf, r->mem);
         *r = (Ring){0};
@@ -391,6 +394,14 @@ static u8* ring_alloc(Frame* f, Ring* r, u64 size, u64 align, VkBufferUsageFlags
             return NULL;
         }
         vk_mem_track(r->mem);
+        if (getenv("SWR_VK_BL_LOG")) {
+            const VkPhysicalDeviceMemoryProperties* mp;
+            vmaGetMemoryProperties(g_vk.vma, &mp);
+            LOG("vulkan: staging ring %p made: %llu bytes, memory type %u (flags %x, heap %u), bar %d, usage %x\n",
+                (void*)r->buf, (unsigned long long)cap, info.memoryType,
+                mp->memoryTypes[info.memoryType].propertyFlags, mp->memoryTypes[info.memoryType].heapIndex,
+                aci.usage == VMA_MEMORY_USAGE_AUTO, usage);
+        }
         r->ptr = info.pMappedData;
         r->cap = cap;
         at = 0;

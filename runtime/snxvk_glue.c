@@ -214,6 +214,11 @@ void snxvk_ini(const char* v){
   else if(set_ww){ unsetenv("SWR_WW"); set_ww=0; } }
 #endif
 
+/* [Graphics] vk_dynamic_vertex_input = auto (default) | 0 | 1: device.c reads it as SWR_VK_DYN_VI when Vulkan starts
+   (set there, after the Play screen, which drops SWR_* variables) */
+static char g_dyn_vi[8];
+void snxvk_ini_dyn_vi(const char* v){ snprintf(g_dyn_vi,sizeof g_dyn_vi,"%s",v? v : ""); }
+
 void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 
 /* the window is up (backend_win32): start Vulkan; 0 = it can't, the caller falls back to OpenGL */
@@ -223,6 +228,7 @@ int snxvk_start(void){
   if(!g_ww_ok){ WARN("vulkan_native: guest memory has no write tracking: using OpenGL\n"); return 0; }
   snprintf(g_cachedir,sizeof g_cachedir,"%svulkan_native/",g_exedir); plat_mkdir(g_cachedir);
   { extern int g_opt_vsync; snxvk_opt_vsync=g_opt_vsync; }
+  if((g_dyn_vi[0]=='0' || g_dyn_vi[0]=='1') && !getenv("SWR_VK_DYN_VI")) plat_setenv("SWR_VK_DYN_VI",g_dyn_vi[0]=='1'? "1" : "0");
   { /* our .ini into their g_settings (swr_settings.c). Their recording thread records the frame's commands; DLSS and
        HDR output record directly into the frame's command buffer, so with either on it stays off (both need a restart) */
     extern void snxv_swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, int recording_thread);
@@ -331,6 +337,7 @@ void snxvk_tick(int tick){   /* frontend loop, 60 Hz */
 void snxvk_exit(void){ if(g_snxvk_on) SNXR_SAVE(1); }
 
 #else   /* built without the library: the option is ignored */
+void snxvk_ini_dyn_vi(const char* v){ (void)v; }
 void snxvk_ini(const char* v){ if(!strcmp(v,"vulkan_native")) WARN("renderer=vulkan_native: this build has no native Vulkan renderer (runtime/snxvk/libsnxvk.a): using OpenGL\n"); }
 void snxvk_gpu_init(void){}
 int snxvk_start(void){ return 0; }

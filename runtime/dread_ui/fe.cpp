@@ -1097,10 +1097,37 @@ using namespace fe;
 
 // ---------------------------------------------------------------- entry points (backend_win32.c)
 #ifdef _WIN32
+extern "C" int g_amd_test;   // main.c: this EXE is "... AMD test.exe"
+// AMD test mode's report (main.c starts this EXE again with --amd-report once the game has exited): the logs packed,
+// the zip shown in Explorer, the issue page opened
+extern "C" int fe_amd_report(const char* exedir) {
+    Sleep(1500);   // the game's process finishes and closes its log
+    P.init(exedir, "Metroid Dread");
+    g_hw = detect_hardware(); g_hw_done = true;
+    std::string info = fmt("version %s\r\nAMD test build (Native Vulkan)\r\ngpu %s\r\ncpu %s\r\n%s\r\n", installed_version().c_str(),
+                           g_hw.gpu.c_str(), cpu_name().c_str(), hw_line().c_str());
+    std::string zip, err;
+    bool ok = make_report(info, &zip, &err);
+    if (getenv("SWR_FE_TEST")) {   // tests: the zip's path (or the error) into SWR_FE_RESULT, no windows
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "amd report ok=%d zip=%s err=%s\n", ok, zip.c_str(), err.c_str()); fclose(f); }
+        return ok ? 0 : 1;
+    }
+    if (!ok) { MessageBoxW(nullptr, wide(err).c_str(), L"Metroid Dread - AMD test", MB_OK | MB_ICONWARNING); return 1; }
+    std::wstring sel = L"/select,\"" + wide(zip) + L"\"";
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", sel.c_str(), nullptr, SW_SHOWNORMAL);
+    open_in_explorer("https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/68");
+    std::wstring m = L"Thank you for testing!\n\nThe test report is saved here:\n" + wide(zip) +
+                     L"\n\nThe GitHub page for this problem is now open in your browser. Drag the zip file into a comment there.";
+    MessageBoxW(nullptr, m.c_str(), L"Metroid Dread - AMD test", MB_OK | MB_ICONINFORMATION);
+    return 0;
+}
+
 extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const char* exename) {
     P.init(exedir, exename);
     IniFile ini; ini.load(P.ini);
-    bool play = false; for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--play")) play = true;
+    bool play = g_amd_test != 0;   // AMD test mode: straight into the game
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--play")) play = true;
     bool skip = (play || ini.get("skip_launcher", "0") == "1") && !(GetAsyncKeyState(VK_SHIFT) & 0x8000);
     GameCheck g = check_installed();
     if (!g.code_ok || !g.data_ok) return 1;   // setup first, whatever was asked

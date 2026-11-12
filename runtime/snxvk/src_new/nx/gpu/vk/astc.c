@@ -178,6 +178,7 @@ int vk_astc_upload(VkCommandBuffer cb, Surf* t, u32 w, u32 h, u32 depth, u32 lev
             u32 shift = tile_shift(nx, n), tw = 1u << shift, th = 64u >> shift;
             AstcParams p = {w, height, nx, n, t->f.vk == VK_FORMAT_R8G8B8A8_SRGB, shift};
             rec_CmdPushConstants(cb, g_astc_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+            vk_note_dispatch("astc", w, (nx + tw - 1) / tw, (n + th - 1) / th, nz);
             rec_CmdDispatch(cb, (nx + tw - 1) / tw, (n + th - 1) / th, nz);
             scratch_barrier(cb, 0);
             VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},

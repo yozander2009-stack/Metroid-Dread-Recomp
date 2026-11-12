@@ -201,7 +201,7 @@ static void submit_run(const void* p) {
                         .pSignalSemaphoreInfos = x->s};
     vk_wait_foreground();
     VkResult r = vkQueueSubmit2(g_vk.gfx, 1, &si, VK_NULL_HANDLE);
-    if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); }
     VK_OK(r);
     /* a timeline of FFmpeg's never reaching its value would hang its decoder for good */
     if (r != VK_SUCCESS && x->ns > 1 && x->s[1].value)

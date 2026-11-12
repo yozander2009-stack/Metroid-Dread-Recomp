@@ -172,6 +172,54 @@ static int device_rating(VkPhysicalDevice pd, const VkPhysicalDeviceProperties* 
     return device_score(pd, p, &gf, &cf, &gq);
 }
 
+/* SWR: after VK_ERROR_DEVICE_LOST, what the driver says the GPU faulted on (VK_EXT_device_fault): the address and
+   kind of each fault, the nearest valid addresses, and the vendor's own codes. Once */
+/* SWR: the last compute dispatches recorded (which kind, its code address or id, its group counts), printed with a
+   device fault: AMD's crash dumps name only "Dispatch" and its group counts */
+static struct { const char* what; u64 id; u32 gx, gy, gz; } g_dn[16];
+static u32 g_dn_at;
+void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz) {
+    u32 i = __atomic_fetch_add(&g_dn_at, 1, __ATOMIC_RELAXED) & 15;
+    g_dn[i].what = what; g_dn[i].id = id; g_dn[i].gx = gx; g_dn[i].gy = gy; g_dn[i].gz = gz;
+}
+void vk_device_fault_log(void) {
+    static int done;
+    for (u32 i = 0; i < 16; i++) {
+        u32 j = (g_dn_at + i) & 15;
+        if (g_dn[j].what)
+            LOG("vulkan: recent dispatch: %s %llx groups %ux%ux%u\n", g_dn[j].what, (unsigned long long)g_dn[j].id,
+                g_dn[j].gx, g_dn[j].gy, g_dn[j].gz);
+    }
+    if (done++ || !g_vk.has_fault || !vkGetDeviceFaultInfoEXT) {
+        if (done == 1) LOG("vulkan: no fault details from this driver (VK_EXT_device_fault %s)\n",
+                           g_vk.has_fault ? "loaded no function" : "not offered");
+        return;
+    }
+    VkDeviceFaultCountsEXT n = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult r = vkGetDeviceFaultInfoEXT(g_vk.dev, &n, NULL);
+    LOG("vulkan: device fault: %u address records, %u vendor records, %llu bytes of vendor data (%d)\n",
+        n.addressInfoCount, n.vendorInfoCount, (unsigned long long)n.vendorBinarySize, (int)r);
+    if (n.addressInfoCount > 64) n.addressInfoCount = 64;
+    if (n.vendorInfoCount > 64) n.vendorInfoCount = 64;
+    n.vendorBinarySize = 0;
+    VkDeviceFaultAddressInfoEXT ai[64];
+    VkDeviceFaultVendorInfoEXT vi[64];
+    VkDeviceFaultInfoEXT fi = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+                               .pAddressInfos = n.addressInfoCount ? ai : NULL,
+                               .pVendorInfos = n.vendorInfoCount ? vi : NULL};
+    r = vkGetDeviceFaultInfoEXT(g_vk.dev, &n, &fi);
+    LOG("vulkan: device fault: %s (%d)\n", fi.description, (int)r);
+    static const char* const kind[] = {"none", "read invalid", "write invalid", "execute invalid",
+                                       "instruction pointer unknown", "instruction pointer invalid",
+                                       "instruction pointer fault"};
+    for (u32 i = 0; i < n.addressInfoCount; i++)
+        LOG("vulkan: device fault address %llx (+-%llx): %s\n", (unsigned long long)ai[i].reportedAddress,
+            (unsigned long long)ai[i].addressPrecision, ai[i].addressType <= 6 ? kind[ai[i].addressType] : "?");
+    for (u32 i = 0; i < n.vendorInfoCount; i++)
+        LOG("vulkan: device fault vendor: %s, code %llx, data %llx\n", vi[i].description,
+            (unsigned long long)vi[i].vendorFaultCode, (unsigned long long)vi[i].vendorFaultData);
+}
+
 static int create_device(void) {
     g_vk.phys = snx_vk_best_device(g_vk.instance, VK_API_VERSION_1_3, device_rating, NULL);
     if (!g_vk.phys) {
@@ -302,10 +350,20 @@ static int create_device(void) {
         g_vk.has_local_read = snx_vk_extensions_has(&e, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
         has_cond = snx_vk_extensions_has(&e, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
         has_provoking = snx_vk_extensions_has(&e, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
-        g_vk.has_dyn_vi = snx_vk_extensions_has(&e, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) &&
-                          !getenv("SWR_VK_NO_DYN_VI");
+        /* SWR: SWR_VK_DYN_VI (the .ini's vk_dynamic_vertex_input, snxvk_glue.c) 0 = off, else on where the device
+           has it. MEASURED 2026-11-12 on a Ryzen 9900X's Radeon iGPU (RDNA2, AMD driver 26.10.1): with it OFF, the first block
+           linear deswizzle of a render target (blocklinear.c, from vk_rt_reload) faults reading 0xbeefdead...
+           (device lost); with it on, the same dispatch runs. SWR_VK_NO_DYN_VI=1 = off (tests) */
+        {
+            const char* dv = getenv("SWR_VK_DYN_VI");
+            int want = !(dv && *dv == '0');
+            (void)p12;
+            g_vk.has_dyn_vi = snx_vk_extensions_has(&e, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) && want &&
+                              !getenv("SWR_VK_NO_DYN_VI");
+        }
         has_pipeline_robustness = snx_vk_extensions_has(&e, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
         has_robustness2 = snx_vk_extensions_has(&e, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+        g_vk.has_fault = snx_vk_extensions_has(&e, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         /* the driver's budget for each heap, the other processes' use taken out, for VMA: without it VMA took
            80% of a heap's size as its budget, blind to what the desktop and other programs hold */
         has_budget = snx_vk_extensions_has(&e, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -375,8 +433,10 @@ static int create_device(void) {
     PortabilityFeatures qport = {.sType = PORTABILITY_FEATURES_STYPE};
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT qdvi = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT qfault = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     int robustness = has_pipeline_robustness && has_robustness2;
     void* const query[] = {&f2,
+                           g_vk.has_fault ? &qfault : NULL,
                            g_vk.has_dyn_vi ? &qdvi : NULL,
                            &q11,
                            &q12,
@@ -399,6 +459,7 @@ static int create_device(void) {
     g_vk.has_cond_render = has_cond && qcond.conditionalRendering;
     g_vk.has_provoking_last = has_provoking && qprov.provokingVertexLast;
     g_vk.has_dyn_vi = g_vk.has_dyn_vi && qdvi.vertexInputDynamicState;
+    g_vk.has_fault = g_vk.has_fault && qfault.deviceFault;
     /* the dynamic state and the barriers within a pass only serve feedback loops */
     g_vk.has_feedback = g_vk.has_feedback && qloop.attachmentFeedbackLoopLayout;
     g_vk.has_feedback_dynamic =
@@ -549,6 +610,12 @@ static int create_device(void) {
     if (g_vk.has_dyn_vi) {
         chain = &fdvi;
         ext[next++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+    }
+    VkPhysicalDeviceFaultFeaturesEXT ffault = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = chain, .deviceFault = VK_TRUE};
+    if (g_vk.has_fault) {
+        chain = &ffault;
+        ext[next++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     }
     u32 nq = g_vk.compute_family == g_vk.gfx_family ? 1 : 2;
     if (g_vk.video_family != ~0u)

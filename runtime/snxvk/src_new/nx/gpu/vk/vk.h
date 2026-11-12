@@ -106,7 +106,11 @@ typedef struct {
     /* VK_EXT_provoking_vertex's provokingVertexLast: flat inputs take a primitive's last vertex, as the 3D engine's
        PROVOKING_VERTEX (0x5A1) can ask */
     int has_provoking_last;
+    /* SWR: VK_EXT_device_fault: after a device loss, what the GPU faulted on (vk_device_fault_log) */
+    int has_fault;
 } VkState;
+void vk_device_fault_log(void);
+void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz);
 extern VkState g_vk;
 
 /* device.c */

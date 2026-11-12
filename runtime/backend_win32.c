@@ -40,7 +40,7 @@ void backend_ini(const char* k, const char* v){
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);
   else if(!strcmp(k,"script")) {strncpy(g_script,v,sizeof g_script-1);g_script[sizeof g_script-1]=0;}
-  else if(!strcmp(k,"renderer")){ g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
+  else if(!strcmp(k,"renderer")){ extern int g_amd_test; if(g_amd_test) v="vulkan_native"; g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
 }
 
 /* a status after the window title (shader pre-build progress); NULL restores the title */
@@ -49,7 +49,8 @@ static void backend_status_win(const char* s){ if(!g_hwnd) return; char* c=NULL;
 void backend_ff_status(int on, int speed){ if(g_hwnd) PostMessageA(g_hwnd,WM_APP+9,(WPARAM)on,(LPARAM)speed); }
 int video_has_gl(void){ return 1; }
 
-void win_fatal_box(const char* msg){ MessageBoxA(g_hwnd,msg,"Metroid Dread",MB_OK|MB_ICONERROR); }
+void win_fatal_box(const char* msg){ extern int g_amd_test; if(g_amd_test || getenv("SWR_TEST_SCRIPT") || getenv("SWR_NO_FATAL_BOX")) return;   /* test runs: the game closes by itself (the .log has the message) */
+  MessageBoxA(g_hwnd,msg,"Metroid Dread",MB_OK|MB_ICONERROR); }
 
 /* ---------------------------------------------------------------- XInput, loaded dynamically */
 typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XGP;

@@ -378,6 +378,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"ultrawide")){ extern int g_opt_ultrawide; if(!aspect_given) g_opt_ultrawide=atoi(v); }   /* loader.c: theboy181's 21:9 patch */
     else if(!strcmp(k,"aspect") && *v){ extern int g_opt_ultrawide;   /* aspect=16:9|21:9|16:10; overrides ultrawide= in any order */
       aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : !strcmp(v,"32:9")? 4 : 0; }
+    else if(!strcmp(k,"vk_dynamic_vertex_input")){ extern void snxvk_ini_dyn_vi(const char*); snxvk_ini_dyn_vi(v); }   /* auto|0|1, snxvk_glue.c */
     else if(!strcmp(k,"dlss")){ extern int snxvk_dlss_mode; snxvk_dlss_mode=atoi(v); }   /* native Vulkan: snxvk dlss.c; OpenGL: dlss_gl.c + gpu_gl.c dlg_* */
     else if(!strcmp(k,"texture_threads")){ g_opt_tex_threads=atoi(v); if(g_opt_tex_threads<0) g_opt_tex_threads=0; if(g_opt_tex_threads>16) g_opt_tex_threads=16; }
     else if(!strcmp(k,"fast_forward")) g_opt_ff=atoi(v);
@@ -915,16 +916,44 @@ void services_init(void){
   svc_core_init(); svc_hid_init(); svc_fs_init(); svc_vi_init(); nv_init(); svc_pl_init(); svc_launcher_init();
 }
 
+/* AMD test mode (Windows, issue #68): the game's EXE copied next to it as "<anything> AMD test.exe" uses the game's own
+   files (ini, saves, game code), skips the Play screen, runs Native Vulkan, and at exit (crash and errors included)
+   starts itself again with --amd-report, which packs the logs, shows the zip and opens the issue page */
+int g_amd_test;
+void amd_test_report(void){
+#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
+  static int done; if(!g_amd_test || done++) return;
+  wchar_t self[1024], cmd[1100]; GetModuleFileNameW(NULL,self,1024); _snwprintf(cmd,1100,L"\"%ls\" --amd-report",self); cmd[1099]=0;
+  STARTUPINFOW si={sizeof si}; PROCESS_INFORMATION pi;
+  if(CreateProcessW(self,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)){ CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+#endif
+}
+
 static void split_path(const char* argv0){
   char p[1024]; strncpy(p,argv0?argv0:"",1023); p[1023]=0;
   char* s1=strrchr(p,'/'), *s2=strrchr(p,'\\'), *s=s1>s2? s1 : s2;
   const char* base= s? s+1 : p;
   strncpy(g_exename,base,255); char* dot=strrchr(g_exename,'.'); if(dot && (!strcmp(dot,".exe")||!strcmp(dot,".EXE"))) *dot=0;
+#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
+  { char low[256]; size_t i=0; for(;g_exename[i] && i<255;i++) low[i]=(char)tolower((unsigned char)g_exename[i]); low[i]=0;
+    if(strstr(low,"amd test")){ g_amd_test=1; strcpy(g_exename,"Metroid Dread"); } }
+#endif
   if(s){ s[1]=0; strncpy(g_exedir,p,1023); } else g_exedir[0]=0;
 }
 
 int swr_main(int argc, char** argv){
   split_path(argv[0]);
+#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
+  if(g_amd_test){
+    for(int i=1;i<argc;i++) if(!strcmp(argv[i],"--amd-report")){ extern int fe_amd_report(const char*); fe_amd_report(g_exedir); _exit(0); }
+    char ok[1300]; snprintf(ok,sizeof ok,"%sMetroid Dread_data\\setup.ok",g_exedir);
+    if(GetFileAttributesA(ok)==INVALID_FILE_ATTRIBUTES){
+      MessageBoxA(NULL,"Put this file in your Metroid Dread folder, next to Metroid Dread.exe, and run it from there.\n\n"
+                  "(The game must have been set up once with Metroid Dread.exe.)","Metroid Dread - AMD test",MB_OK|MB_ICONINFORMATION);
+      _exit(0); }
+    _putenv("SWR_VK_BL_LOG=1"); SetEnvironmentVariableA("SWR_VK_BL_LOG","1");   /* the first deswizzles, logged */
+  }
+#endif
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   { /* one copy per install: two would share the saves (a double click on a Linux desktop icon starts two). An update's
@@ -1013,6 +1042,7 @@ int swr_main(int argc, char** argv){
     if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
   }
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } { extern void snxvk_exit(void); snxvk_exit(); } LOG("Exit.\n"); log_flush(); fflush(NULL);
+  amd_test_report();
   { extern void launcher_on_exit(void); launcher_on_exit(); }
 #if defined(_WIN32)
   TerminateProcess(GetCurrentProcess(),0);   /* don't join the guest threads */

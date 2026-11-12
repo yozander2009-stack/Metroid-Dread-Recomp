@@ -132,6 +132,17 @@ int vk_bl_move(VkCommandBuffer cb, const VkBlMove* m, int to_bl, VkBuffer bl, u6
         return 0;
     }
     bl_init();
+    { /* SWR test: SWR_VK_BL_LOG=1 logs the first moves */
+        static int nlog = -1;
+        if (nlog < 0) nlog = getenv("SWR_VK_BL_LOG") ? 0 : 1000;
+        if (nlog++ < 12)
+            LOG("vulkan: bl move from %p to_bl %d row_bytes %u rows %u y0 %u slices %u bh %u: bl %llx at %llx (%llx+%llx), "
+                "lin %llx at %llx (%llx+%llx) pitch %u\n",
+                __builtin_return_address(0), to_bl, m->row_bytes, m->rows, m->y0, m->slices, m->bh,
+                (unsigned long long)(uintptr_t)bl, (unsigned long long)bl_at, (unsigned long long)bl_off,
+                (unsigned long long)bl_size, (unsigned long long)(uintptr_t)lin, (unsigned long long)lin_at,
+                (unsigned long long)lin_off, (unsigned long long)lin_size, m->lin_pitch);
+    }
     VkDescriptorSet set = vk_desc_alloc(g_bl_ds);
     if (!set) return 0;
     VkDescriptorBufferInfo sides[2] = {{bl, bl_off, bl_size}, {lin, lin_off, lin_size}};
@@ -169,6 +180,7 @@ int vk_bl_move(VkCommandBuffer cb, const VkBlMove* m, int to_bl, VkBuffer bl, u6
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_bl_pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_bl_layout, 0, 1, &set, 0, NULL);
     rec_CmdPushConstants(cb, g_bl_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+    vk_note_dispatch("blocklinear", m->row_bytes, gx, gy, m->slices);
     rec_CmdDispatch(cb, gx, gy, m->slices);
     return 1;
 }

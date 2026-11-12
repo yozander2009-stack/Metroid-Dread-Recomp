@@ -322,7 +322,7 @@ static void cs_submit(void) {
     vk_rec_queue(g_vk.compute); /* after the graphics submissions before it, when the queue is theirs too */
     vk_wait_foreground();
     VkResult r = vkQueueSubmit2(g_vk.compute, 1, &si, VK_NULL_HANDLE);
-    if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); }
     g_recording = 0;
     g_inflight = 1;
     if (!VK_OK(r)) { /* never signaled by the GPU: the host signals it, so waits for it end */
@@ -838,7 +838,9 @@ static void res_unref_all(VkOwnRes** made, int n) {
         }
 }
 
+static u64 g_dn_code; /* SWR: the guest compute program's address, for vk_note_dispatch */
 void vk_dispatch(GpuChannel* ch, const u32* q, u64 code) {
+    g_dn_code = code;
     u32* rc = ch->rcomp;
     u32 gx = qmd_grid_dim_x(q), gy = qmd_grid_dim_y(q), gz = qmd_grid_dim_z(q), lx = qmd_block_dim_x(q),
         ly = qmd_block_dim_y(q), lz = qmd_block_dim_z(q), shm = qmd_shared_alloc(q);
@@ -1447,6 +1449,7 @@ rebind:
     }
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p->p);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk_playout, 0, 1, &set, 0, NULL);
+    vk_note_dispatch("guest", g_dn_code, gx, gy, gz);
     rec_CmdDispatch(cb, gx, gy, gz);
     if (resident) {
         vk_all_barrier(cb); /* its writes before what reads them next */
