@@ -538,6 +538,8 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   if(test_replay){u64 pos=frame; if(test_ms){ if(!test_clock_start) test_clock_start=plat_ns(); pos=(plat_ns()-test_clock_start)/1000000ull; }
     while(test_i+1<test_n&&test_inputs[test_i+1].frame<=pos)test_i++;TestInput*v=&test_inputs[test_i];*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}
   if(test_record&&(!test_recorded||*b!=test_previous.buttons||*lx!=test_previous.lx||*ly!=test_previous.ly||*rx!=test_previous.rx||*ry!=test_previous.ry)){
+    { static int rms=-1; if(rms<0) rms=getenv("SWR_TEST_RECORD_MS")!=NULL;
+      if(rms) frame= test_clock_start? (u32)((plat_ns()-test_clock_start)/1000000ull) : 0; }
     fprintf(test_record,"%u,%llx,%d,%d,%d,%d\n",frame,(unsigned long long)*b,*lx,*ly,*rx,*ry);fflush(test_record);
     test_previous=(TestInput){frame,*b,*lx,*ly,*rx,*ry};test_recorded=1;
   }
@@ -639,7 +641,7 @@ void video_poll(void){
 }
 
 void backend_test_guest_start(void){if(g_script[0]&&getenv("SWR_SCRIPT_GUEST_CLOCK"))g_start=plat_ns();
-  if(getenv("SWR_TEST_SCRIPT_MS")){ test_ms=1; test_clock_start=plat_ns(); LOG("test input clock: start_ns=%llu\n",(unsigned long long)test_clock_start); } }
+  if(getenv("SWR_TEST_SCRIPT_MS") || getenv("SWR_TEST_RECORD_MS")){ test_ms=getenv("SWR_TEST_SCRIPT_MS")!=NULL; test_clock_start=plat_ns(); LOG("test input clock: start_ns=%llu\n",(unsigned long long)test_clock_start); } }
 
 void frontend_frame(void){
   extern u64 gpu_gl_screenshot(const char* path);

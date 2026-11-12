@@ -306,6 +306,7 @@ static struct {
     u32 fw, fh;
     int reset, evals, failed, switches;
 } g_dl;
+static struct { int seen, done; } g_aamb; /* AO on the ambient light this frame (below, evaluate) */
 
 /* The scene point serves DLSS, TAA (ini taa=1, when DLSS is not running) and ReShade's depth (runtime/reshade_gl.c) */
 extern int g_opt_taa;
@@ -401,6 +402,7 @@ void vk_dlss_frame(void) {
     g_dl.small_seen = 0;
     g_dl.done = 0;
     g_dl.evaluated = 0;
+    g_aamb.seen = g_aamb.done = 0;
 }
 
 static int image2d(u32 w, u32 h, VkFormat f, VkImageUsageFlags usage, VkImage* img, VmaAllocation* mem, VkImageView* view) {
@@ -1126,7 +1128,7 @@ static void evaluate_taa(Surf* t, Surf* z) {
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.layout, 0, 1, &g_taa.set[c], 0, NULL);
-    float pc[8] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, 0.0f, /* + the jitter the scene was drawn with */
+    float pc[8] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, 0.04f, /* w: weight where nothing moves; + the jitter */
                    g_mv.jit_used ? g_mv.jx : 0.0f, g_mv.jit_used ? g_mv.jy : 0.0f, 0.0f, 0.0f};
     vkCmdPushConstants(cb, g_taa.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -1480,10 +1482,15 @@ static void evaluate_ao(Surf* t, Surf* z) {
     vk_render_forget_state();
 }
 
+/* AO on the ambient light (as the OpenGL renderer, gpu_gl.c ao_point): Dread's G-buffer pass accumulates the ambient /
+   probe light in a full-size HDR target that the lighting pass then reads; AO multiplies that target before the read,
+   so direct light, light shafts and effects are not darkened. SWR_AO_POINT=scene = after the effects (old) */
+static int ao_at_scene(void) { static int v = -1; if (v < 0) v = getenv("SWR_AO_POINT") && strcmp(getenv("SWR_AO_POINT"), "ambient") != 0; return v; }
+
 static void evaluate(Surf* t, Surf* z) {
     vk_render_end();
     if (dl_reshade()) reshade_depth(z, t->sw, t->sh);
-    if (dl_ao()) evaluate_ao(t, z); /* before TAA: its noise is resolved over frames */
+    if (dl_ao() && !g_aamb.done) evaluate_ao(t, z); /* before TAA: its noise is resolved over frames */
 #ifndef SWR_NO_NGX
     if (dl_dlss()) evaluate_dlss(t, z);
     else
@@ -1503,6 +1510,17 @@ void vk_dlss_before_read(u64 gva) {
         int dup = 0;
         for (int i = 0; i < g_dl.nreads; i++) dup |= g_dl.reads[i] == gva;
         if (!dup) g_dl.reads[g_dl.nreads++] = gva;
+    }
+    if (dl_ao() && !ao_at_scene() && !g_aamb.seen && full_hdr(r) && written_now(gva) && g_dl.chosen && gva != g_dl.chosen) {
+        g_aamb.seen = 1; /* the frame's first read of a full-size HDR target drawn this frame: the ambient light */
+        Surf* z = g_dl.chosen_z ? vk_rt_find(g_dl.chosen_z) : NULL;
+        if (z && z->f.depth && r->sw == z->sw && r->sh == z->sh) {
+            vk_render_end();
+            evaluate_ao(r, z);
+            g_aamb.done = 1;
+            static int said;
+            if (!said) { said = 1; LOG("ao (Vulkan): on the ambient light (target %llx, read by the lighting pass)\n", (unsigned long long)gva); }
+        }
     }
     if (g_dl.done || !g_dl.chosen || gva != g_dl.chosen || !written_now(gva)) return;
     g_dl.done = 1;

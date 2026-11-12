@@ -84,5 +84,6 @@ void main() {
         vis += pl * ((cn + 2.0 * h0 * sin(n) - cos(2.0 * h0 - n)) / 4.0 + (cn + 2.0 * h1 * sin(n) - cos(2.0 * h1 - n)) / 4.0);
     }
     vis = max(0.03, pow(vis / pc.p.y, 2.2));
+    vis = mix(1.0, vis, smoothstep(0.05, 0.25, abs(dot(N, V)))); /* edge-on surfaces: no AO (unreliable; a line at eye level) */
     imageStore(oAO, p, vec4(clamp(vis / 1.5, 0.0, 1.0)));
 }

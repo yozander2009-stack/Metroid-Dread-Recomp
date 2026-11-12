@@ -46,7 +46,7 @@ void main() {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), sz - 1);
             vec3 t = tm(texelFetch(cur, q, 0).rgb);
             vec2 d = vec2(x, y) - pc.jit.xy;
-            float w = exp(-8.0 * dot(d, d)); // unjittered: narrow Gaussian at the true sample spots (measured sharpest)
+            float w = exp(-4.0 * dot(d, d)); // unjittered: a Gaussian at the true sample spots (8 = sharper but shimmers)
             c0 += t * w;
             cw += w;
             vec3 s = ycc(t);
@@ -65,7 +65,10 @@ void main() {
     vec3 o = c0;
     if (pc.info.x > 0.5 && all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
         vec3 h = clamp(ycc(hs(uv)), m1 - 1.25 * sd, m1 + 1.25 * sd);
-        o = mix(rgb(h), c0, pc.info.z);
+        // where nothing moves, less of the jittered new frame: at 1/10 static edges kept an 8-frame jitter shimmer
+        // (MEASURED on OpenGL: frame-to-frame change on a still wall 0.058 -> 0.030, sharpness unchanged)
+        float wc = dot(mv, mv) < 1e-4 ? min(pc.info.z, pc.info.w) : pc.info.z;
+        o = mix(rgb(h), c0, wc);
     }
     o = clamp(o, vec3(0.0), vec3(0.999)); // the clip box in YCoCg can reach outside RGB
     oh = vec4(o, 1.0);
