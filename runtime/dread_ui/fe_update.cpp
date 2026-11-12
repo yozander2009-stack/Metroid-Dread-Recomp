@@ -107,7 +107,7 @@ static bool http_get(const std::string& url, std::string* body, const std::strin
 }
 
 // ---------------------------------------------------------------- SHA-256 (CNG)
-static std::string sha256_file(const std::string& path) {
+std::string sha256_file(const std::string& path) {
     BCRYPT_ALG_HANDLE alg; BCRYPT_HASH_HANDLE h; unsigned char d[32]; std::string out;
     if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return out;
     if (BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0) == 0) {

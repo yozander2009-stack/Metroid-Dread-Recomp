@@ -224,9 +224,7 @@ static Rec recommend() {
                     res_text(r.res, true, r.asp.c_str()).c_str(), r.fps == "1" ? "60 FPS" : (r.fps + " FPS").c_str(), r.asp.c_str(), r.af.c_str(),
                     r.sharp != "0" ? ", light sharpening" : "", r.renderer == "vulkan_native" ? "Native Vulkan (smoothest at high frame rates)" : "OpenGL");
     if (g_hw.ram_gb && g_hw.ram_gb < 8) r.note = fmt("This PC has %d GB of memory; the game needs about 4 GB, so 8 GB is recommended. Close other programs before playing.", g_hw.ram_gb);
-#ifndef SWR_RELEASE   // the public release has no DLSS
-    else if (g_hw.rtx) r.note = "Optional: Graphics > Native Vulkan + NVIDIA DLAA gives the cleanest edges on RTX cards.";
-#endif
+    else if (g_hw.rtx) r.note = "Optional: Graphics > NVIDIA DLAA (GET) gives the cleanest edges on RTX cards.";
     return r;
 }
 static void apply_rec(const Rec& r) {
@@ -504,10 +502,23 @@ static void page_graphics() {
     page_title("GRAPHICS", "Resolution, renderer and image quality.");
     section("RESOLUTION"); resolution_rows(false);
     section("RENDERER"); draw_opt("renderer", get("renderer") == "vulkan_native" ? "EXPERIMENTAL" : nullptr);
-#ifndef SWR_RELEASE   // the public release's renderer has no DLSS
-    if (get("renderer") != "vulkan" && file_exists(join(P.exedir, "nvngx_dlss.dll"))) {   // OpenGL and Native Vulkan
-        bool v = getb("dlss"); if (row_bool("##dlss", "NVIDIA DLAA anti-aliasing", &v)) set("dlss", v ? "1" : "0");
-        help_text("RTX cards. Uses nvngx_dlss.dll from the game folder (not part of this release). Applies at the next start.");
+#ifdef _WIN32
+    if (!g_hw_done) { g_hw = detect_hardware(); g_hw_done = true; }   // otherwise only filled by AUTO-SET / the Play card
+    if (get("renderer") != "vulkan" && (g_hw.rtx || dlss_installed())) {   // OpenGL and Native Vulkan, NVIDIA RTX cards
+        std::string msg; int st = dlss_get_state(&msg);
+        if (st == 2) { set("dlss", "1"); dlss_get_state(nullptr); }
+        if (dlss_installed()) {
+            bool v = getb("dlss"); if (row_bool("##dlss", "NVIDIA DLAA anti-aliasing", &v)) set("dlss", v ? "1" : "0");
+            help_text("Cleaner edges than TAA, from NVIDIA's DLSS (RTX cards). Applies at the next start.");
+        } else if (st == 1) {
+            row_button("##dlssget", "NVIDIA DLAA anti-aliasing", "DOWNLOADING...");
+            help_text("Getting NVIDIA's DLSS (59 MB) from NVIDIA. It turns on when the download is done.");
+        } else {
+            if (row_button("##dlssget", "NVIDIA DLAA anti-aliasing", "GET")) dlss_get_start();
+            if (row_button("##dlsslic", "NVIDIA's licence for DLSS", "READ")) open_in_explorer(DLSS_LICENSE_URL);
+            help_text(st == 3 ? msg.c_str() : "Cleaner edges than TAA on RTX cards. DLSS is NVIDIA's and not part of this game: GET downloads it "
+                      "from NVIDIA (59 MB) and turns DLAA on. By pressing GET you accept NVIDIA's licence for it (READ).");
+        }
     }
 #endif
     section("QUALITY");
@@ -880,6 +891,7 @@ static void frame() {
         ImGui::SetCursorPos({S(60), S(40)});
         ImGui::BeginChild("##pg", {cw, H - S(70) - S(60)}, 0, ImGuiWindowFlags_NoBackground);
         if (g_page_changed) { ImGui::SetScrollY(0); g_focus_first = true; g_page_changed = false; }
+        if (g_test && getenv("SWR_FE_SCROLL")) ImGui::SetScrollY(S((float)atof(getenv("SWR_FE_SCROLL"))));   // screenshots of lower rows
         switch (g_page) {
         case PG_PLAY: page_play(); break; case PG_DISPLAY: page_display(); break; case PG_GRAPHICS: page_graphics(); break;
         case PG_GAMEPLAY: page_gameplay(); break; case PG_AUDIO: page_audio(); break; case PG_CONTROLS: page_controls(); break;
@@ -1017,6 +1029,18 @@ static void test_tick() {
         if (f) { fprintf(f, "pt_import ok=%d installed=%d err=%s\n", ok, pt_pack_installed(), err.c_str()); fclose(f); }
         g_quit = true;
     }
+#ifdef _WIN32
+    if (getenv("SWR_FE_DLSS_GET")) {   // with SWR_FE_PAGE=3 (Graphics): presses GET, waits for the download, writes the result, quits
+        if (g_frame_no == 30) dlss_get_start();
+        std::string m; int st = dlss_get_state(&m);
+        if (g_frame_no > 30 && (st == 3 || (dlss_installed() && getb("dlss")) || g_frame_no > 60 * 240)) {
+            g_ini.save(); g_ini_dirty = false;
+            const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+            if (f) { fprintf(f, "dlss_get state=%d installed=%d dlss=%d frame=%d msg=%s\n", st, dlss_installed(), getb("dlss"), g_frame_no, m.c_str()); fclose(f); }
+            g_quit = true;
+        }
+    }
+#endif
     if (getenv("SWR_FE_VK_IMPORT") && g_frame_no == 30) {   // imports that pipeline cache as the button does, writes the result, quits
         std::string m; bool ok = vk_cache_import(getenv("SWR_FE_VK_IMPORT"), &m);
         const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;

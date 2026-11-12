@@ -479,6 +479,35 @@ const IconPack ICON_PACKS[3] = {
     {"Switch to PS4 Layout", "PlayStation 4", "Nova77", "https://gamebanana.com/dl/680684"},
     {"Switch to PS5 Layout", "PlayStation 5", "xSeRosiSx", "https://gamebanana.com/dl/681751"},
 };
+// NVIDIA DLSS (as Hookshot does it): NVIDIA's DLL is never bundled. One click on the Play screen, which says that it means
+// accepting NVIDIA's licence, fetches it from NVIDIA's own repository at one pinned release, checks its SHA-256 and puts it
+// next to the game, where NVIDIA's driver looks for it. Our code calls NGX through the driver; no NVIDIA code is compiled in.
+#define DLSS_URL "https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll"
+#define DLSS_SHA "d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e"
+const char* DLSS_LICENSE_URL = "https://github.com/NVIDIA/DLSS/blob/v310.9.16/LICENSE.txt";
+static volatile LONG g_dlss_state; static std::string g_dlss_msg;
+bool dlss_installed() { return file_exists(join(P.exedir, "nvngx_dlss.dll")); }
+int dlss_get_state(std::string* msg) {   // msg == nullptr: acknowledge "done" (back to idle)
+    if (!msg) return (int)InterlockedCompareExchange(&g_dlss_state, 0, 2);
+    *msg = g_dlss_msg; return (int)g_dlss_state;
+}
+static DWORD WINAPI dlss_thread(void*) {
+    std::string dst = join(P.exedir, "nvngx_dlss.dll"), part = dst + ".part";
+    DeleteFileW(wide(part).c_str());
+    std::string err;
+    if (URLDownloadToFileW(nullptr, wide(DLSS_URL).c_str(), wide(part).c_str(), 0, nullptr) != S_OK) err = "Download failed: check the internet connection.";
+    else if (sha256_file(part) != DLSS_SHA) err = "The download does not match NVIDIA's file (checksum): nothing was installed.";
+    else if (!MoveFileExW(wide(part).c_str(), wide(dst).c_str(), MOVEFILE_REPLACE_EXISTING)) err = "nvngx_dlss.dll could not be written to the game folder.";
+    if (!err.empty()) DeleteFileW(wide(part).c_str());
+    g_dlss_msg = err; InterlockedExchange(&g_dlss_state, err.empty() ? 2 : 3);
+    return 0;
+}
+void dlss_get_start() {
+    if (InterlockedExchange(&g_dlss_state, 1) == 1) return;   // already downloading
+    g_dlss_msg.clear();
+    HANDLE h = CreateThread(nullptr, 0, dlss_thread, nullptr, 0, nullptr);
+    if (h) CloseHandle(h); else { g_dlss_msg = "could not start the download"; InterlockedExchange(&g_dlss_state, 3); }
+}
 bool icon_pack_installed(int i) { return dir_exists(join(join(mods_dir(), ICON_PACKS[i].name), "romfs")); }
 bool icon_pack_get(int i, std::string* err) {
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);

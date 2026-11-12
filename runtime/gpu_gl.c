@@ -116,10 +116,7 @@ static GLuint link2(GLuint a, GLuint b, GLuint c3){
 extern int snxvk_dlss_mode; extern int g_opt_taa; extern int g_gles;
 static char* dlg_vs_xfb(char* src){
   static const char* decl="out gl_PerVertex { invariant vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8];";
-  int want= g_opt_taa!=0;   /* TAA uses the same motion vectors (also in the release) */
-#ifndef SWR_RELEASE
-  want|= snxvk_dlss_mode>0;
-#endif
+  int want= g_opt_taa!=0 || snxvk_dlss_mode>0;   /* TAA and DLAA use the same motion vectors */
   if(!want || g_gles || !src) return src;
   char* d=strstr(src,decl); char* nl=strchr(src,'\n'); if(!d || !nl || nl>d) return src;
   /* the position alone, 16 bytes a vertex, through its own output written at the end of main: capturing the gl_PerVertex
@@ -1825,11 +1822,9 @@ static struct {
   u64 stable, stable_z, chosen, chosen_z; int streak, missing, done, reset, evals, evaluated;
   Tex *need, *need_z;    /* DLSS runs before the draw that first reads the scene target */
 } g_dlg;
-#ifdef SWR_RELEASE   /* the public release has no DLSS (NVIDIA's licence question is open): off whatever the .ini says */
-static int dlg_dlss(void){ return 0; }
-#else
+/* DLAA: our own NGX calls; NVIDIA's nvngx_dlss.dll is not shipped: the Play screen fetches it from NVIDIA after the player
+   accepts NVIDIA's licence (fe_sys.cpp dlss_get). Without it NGX reports DLSS unavailable and this stays off */
 static int dlg_dlss(void){ return snxvk_dlss_mode>0 && !g_gles && !dlgl_failed(); }
-#endif
 /* The same scene point serves TAA ([Graphics] taa=1, when DLAA is not running) and ReShade's depth (reshade_gl.c) */
 extern int reshade_gl_on(void); extern void reshade_gl_set_depth(unsigned tex);
 static int g_taa_failed;

@@ -105,6 +105,12 @@ struct IconPack { const char* name; const char* label; const char* author; const
 extern const IconPack ICON_PACKS[3];
 bool icon_pack_installed(int i);
 bool icon_pack_get(int i, std::string* err);   // downloads it from GameBanana and installs it
+// NVIDIA DLSS: nvngx_dlss.dll is NVIDIA's and is not part of this release; fetched from NVIDIA after the player accepts NVIDIA's licence
+extern const char* DLSS_LICENSE_URL;
+bool dlss_installed();
+void dlss_get_start();                          // background download + SHA-256 check into the game folder
+int dlss_get_state(std::string* msg);          // 0 idle, 1 downloading, 2 done, 3 failed (msg = why); nullptr = acknowledge done
+std::string sha256_file(const std::string& path);   // fe_update.cpp
 int steam_add_shortcut(const std::string& exe, const std::string& dir, std::string& msg);   // fe_steam.cpp: 1 added, 0 already there, -1 error
 std::string mods_dir();
 

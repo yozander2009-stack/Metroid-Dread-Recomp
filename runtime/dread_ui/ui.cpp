@@ -520,9 +520,7 @@ static std::vector<Opt> build_options() {
     B("game_dynamic_resolution", "Graphics", "Graphics", "Game's own dynamic resolution", LIVE_YES, "0", "Let the game lower its own resolution like on the console.");
     B("hdr", "Graphics", "Graphics", "HDR output (experimental)", LIVE_RESTART, "0", "Native Vulkan only, with \"Use HDR\" on in Windows display settings.");
     I("hdr_paper_white", "Graphics", "Graphics", "HDR paper white (nits)", LIVE_RESTART, "200", 80, 500, 10, "");
-#ifndef SWR_RELEASE
-    B("dlss", "Graphics", "Graphics", "NVIDIA DLAA", LIVE_RESTART, "0", "OpenGL or Native Vulkan, RTX cards, nvngx_dlss.dll next to the game.", false);
-#endif
+    B("dlss", "Graphics", "Graphics", "NVIDIA DLAA", LIVE_RESTART, "0", "OpenGL or Native Vulkan, RTX cards. The Play screen's Graphics page downloads NVIDIA's DLSS.", false);
     // Gameplay
     C("fps_limit", "Performance", "Gameplay", "Frame rate", LIVE_YES, "1", {{"1", "60 FPS (console)"}, {"90", "90 FPS"}, {"120", "120 FPS"}, {"144", "144 FPS"}, {"240", "240 FPS"}, {"0", "Unlimited"}},
       "Dread's engine uses real elapsed time, so the game keeps its speed above 60 when your PC holds the cap steadily. Slow-motion moments run at 60.");

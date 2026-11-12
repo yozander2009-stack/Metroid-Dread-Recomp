@@ -28,10 +28,9 @@ echo Using %GLSLANG%
 
 echo [1/4] Dear ImGui
 python\python.exe work-profiler\build_imgui.py || goto :fail
-echo [2/4] Native Vulkan renderer (no DLSS)
-set SWR_NO_DLSS=1
-python\python.exe work-profiler\build_snxvk2.py || goto :fail
+echo [2/4] Native Vulkan renderer
 set SWR_NO_DLSS=
+python\python.exe work-profiler\build_snxvk2.py || goto :fail
 echo [3/4] Runtime EXE
 set SWR_RELEASE=1
 python\python.exe switchrecomp.py --build-runtime --cc gcc || goto :fail

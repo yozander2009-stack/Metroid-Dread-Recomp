@@ -53,6 +53,10 @@ Saves, settings and mods are never touched. It can be switched off on the Play s
 memory and picks resolution, frame rate and quality to match; a new installation gets these automatically after
 setup. Anything can still be changed afterwards.
 
+**NVIDIA DLAA** (RTX cards, OpenGL or Native Vulkan): Play screen → Graphics → NVIDIA DLAA → **GET**. It downloads
+NVIDIA's DLSS file (59 MB) from NVIDIA's own GitHub, checks its SHA-256 and turns DLAA on. Pressing GET means
+accepting NVIDIA's licence (READ opens it). NVIDIA's file is never part of the release. See [DLSS.md](DLSS.md).
+
 Found a bug? See [CONTRIBUTING.md](CONTRIBUTING.md): please attach the `.log`.
 
 ## Screenshots
@@ -74,7 +78,7 @@ The release zip bundles the same GCC and Python so that setup can compile the ga
 
 ```
 python\python.exe work-profiler\build_imgui.py
-set GLSLANG=<path to glslang.exe 16.6.0> && set SWR_NO_DLSS=1 && python\python.exe work-profiler\build_snxvk2.py
+set GLSLANG=<path to glslang.exe 16.6.0> && python\python.exe work-profiler\build_snxvk2.py
 set SWR_RELEASE=1 && python\python.exe switchrecomp.py --build-runtime --cc gcc
 python\python.exe dread\make_release.py release <empty folder> --version X.Y.Z --exe bin\runtime_win64_win32.exe
 ```
@@ -158,7 +162,8 @@ Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compa
 - libvpx and OpenH264: BSD.
 - SDL2 and zlib: zlib licence.
 
-NVIDIA DLAA: the code is here (`dlss.c`), NVIDIA's files are not, and the release is built without it. To add it to
-your own build, see [DLSS.md](DLSS.md). A build with DLSS is for your own use only: never share it.
+NVIDIA DLAA: our code calls NVIDIA's NGX through the graphics driver; no NVIDIA SDK code or header is compiled in.
+NVIDIA's `nvngx_dlss.dll` is not in this repository or the release: the Play screen downloads it from NVIDIA's own
+GitHub only when the player presses GET and accepts NVIDIA's licence. See [DLSS.md](DLSS.md).
 
 Metroid Dread is © Nintendo. This project is not affiliated with or endorsed by Nintendo.
