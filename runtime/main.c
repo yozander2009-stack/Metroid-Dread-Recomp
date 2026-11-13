@@ -935,8 +935,9 @@ static void split_path(const char* argv0){
   const char* base= s? s+1 : p;
   strncpy(g_exename,base,255); char* dot=strrchr(g_exename,'.'); if(dot && (!strcmp(dot,".exe")||!strcmp(dot,".EXE"))) *dot=0;
 #if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
-  { char low[256]; size_t i=0; for(;g_exename[i] && i<255;i++) low[i]=(char)tolower((unsigned char)g_exename[i]); low[i]=0;
-    if(strstr(low,"amd test")){ g_amd_test=1; strcpy(g_exename,"Metroid Dread"); } }
+  { /* letters and digits only, lowercase: "AMD test", "AMD-test" and GitHub's "AMD.test" all read "amdtest" */
+    char low[256]; size_t k=0; for(size_t i=0;g_exename[i] && k<255;i++) if(isalnum((unsigned char)g_exename[i])) low[k++]=(char)tolower((unsigned char)g_exename[i]); low[k]=0;
+    if(strstr(low,"amdtest")){ g_amd_test=1; strcpy(g_exename,"Metroid Dread"); } }
 #endif
   if(s){ s[1]=0; strncpy(g_exedir,p,1023); } else g_exedir[0]=0;
 }
