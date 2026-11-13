@@ -287,6 +287,29 @@ void help_text(const char* s) {
 struct NavItem { ImGuiID id; ImRect r; ImGuiWindow* w; };
 static std::vector<NavItem> g_nav_items;
 void nav_frame_begin() { g_nav_items.clear(); }
+
+// IDs used in the current frame of the current ImGui context (the Play screen and the in-game menu have their own)
+static ImGuiContext* g_ids_ctx; static int g_ids_frame = -1;
+static std::vector<std::pair<ImGuiID, int>> g_ids;
+static void dup_report(const char* id, int n) {
+    if (!getenv("SWR_FE_TEST")) return;
+    static std::vector<std::string> said; std::string k = std::string(id) + "#" + std::to_string(n);
+    for (auto& s : said) if (s == k) return;
+    said.push_back(k);
+    fprintf(stderr, "ui duplicate id: \"%s\" used %d times in one frame (window %s)\n", id, n + 1, ImGui::GetCurrentWindow()->Name);
+    const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+    if (f) { fprintf(f, "ui duplicate id: \"%s\" used %d times in one frame (window %s)\n", id, n + 1, ImGui::GetCurrentWindow()->Name); fclose(f); }
+}
+bool ui_button(const char* id, ImVec2 size, int flags) {
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (ctx != g_ids_ctx || ctx->FrameCount != g_ids_frame) { g_ids_ctx = ctx; g_ids_frame = ctx->FrameCount; g_ids.clear(); }
+    ImGuiID base = ImGui::GetID(id); int n = 0;
+    for (auto& e : g_ids) if (e.first == base) { n = ++e.second; break; }
+    if (!n) { g_ids.push_back({base, 0}); return ImGui::InvisibleButton(id, size, flags); }
+    dup_report(id, n);
+    ImGui::PushID(n); bool c = ImGui::InvisibleButton(id, size, flags); ImGui::PopID();   // its own ID: stable while the order is
+    return c;
+}
 void nav_item() { g_nav_items.push_back({ImGui::GetItemID(), ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), ImGui::GetCurrentWindow()}); }
 void nav_move(int dir) {
     if (!dir || g_nav_items.empty()) return;
@@ -326,7 +349,7 @@ static void take_focus_if_first() {
 static bool row_begin(const char* id, const char* label, const char* tag, ImRect& r, bool& focused, bool& clicked, float h = 0) {
     float w = ImGui::GetContentRegionAvail().x; if (h <= 0) h = S(48);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    clicked = ImGui::InvisibleButton(id, {w, h});
+    clicked = ui_button(id, {w, h});
     take_focus_if_first(); nav_item();
     focused = ImGui::IsItemFocused(); bool hovered = ImGui::IsItemHovered();
     r = ImRect(p, {p.x + w, p.y + h});
@@ -432,7 +455,7 @@ void row_text(const char* label, const char* value, ImU32 col) {
 
 bool big_button(const char* id, const char* label, ImVec2 size, bool primary) {
     ImVec2 p = ImGui::GetCursorScreenPos();
-    bool c = ImGui::InvisibleButton(id, size); take_focus_if_first(); nav_item(); bool f = ImGui::IsItemFocused(), h = ImGui::IsItemHovered();
+    bool c = ui_button(id, size); take_focus_if_first(); nav_item(); bool f = ImGui::IsItemFocused(), h = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList(); ImVec2 b(p.x + size.x, p.y + size.y);
     ImU32 fill = primary ? (f || h ? C_RED_HI : C_RED) : (f || h ? IM_COL32(28, 52, 84, 255) : IM_COL32(16, 30, 50, 255));
     chamfer_rect(dl, p, b, size.y * 0.28f, fill, f ? IM_COL32(255, 255, 255, 255) : (primary ? 0 : C_LINE), f ? S(2) : 1);

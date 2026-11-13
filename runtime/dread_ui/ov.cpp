@@ -164,7 +164,7 @@ void draw_menu(float W, float H, double t) {
     float tx = p.x + S(140);
     for (int i = 0; i < NTABS; i++) {
         ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(S(19), FLT_MAX, 0, TABS[i]); ImVec2 a(tx, p.y + S(6)), b(tx + ts.x + S(28), p.y + S(40));
-        ImGui::SetCursorScreenPos(a); if (ImGui::InvisibleButton(fmt("##tab%d", i).c_str(), {b.x - a.x, b.y - a.y}, ImGuiButtonFlags_None)) { g_tab = i; g_tab_changed = true; }
+        ImGui::SetCursorScreenPos(a); if (ui_button(fmt("##tab%d", i).c_str(), {b.x - a.x, b.y - a.y}, ImGuiButtonFlags_None)) { g_tab = i; g_tab_changed = true; }
         bool sel = g_tab == i;
         if (sel) chamfer_rect(dl, a, b, S(6), IM_COL32(226, 30, 44, 200), 0); else if (ImGui::IsItemHovered()) chamfer_rect(dl, a, b, S(6), IM_COL32(64, 214, 255, 30), 0);
         dl->AddText(ImGui::GetFont(), S(19), {a.x + S(14), a.y + S(7)}, sel ? IM_COL32(255, 255, 255, 255) : C_DIM, TABS[i]);

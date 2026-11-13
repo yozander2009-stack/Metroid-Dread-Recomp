@@ -348,7 +348,11 @@ static void start_rebuild(bool restart_after) {
 // drawn twice on the Play page (the banner under PLAY and the UPDATES section): each copy in its own ID scope, or
 // their buttons (REBUILD, UPDATE...) share IDs and a click can go to neither (#72)
 static void update_rows_body(bool banner);
-static void update_rows(bool banner) { ImGui::PushID(banner ? "upd-banner" : "upd-list"); update_rows_body(banner); ImGui::PopID(); }
+static void update_rows(bool banner) {
+    static const bool dup = getenv("SWR_FE_TEST") && getenv("SWR_FE_TEST_DUP");   // tests: the #72 state, for the duplicate check
+    if (dup) { update_rows_body(banner); return; }
+    ImGui::PushID(banner ? "upd-banner" : "upd-list"); update_rows_body(banner); ImGui::PopID();
+}
 static void update_rows_body(bool banner) {
     UpdateState u = update_state();
     std::string have = u.installed.empty() ? std::string("an older version") : u.installed;
@@ -431,7 +435,7 @@ static void page_play() {
     for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine(0, S(12));
         ImVec2 q = ImGui::GetCursorScreenPos();
-        bool c = ImGui::InvisibleButton(tiles[i].id, {tw, th}); nav_item(); bool f = ImGui::IsItemFocused(), h = ImGui::IsItemHovered();
+        bool c = ui_button(tiles[i].id, {tw, th}); nav_item(); bool f = ImGui::IsItemFocused(), h = ImGui::IsItemHovered();
         chamfer_rect(dl, q, {q.x + tw, q.y + th}, S(10), f || h ? C_PANEL_HI : C_PANEL, f ? C_CYAN : C_LINE, f ? S(2) : 1);
         dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.75f, {q.x + S(16), q.y + S(14)}, C_DIM, tiles[i].title);
         dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.15f, {q.x + S(16), q.y + S(44)}, C_TEXT, tiles[i].value.c_str());
@@ -877,7 +881,7 @@ static void sidebar(ImVec2 a, ImVec2 b) {
     float y = a.y + S(160);
     for (int p = PG_PLAY; p < PG_COUNT; p++) {
         ImVec2 r0(a.x, y), r1(b.x, y + S(52));
-        ImGui::SetCursorScreenPos(r0); bool c = ImGui::InvisibleButton(fmt("##nav%d", p).c_str(), {b.x - a.x, S(52)}); bool h = ImGui::IsItemHovered();
+        ImGui::SetCursorScreenPos(r0); bool c = ui_button(fmt("##nav%d", p).c_str(), {b.x - a.x, S(52)}); bool h = ImGui::IsItemHovered();
         bool sel = g_page == p;
         if (sel) { dl->AddRectFilledMultiColor(r0, r1, IM_COL32(226, 30, 44, 70), IM_COL32(226, 30, 44, 0), IM_COL32(226, 30, 44, 0), IM_COL32(226, 30, 44, 70)); dl->AddRectFilled(r0, {r0.x + S(5), r1.y}, C_RED); }
         else if (h) dl->AddRectFilled(r0, r1, IM_COL32(64, 214, 255, 18));

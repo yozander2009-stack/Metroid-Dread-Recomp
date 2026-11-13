@@ -73,6 +73,10 @@ const Opt* find_option(const char* key);
 // vertical controller navigation done here, not by ImGui (whose gamepad nav needs the window to have OS focus):
 // every focusable row registers itself (nav_item), and after the frame nav_move(+1 down / -1 up) moves the focus
 void nav_frame_begin();
+// every clickable item (rows, buttons, tiles, tabs): ImGui::InvisibleButton with an ID unique in this frame. An ID
+// already used this frame (one row drawn in two places) gets its own scope instead of sharing, so a click always reaches
+// the item under it; with SWR_FE_TEST each such case is written to SWR_FE_RESULT ("ui duplicate id") and stderr (#72)
+bool ui_button(const char* id, ImVec2 size, int flags = 0);
 void nav_item();
 void nav_move(int dir);
 extern bool g_focus_first;   // the next row / big button takes the focus (a page or tab just opened)
