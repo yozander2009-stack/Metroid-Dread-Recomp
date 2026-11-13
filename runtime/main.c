@@ -961,7 +961,8 @@ int swr_main(int argc, char** argv){
       f=fopen(st,"w"); if(f){ fputs(gl? "vulkan_native\n" : "opengl\n",f); fclose(f); }
       if(gl){ g_amd_test_renderer="opengl"; _putenv("SWR_NO_GLQ=1"); SetEnvironmentVariableA("SWR_NO_GLQ","1"); }
       _putenv(gl? "SWR_AMD_TEST_MODE=opengl" : "SWR_AMD_TEST_MODE=vulkan_native");   /* the report process says which */
-      SetEnvironmentVariableA("SWR_AMD_TEST_MODE",gl? "opengl" : "vulkan_native"); }
+      SetEnvironmentVariableA("SWR_AMD_TEST_MODE",gl? "opengl" : "vulkan_native");
+      LOG("AMD test build: this run tests %s\n",gl? "OpenGL with every OpenGL call on the GPU thread (SWR_NO_GLQ=1)" : "Native Vulkan"); }
   }
 #endif
   char ini[1400];

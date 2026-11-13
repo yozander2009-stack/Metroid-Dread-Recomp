@@ -110,6 +110,12 @@ static void env(const char* name, bool on) {
 #else
 static void env(const char* name, bool on) { if (on) setenv(name, "1", 1); else unsetenv(name); }
 #endif
+#ifdef _WIN32
+extern "C" int g_amd_test;   // main.c: this EXE is "... AMD test.exe"
+static bool fe_amd_test() { return g_amd_test != 0; }
+#else
+static bool fe_amd_test() { return false; }
+#endif
 static void apply_env(const IniFile& ini) {
     // never inherit stray test / diagnostic switches
     std::vector<std::string> drop;
@@ -121,7 +127,8 @@ static void apply_env(const IniFile& ini) {
     // SWR_RECOMPILER is the AppImage's, not a switch
     for (char** p = environ; *p; p++) if (!strncmp(*p, "SWR_", 4) && strncmp(*p, "SWR_RECOMPILER=", 15)) { std::string s = *p; drop.push_back(s.substr(0, s.find('='))); }
 #endif
-    if (!getenv("SWR_FE_TEST")) for (auto& d : drop) env(d.c_str(), false);
+    // the AMD test build sets its own switches (SWR_NO_GLQ, SWR_AMD_TEST_MODE, ...) before this: kept
+    if (!getenv("SWR_FE_TEST") && !fe_amd_test()) for (auto& d : drop) env(d.c_str(), false);
     env("SWR_SYNC_SHADERS", ini.get("wait_for_shaders", "1") == "1");
     env("SWR_LOADING_60", ini.get("loading_60fps", "1") == "1");
     env("SWR_CUTSCENES_60FPS", ini.get("cutscenes_60fps", "1") == "1");
@@ -1097,7 +1104,6 @@ using namespace fe;
 
 // ---------------------------------------------------------------- entry points (backend_win32.c)
 #ifdef _WIN32
-extern "C" int g_amd_test;   // main.c: this EXE is "... AMD test.exe"
 // AMD test mode's report (main.c starts this EXE again with --amd-report once the game has exited): the logs packed,
 // the zip shown in Explorer, the issue page opened
 extern "C" int fe_amd_report(const char* exedir) {
@@ -1110,7 +1116,7 @@ extern "C" int fe_amd_report(const char* exedir) {
                            g_hw.gpu.c_str(), cpu_name().c_str(), hw_line().c_str());
     std::string zip, err;
     bool ok = make_report(info, &zip, &err);
-    if (getenv("SWR_FE_TEST")) {   // tests: the zip's path (or the error) into SWR_FE_RESULT, no windows
+    if (getenv("SWR_FE_TEST") || getenv("SWR_AMD_REPORT_QUIET")) {   // tests: the zip's path (or the error) into SWR_FE_RESULT, no windows
         const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
         if (f) { fprintf(f, "amd report ok=%d zip=%s err=%s\n", ok, zip.c_str(), err.c_str()); fclose(f); }
         return ok ? 0 : 1;
