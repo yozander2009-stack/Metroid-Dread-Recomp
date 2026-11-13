@@ -40,7 +40,7 @@ void backend_ini(const char* k, const char* v){
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);
   else if(!strcmp(k,"script")) {strncpy(g_script,v,sizeof g_script-1);g_script[sizeof g_script-1]=0;}
-  else if(!strcmp(k,"renderer")){ extern int g_amd_test; if(g_amd_test) v="vulkan_native"; g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
+  else if(!strcmp(k,"renderer")){ extern int g_amd_test; extern const char* g_amd_test_renderer; if(g_amd_test) v=g_amd_test_renderer; g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
 }
 
 /* a status after the window title (shader pre-build progress); NULL restores the title */

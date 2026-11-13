@@ -920,6 +920,7 @@ void services_init(void){
    files (ini, saves, game code), skips the Play screen, runs Native Vulkan, and at exit (crash and errors included)
    starts itself again with --amd-report, which packs the logs, shows the zip and opens the issue page */
 int g_amd_test;
+const char* g_amd_test_renderer = "vulkan_native";   /* this launch's renderer: launches alternate (amd_test_next.txt) */
 void amd_test_report(void){
 #if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
   static int done; if(!g_amd_test || done++) return;
@@ -953,6 +954,14 @@ int swr_main(int argc, char** argv){
                   "(The game must have been set up once with Metroid Dread.exe.)","Metroid Dread - AMD test",MB_OK|MB_ICONINFORMATION);
       _exit(0); }
     _putenv("SWR_VK_BL_LOG=1"); SetEnvironmentVariableA("SWR_VK_BL_LOG","1");   /* the first deswizzles, logged */
+    { /* launches alternate: Native Vulkan, then OpenGL with every GL call on the GPU thread (SWR_NO_GLQ=1: the AMD
+         OpenGL crashes are all in SwapBuffers on the separate GL thread), then Native Vulkan again */
+      char st[1300]; snprintf(st,sizeof st,"%samd_test_next.txt",g_exedir);
+      int gl=0; FILE* f=fopen(st,"r"); if(f){ char b[32]={0}; if(fgets(b,sizeof b,f)) gl= !strncmp(b,"opengl",6); fclose(f); }
+      f=fopen(st,"w"); if(f){ fputs(gl? "vulkan_native\n" : "opengl\n",f); fclose(f); }
+      if(gl){ g_amd_test_renderer="opengl"; _putenv("SWR_NO_GLQ=1"); SetEnvironmentVariableA("SWR_NO_GLQ","1"); }
+      _putenv(gl? "SWR_AMD_TEST_MODE=opengl" : "SWR_AMD_TEST_MODE=vulkan_native");   /* the report process says which */
+      SetEnvironmentVariableA("SWR_AMD_TEST_MODE",gl? "opengl" : "vulkan_native"); }
   }
 #endif
   char ini[1400];

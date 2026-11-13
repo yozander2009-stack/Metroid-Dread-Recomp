@@ -1104,7 +1104,9 @@ extern "C" int fe_amd_report(const char* exedir) {
     Sleep(1500);   // the game's process finishes and closes its log
     P.init(exedir, "Metroid Dread");
     g_hw = detect_hardware(); g_hw_done = true;
-    std::string info = fmt("version %s\r\nAMD test build (Native Vulkan)\r\ngpu %s\r\ncpu %s\r\n%s\r\n", installed_version().c_str(),
+    const char* mode = getenv("SWR_AMD_TEST_MODE"); bool gl = mode && !strcmp(mode, "opengl");
+    std::string info = fmt("version %s\r\nAMD test build: %s\r\ngpu %s\r\ncpu %s\r\n%s\r\n", installed_version().c_str(),
+                           gl ? "OpenGL, calls on the GPU thread (SWR_NO_GLQ)" : "Native Vulkan",
                            g_hw.gpu.c_str(), cpu_name().c_str(), hw_line().c_str());
     std::string zip, err;
     bool ok = make_report(info, &zip, &err);
@@ -1117,8 +1119,10 @@ extern "C" int fe_amd_report(const char* exedir) {
     std::wstring sel = L"/select,\"" + wide(zip) + L"\"";
     ShellExecuteW(nullptr, L"open", L"explorer.exe", sel.c_str(), nullptr, SW_SHOWNORMAL);
     open_in_explorer("https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/68");
-    std::wstring m = L"Thank you for testing!\n\nThe test report is saved here:\n" + wide(zip) +
-                     L"\n\nThe GitHub page for this problem is now open in your browser. Drag the zip file into a comment there.";
+    std::wstring m = std::wstring(L"Thank you for testing!\n\nThis run tested ") + (gl ? L"OpenGL" : L"Native Vulkan") +
+                     L". The test report is saved here:\n" + wide(zip) +
+                     L"\n\nThe GitHub page for this problem is now open in your browser. Drag the zip file into a comment there.\n\n" +
+                     (gl ? L"The next start of the AMD test tests Native Vulkan again." : L"Please start the AMD test once more: the next run tests OpenGL.");
     MessageBoxW(nullptr, m.c_str(), L"Metroid Dread - AMD test", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
