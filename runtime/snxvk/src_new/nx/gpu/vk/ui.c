@@ -82,6 +82,16 @@ static int layout_make(void) {
     return 1;
 }
 
+/* the UI's vertex layout (position, texture coordinate, colour); also set at draw time with dynamic vertex input */
+static const VkVertexInputBindingDescription g_ui_vb = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+static const VkVertexInputAttributeDescription g_ui_va[3] = {
+    {0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32_SFLOAT, 8}, {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16}};
+static const VkPipelineVertexInputStateCreateInfo g_ui_vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                                                             .vertexBindingDescriptionCount = 1,
+                                                             .pVertexBindingDescriptions = &g_ui_vb,
+                                                             .vertexAttributeDescriptionCount = 3,
+                                                             .pVertexAttributeDescriptions = g_ui_va};
+
 /* SWR: the pipeline for one target format (the menu pass below may draw into an image of another format) */
 static VkPipeline pipe_create(VkFormat format) {
     VkShaderModule vs, fs;
@@ -92,14 +102,7 @@ static VkPipeline pipe_create(VkFormat format) {
                                              {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                               .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
                                               .pName = "main"}};
-    VkVertexInputBindingDescription vb = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription va[3] = {
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32_SFLOAT, 8}, {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16}};
-    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                                               .vertexBindingDescriptionCount = 1,
-                                               .pVertexBindingDescriptions = &vb,
-                                               .vertexAttributeDescriptionCount = 3,
-                                               .pVertexAttributeDescriptions = va};
+    const VkPipelineVertexInputStateCreateInfo vi = g_ui_vi;
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo vp = {
@@ -121,9 +124,9 @@ static VkPipeline pipe_create(VkFormat format) {
                                               .colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
     VkPipelineDynamicStateCreateInfo ds = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                         .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &format};
@@ -405,6 +408,7 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
         rec_CmdBeginRendering(cb, &ri);
         vk_render_forget_state(); /* another pipeline and layout: a draw after it sets everything again */
         rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipe);
+        vk_set_vi(cb, &g_ui_vi);
         rec_CmdSetViewport(cb, 0, 1, &vp);
         rec_CmdSetScissor(cb, 0, 1, &sci);
         rec_CmdPushConstants(cb, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
@@ -619,6 +623,7 @@ void vk_ov_draw(VkCommandBuffer cb, VkImage img, VkImageView view, VkFormat fmt,
         rec_CmdBeginRendering(cb, &ri);
         vk_render_forget_state(); /* another pipeline and layout: a draw after it sets everything again */
         rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        vk_set_vi(cb, &g_ui_vi);
         rec_CmdSetViewport(cb, 0, 1, &vp);
         rec_CmdPushConstants(cb, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         rec_CmdBindVertexBuffers(cb, 0, 1, &vb, &vbo);

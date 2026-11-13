@@ -108,9 +108,9 @@ static int pipeline_make(VkFormat format) {
     VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
     VkPipelineDynamicStateCreateInfo ds = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                         .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &format};
@@ -309,6 +309,7 @@ void vk_hdr_resolve(VkCommandBuffer cb, VkImage sc) {
     VkRect2D sci = {{0, 0}, g_vk.sc_extent};
     rec_CmdBeginRendering(cb, &ri);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipe);
+    vk_set_vi(cb, NULL);
     rec_CmdSetViewport(cb, 0, 1, &vp);
     rec_CmdSetScissor(cb, 0, 1, &sci);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_set, 0, NULL);
@@ -408,9 +409,9 @@ static int shrink_pipeline(VkFormat format) {
     VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
     VkPipelineDynamicStateCreateInfo ds = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                         .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &format};
@@ -507,6 +508,7 @@ VkImage vk_shrink(VkCommandBuffer cb, Surf* src, u32 sx, u32 sy, u32 sw, u32 sh,
     VkRect2D sci = {{0, 0}, ext};
     rec_CmdBeginRendering(cb, &ri);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shr_pipe);
+    vk_set_vi(cb, NULL);
     rec_CmdSetViewport(cb, 0, 1, &vp);
     rec_CmdSetScissor(cb, 0, 1, &sci);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shr_layout, 0, 1, &set, 0, NULL);
@@ -569,9 +571,9 @@ static VkPipeline up_pipeline(VkFormat format) {
     VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
     VkPipelineDynamicStateCreateInfo ds = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                         .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &format};
@@ -633,6 +635,7 @@ int vk_upsample_draw(Surf* src, Surf* dst) {
     VkRect2D sci = {{0, 0}, ext};
     rec_CmdBeginRendering(cb, &ri);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vk_set_vi(cb, NULL);
     rec_CmdSetViewport(cb, 0, 1, &vp);
     rec_CmdSetScissor(cb, 0, 1, &sci);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_up_layout, 0, 1, &set, 0, NULL);

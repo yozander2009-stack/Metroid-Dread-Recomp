@@ -110,6 +110,12 @@ typedef struct {
     int has_fault;
 } VkState;
 void vk_device_fault_log(void);
+/* SWR: with dynamic vertex input on, every graphics pipeline lists VK_DYNAMIC_STATE_VERTEX_INPUT_EXT and its draws set
+   their own layout (vi NULL: none). AMD's Windows driver draws nothing with a pipeline whose layout is fixed, or fetches
+   with the game's last layout (device lost): LASRecomp found the same (peiikai/LASRecomp#335) */
+void vk_set_vi(VkCommandBuffer cb, const VkPipelineVertexInputStateCreateInfo* vi);
+void vk_sc_lock(void); /* the swapchain: acquire and present (record.c) */
+void vk_sc_unlock(void);
 void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz);
 extern VkState g_vk;
 

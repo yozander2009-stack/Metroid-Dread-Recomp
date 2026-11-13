@@ -235,6 +235,14 @@ typedef struct {
     u32 idx;
 } Present;
 static VkResult g_present_result; /* atomic: the last present's result that wasn't VK_SUCCESS, until it is taken */
+/* SWR: the swapchain is externally synchronized: vkQueuePresentKHR here (on the recording thread) and
+   vkAcquireNextImageKHR on the GPU thread (renderer.c show) must not overlap. The validation layer reported it on an
+   AMD iGPU (UNASSIGNED-Threading-MultipleThreads-Write); a driver may corrupt its swapchain state on it */
+static int g_sc_busy;
+void vk_sc_lock(void) {
+    while (__atomic_exchange_n(&g_sc_busy, 1, __ATOMIC_ACQUIRE)) plat_sleep_ns(0);
+}
+void vk_sc_unlock(void) { __atomic_store_n(&g_sc_busy, 0, __ATOMIC_RELEASE); }
 static VkResult present_run(const Present* x) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                            .waitSemaphoreCount = 1,
@@ -243,7 +251,10 @@ static VkResult present_run(const Present* x) {
                            .pSwapchains = &x->sc,
                            .pImageIndices = &x->idx};
     SNX_ZONE(z_queue_present, "vkQueuePresentKHR");
-    return vkQueuePresentKHR(g_vk.gfx, &pi);
+    vk_sc_lock();
+    VkResult r = vkQueuePresentKHR(g_vk.gfx, &pi);
+    vk_sc_unlock();
+    return r;
 }
 static void present_queued(const void* p) {
     VkResult r = present_run(p);

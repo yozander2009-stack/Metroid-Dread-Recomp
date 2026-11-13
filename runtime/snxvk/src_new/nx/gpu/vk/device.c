@@ -182,6 +182,28 @@ void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz) {
     u32 i = __atomic_fetch_add(&g_dn_at, 1, __ATOMIC_RELAXED) & 15;
     g_dn[i].what = what; g_dn[i].id = id; g_dn[i].gx = gx; g_dn[i].gy = gy; g_dn[i].gz = gz;
 }
+void vk_set_vi(VkCommandBuffer cb, const VkPipelineVertexInputStateCreateInfo* vi) {
+    if (!g_vk.has_dyn_vi) return;
+    VkVertexInputBindingDescription2EXT b[4] = {0};
+    VkVertexInputAttributeDescription2EXT a[8] = {0};
+    u32 nb = vi ? vi->vertexBindingDescriptionCount : 0, na = vi ? vi->vertexAttributeDescriptionCount : 0;
+    if (nb > 4) nb = 4;
+    if (na > 8) na = 8;
+    for (u32 i = 0; i < nb; i++)
+        b[i] = (VkVertexInputBindingDescription2EXT){.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+                                                     .binding = vi->pVertexBindingDescriptions[i].binding,
+                                                     .stride = vi->pVertexBindingDescriptions[i].stride,
+                                                     .inputRate = vi->pVertexBindingDescriptions[i].inputRate,
+                                                     .divisor = 1};
+    for (u32 i = 0; i < na; i++)
+        a[i] = (VkVertexInputAttributeDescription2EXT){.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                                                       .location = vi->pVertexAttributeDescriptions[i].location,
+                                                       .binding = vi->pVertexAttributeDescriptions[i].binding,
+                                                       .format = vi->pVertexAttributeDescriptions[i].format,
+                                                       .offset = vi->pVertexAttributeDescriptions[i].offset};
+    rec_CmdSetVertexInputEXT(cb, nb, b, na, a);
+}
+
 void vk_device_fault_log(void) {
     static int done;
     for (u32 i = 0; i < 16; i++) {

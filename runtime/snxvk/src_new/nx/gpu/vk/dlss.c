@@ -655,6 +655,12 @@ static VkShaderModule module(const unsigned* code, size_t bytes) {
     return m;
 }
 
+/* the motion-vector pass's vertex layout (positions now and a frame ago); also set at draw time with dynamic vertex input */
+static const VkVertexInputBindingDescription g_mv_vb[2] = {{0, 16, VK_VERTEX_INPUT_RATE_VERTEX}, {1, 16, VK_VERTEX_INPUT_RATE_VERTEX}};
+static const VkVertexInputAttributeDescription g_mv_va[2] = {{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}};
+static const VkPipelineVertexInputStateCreateInfo g_mv_vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                                                             .vertexBindingDescriptionCount = 2, .pVertexBindingDescriptions = g_mv_vb,
+                                                             .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = g_mv_va};
 static int mv_pipeline(VkFormat depth) {
     if (g_mv.pipe && g_mv.pipe_depth == depth) return 1;
     if (g_mv.pipe) {
@@ -673,11 +679,7 @@ static int mv_pipeline(VkFormat depth) {
     VkPipelineShaderStageCreateInfo st[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
-    VkVertexInputBindingDescription vb[2] = {{0, 16, VK_VERTEX_INPUT_RATE_VERTEX}, {1, 16, VK_VERTEX_INPUT_RATE_VERTEX}};
-    VkVertexInputAttributeDescription va[2] = {{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}};
-    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                                               .vertexBindingDescriptionCount = 2, .pVertexBindingDescriptions = vb,
-                                               .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = va};
+    const VkPipelineVertexInputStateCreateInfo vi = g_mv_vi;
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo vps = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -693,9 +695,9 @@ static int mv_pipeline(VkFormat depth) {
     VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
                                               .attachmentCount = 1, .pAttachments = &cba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = 2, .pDynamicStates = dyn};
+                                           .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkFormat color = VK_FORMAT_R16G16_SFLOAT;
     int stencil = depth == VK_FORMAT_D24_UNORM_S8_UINT || depth == VK_FORMAT_D32_SFLOAT_S8_UINT || depth == VK_FORMAT_D16_UNORM_S8_UINT;
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1,
@@ -746,6 +748,7 @@ static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
                              .pStencilAttachment = stencil ? &za : NULL};
     vkCmdBeginRendering(cb, &rinfo);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mv.pipe);
+    vk_set_vi(cb, &g_mv_vi);
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetScissor(cb, 0, 1, &sc);
     static int skipdraw = -1;
@@ -1002,8 +1005,8 @@ static int taa_pipeline(VkFormat fmt) {
                                                .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
     VkPipelineColorBlendAttachmentState ba[2] = {{.colorWriteMask = 0xF}, {.colorWriteMask = 0xF}};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 2, .pAttachments = ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkFormat cf[2] = {VK_FORMAT_R16G16B16A16_SFLOAT, fmt};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 2, .pColorAttachmentFormats = cf};
     VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
@@ -1123,6 +1126,7 @@ static void evaluate_taa(Surf* t, Surf* z) {
                           .colorAttachmentCount = 2, .pColorAttachments = ca};
     vkCmdBeginRendering(cb, &ri);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.pipe);
+    vk_set_vi(cb, NULL);
     VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetViewport(cb, 0, 1, &vp);
@@ -1330,8 +1334,8 @@ static int ao_apply_pipeline(VkFormat fmt) {
                                               .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .alphaBlendOp = VK_BLEND_OP_ADD,
                                               .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT};
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2u + (u32)g_vk.has_dyn_vi, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &fmt};
     VkGraphicsPipelineCreateInfo gci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st,
                                         .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vps,
@@ -1469,6 +1473,7 @@ static void evaluate_ao(Surf* t, Surf* z) {
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     vkCmdBeginRendering(cb, &ri);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_aov.app);
+    vk_set_vi(cb, NULL);
     VkViewport v = {0, 0, (float)w, (float)h, 0, 1};
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetViewport(cb, 0, 1, &v);

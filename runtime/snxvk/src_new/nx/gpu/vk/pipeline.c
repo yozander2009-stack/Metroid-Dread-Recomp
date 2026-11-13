@@ -2004,6 +2004,13 @@ static void yz_import(void) {
 /* on the GPU thread (vk_lock), at the first lookup after the shipped pass ended: the recipes' pipelines queued. They
    come from this PC's own runs (pipeline_recipes.bin), the ones the game comes with (pipeline_recipes_shipped.bin) and
    imported caches (pipeline_recipes_imported.bin) */
+/* a recipe's attachment format: none, or one this device can render to with that use */
+static int rc_fmt_ok(VkFormat f, VkFormatFeatureFlags need) {
+    if (f == VK_FORMAT_UNDEFINED) return 1;
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &fp);
+    return (fp.optimalTilingFeatures & need) == need;
+}
 static void rc_merge(void) {
     u32 n = 0, queued = 0, known = 0, lacked = 0;
     Recipe* r = NULL;
@@ -2036,6 +2043,23 @@ static void rc_merge(void) {
         k.depth_clamp = k.depth_clamp && g_vk.feat.depthClamp;
         if (!g_vk.feat.logicOp) k.logic_op = 0;
         if (!g_vk.feat.fillModeNonSolid) k.polygon = VK_POLYGON_MODE_FILL;
+        /* SWR: formats as this device's targets have them (format.c): AMD has no D24S8 attachments, so the shipped
+           list's D24S8 (recorded on NVIDIA) is D32S8 there - a pipeline with an unsupported format is undefined
+           behaviour (validation: VUID-VkGraphicsPipelineCreateInfo-renderPass-06585/06586 on an AMD iGPU) */
+        if (!rc_fmt_ok((VkFormat)k.depth, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+            k.depth == VK_FORMAT_D24_UNORM_S8_UINT)
+            k.depth = VK_FORMAT_D32_SFLOAT_S8_UINT;
+        if (!rc_fmt_ok((VkFormat)k.stencil, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+            k.stencil == VK_FORMAT_D24_UNORM_S8_UINT)
+            k.stencil = VK_FORMAT_D32_SFLOAT_S8_UINT;
+        int fmt_ok = rc_fmt_ok((VkFormat)k.depth, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+                     rc_fmt_ok((VkFormat)k.stencil, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        for (u32 c = 0; c < k.ncolor && c < 8; c++)
+            fmt_ok = fmt_ok && rc_fmt_ok((VkFormat)k.color[c], VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+        if (!fmt_ok) {
+            lacked++;
+            continue;
+        }
         k.arrays = 0;
         VkShaderModule* mod[5] = {&k.vs, &k.tcs, &k.tes, &k.gs, &k.fs};
         int ok = (r[i].present & 1) != 0, found;

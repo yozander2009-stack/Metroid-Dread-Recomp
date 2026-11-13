@@ -390,7 +390,9 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
         VkSemaphore acq = g_acquired[vk_frame_id() % VK_FRAMES];
         /* no wait: vk_lock is held (guest threads mapping memory take it too), and the game's pace is present_pace's.
            Every image still on the display or queued for it (FIFO behind) leaves this frame unshown */
+        vk_sc_lock(); /* not while the recording thread presents to it (record.c) */
         VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, 0, acq, VK_NULL_HANDLE, &idx);
+        vk_sc_unlock();
         PH(6);
         if (r == VK_NOT_READY || r == VK_TIMEOUT) {
             /* the game faster than the display (vsync=1 with fps_limit over its refresh, or a 59.94 Hz one) */
