@@ -345,7 +345,11 @@ static void start_rebuild(bool restart_after) {
     g_ss = setup_start(g_job) ? SS_RUNNING : SS_FAILED; go(PG_SETUP);
 }
 // banner: only when there is something to do; otherwise the full UPDATES section on the Play page
-static void update_rows(bool banner) {
+// drawn twice on the Play page (the banner under PLAY and the UPDATES section): each copy in its own ID scope, or
+// their buttons (REBUILD, UPDATE...) share IDs and a click can go to neither (#72)
+static void update_rows_body(bool banner);
+static void update_rows(bool banner) { ImGui::PushID(banner ? "upd-banner" : "upd-list"); update_rows_body(banner); ImGui::PopID(); }
+static void update_rows_body(bool banner) {
     UpdateState u = update_state();
     std::string have = u.installed.empty() ? std::string("an older version") : u.installed;
     if (code_patches_stale() && u.stage != UP_DOWNLOADING && u.stage != UP_REBUILD && u.stage != UP_INSTALLED) {
@@ -1179,7 +1183,7 @@ extern "C" int fe_run(void* hwnd) {
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
     if (g_ini.get("fullscreen", "1") == "1") backend_fe_fullscreen(1);
     if (!d3d_init()) { MessageBoxW(g_hwnd, L"Direct3D 11 is not available: the Play screen can't open. The game will start directly.", L"Metroid Dread", MB_OK | MB_ICONWARNING); apply_env(g_ini); return 0; }
-    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
+    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO(); io.ConfigDebugHighlightIdConflicts = false;   /* no programmer popups for players */
     io.IniFilename = nullptr; io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     load_fonts(io); apply_style(1.0f);
@@ -1373,7 +1377,7 @@ extern "C" int fe_run(void*) {
     g_test = getenv("SWR_FE_TEST") != nullptr;
     fe_prepare();
     if (!x_open()) { fprintf(stderr, "front end: no X11 display with OpenGL 3: the game starts directly\n"); x_close(); apply_env(g_ini); return check_installed().code_ok ? 0 : 1; }
-    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
+    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO(); io.ConfigDebugHighlightIdConflicts = false;   /* no programmer popups for players */
     io.IniFilename = nullptr; io.LogFilename = nullptr; io.BackendPlatformName = "fe_x11";
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     load_fonts(io); apply_style(1.0f);
