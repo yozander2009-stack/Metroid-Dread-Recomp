@@ -41,6 +41,9 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 extern "C" void backend_fe_fullscreen(int on);
 extern "C" int backend_is_fullscreen(void);
+#ifdef _WIN32
+extern "C" int backend_gpu_amd(void);   // backend_win32.c: an AMD card drives the main display
+#endif
 #else
 extern char** environ;
 #endif
@@ -226,6 +229,9 @@ static Rec recommend() {
 #endif
         }
         r.renderer = vk ? "vulkan_native" : "opengl";
+#ifdef _WIN32
+        if (backend_gpu_amd()) r.renderer = "vulkan_native";   // AMD's OpenGL driver crashes on many PCs
+#endif
     }
     r.summary = fmt("Resolution %s, %s, picture %s, anisotropic filtering %s\xC3\x97%s, %s, fullscreen.",
                     res_text(r.res, true, r.asp.c_str()).c_str(), r.fps == "1" ? "60 FPS" : (r.fps + " FPS").c_str(), r.asp.c_str(), r.af.c_str(),
@@ -520,7 +526,13 @@ static void page_display() {
 static void page_graphics() {
     page_title("GRAPHICS", "Resolution, renderer and image quality.");
     section("RESOLUTION"); resolution_rows(false);
-    section("RENDERER"); draw_opt("renderer", get("renderer") == "vulkan_native" ? "EXPERIMENTAL" : nullptr);
+    section("RENDERER"); bool rch = draw_opt("renderer", get("renderer") == "vulkan_native" ? "EXPERIMENTAL" : nullptr);
+#ifdef _WIN32
+    if (backend_gpu_amd()) {   // AMD: Native Vulkan unless chosen otherwise here (main.c reads amd_opengl)
+        if (rch) set("amd_opengl", get("renderer") == "vulkan_native" ? "0" : "1");
+        if (get("renderer") != "vulkan_native") warn_text("AMD graphics card: OpenGL (and Vulkan output, which draws with OpenGL) crashes in AMD's driver on many PCs. Native Vulkan is recommended.");
+    }
+#endif
 #ifdef _WIN32
     if (!g_hw_done) { g_hw = detect_hardware(); g_hw_done = true; }   // otherwise only filled by AUTO-SET / the Play card
     if (get("renderer") != "vulkan" && (g_hw.rtx || dlss_installed())) {   // OpenGL and Native Vulkan, NVIDIA RTX cards
@@ -1099,6 +1111,10 @@ static void fe_prepare() {
     { std::string l = g_ini.get("language", ""); if (l == "17") { set("language", "9"); g_ini.save(); g_ini_dirty = false; } }
     // once: cutscenes at the frame-rate limit became the default (older versions wrote 0). Fast loading stays off by
     // default: on the Steam Deck it stalled the boot video 8 of 8 times (2026-11-05)
+#ifdef _WIN32
+    // AMD: the settings show what runs (main.c starts Native Vulkan unless amd_opengl=1)
+    if (backend_gpu_amd() && g_ini.get("amd_opengl", "0") != "1" && g_ini.get("renderer", "opengl") != "vulkan_native") { set("renderer", "vulkan_native"); g_ini.save(); g_ini_dirty = false; }
+#endif
     if (g_ini.get("scene_defaults", "") == "") { set("cutscenes_60fps", "1"); set("scene_defaults", "1"); g_ini.save(); g_ini_dirty = false; }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());

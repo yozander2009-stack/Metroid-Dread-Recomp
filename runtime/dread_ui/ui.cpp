@@ -276,8 +276,11 @@ void section(const char* title) {
     ImGui::Dummy({1, S(36)});
 }
 
-void help_text(const char* s) {
-    ImGui::Indent(S(18)); ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(C_DIM));
+static void note_text(const char* s, ImU32 col);
+void help_text(const char* s) { note_text(s, C_DIM); }
+void warn_text(const char* s) { note_text(s, C_RED_HI); }
+static void note_text(const char* s, ImU32 col) {
+    ImGui::Indent(S(18)); ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - S(18));
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.86f); ImGui::TextUnformatted(s); ImGui::PopFont();
     ImGui::PopTextWrapPos(); ImGui::PopStyleColor(); ImGui::Unindent(S(18)); ImGui::Dummy({1, S(4)});

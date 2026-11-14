@@ -52,6 +52,21 @@ int video_has_gl(void){ return 1; }
 void win_fatal_box(const char* msg){ extern int g_amd_test; if(g_amd_test || getenv("SWR_TEST_SCRIPT") || getenv("SWR_NO_FATAL_BOX")) return;   /* test runs: the game closes by itself (the .log has the message) */
   MessageBoxA(g_hwnd,msg,"Metroid Dread",MB_OK|MB_ICONERROR); }
 
+/* 1 when the game's graphics card is an AMD Radeon (PCI vendor 1002; the GPU, not the CPU): the main display is on an
+   AMD card and no NVIDIA card is in the PC (a Ryzen CPU's built-in Radeon next to a GeForce, as in hybrid laptops, is
+   not counted: the GeForce plays). AMD's OpenGL driver crashes for many players (atio6axx.dll; #12 #39 #49 #68), so
+   main.c starts Native Vulkan there unless the player chose otherwise (amd_opengl=1). Under Wine/Proton the driver is
+   Mesa: not counted. SWR_FAKE_AMD=0|1 (tests) */
+int backend_gpu_amd(void){ static int r=-1; if(r>=0) return r; r=0;
+  const char* f=getenv("SWR_FAKE_AMD"); if(f) return r=atoi(f)!=0;
+  HMODULE nt=GetModuleHandleA("ntdll.dll"); if(nt && GetProcAddress(nt,"wine_get_version")) return r;
+  int prim_amd=0, nvidia=0;
+  for(DWORD i=0;;i++){ DISPLAY_DEVICEA d; memset(&d,0,sizeof d); d.cb=sizeof d; if(!EnumDisplayDevicesA(NULL,i,&d,0)) break;
+    if(d.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) continue;
+    if(strstr(d.DeviceID,"VEN_10DE")) nvidia=1;
+    if((d.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) && strstr(d.DeviceID,"VEN_1002")) prim_amd=1; }
+  return r= prim_amd && !nvidia; }
+
 /* ---------------------------------------------------------------- XInput, loaded dynamically */
 typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XGP;
 typedef struct { DWORD dwPacketNumber; XGP Gamepad; } XST;

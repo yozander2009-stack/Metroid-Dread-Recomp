@@ -27,6 +27,11 @@
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
 extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); void cheats_set(int, int); }   // runtime cheats.c
+#ifdef _WIN32
+extern "C" int backend_gpu_amd(void);   // backend_win32.c
+#else
+static int backend_gpu_amd(void) { return 0; }
+#endif
 extern "C" { int amiibo_count(void); const char* amiibo_name(int); const char* amiibo_status(void); int amiibo_place(int); const char* amiibo_dir(void); void amiibo_rescan(void); }   // runtime amiibo.c
 
 extern "C" {
@@ -118,7 +123,10 @@ void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
-    case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("shadow_resolution"); opt_row("bloom_quality"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
+    case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("shadow_resolution"); opt_row("bloom_quality"); opt_row("anisotropy"); section("RENDERER"); { std::string was = val("renderer"); opt_row("renderer");
+                if (backend_gpu_amd()) { std::string now = val("renderer"); if (now != was) change("amd_opengl", now == "vulkan_native" ? "0" : "1");
+                    if (now != "vulkan_native") warn_text("AMD graphics card: OpenGL (and Vulkan output) crashes in AMD's driver on many PCs. Native Vulkan is recommended."); } }
+                opt_row("hdr"); break;
     case 2: { static int seen = -100; if (g_frames - seen > 30) amiibo_rescan(); seen = g_frames;   // re-read the folder each time the menu opens
                 section("AMIIBO");
                 for (int i = 0; i < amiibo_count(); i++) if (row_button(fmt("##ovam%d", i).c_str(), amiibo_name(i), "SCAN")) amiibo_place(i);
@@ -213,6 +221,7 @@ void snapshot_settings() {   // main thread
     bindings_from_string(settings_get("launcher_bindings", "1,0,6,7,10"), g_q.bind);
     g_q.nav_on = strcmp(settings_get("launcher_nav", "1"), "0") != 0; g_q.prompts = prompt_style_from(settings_get("launcher_prompts", "auto"));
     g_q.renderer = settings_get("renderer", "opengl");
+    if (backend_gpu_amd() && strcmp(settings_get("amd_opengl", "0"), "1")) g_q.renderer = g_q.vals["renderer"] = "vulkan_native";   // what main.c started
 }
 } // namespace
 

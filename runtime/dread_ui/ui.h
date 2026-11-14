@@ -89,6 +89,7 @@ bool row_slider(const char* id, const char* label, float* v, float lo, float hi,
 bool row_button(const char* id, const char* label, const char* value = nullptr, bool primary = false);
 void row_text(const char* label, const char* value, ImU32 col = 0);
 void help_text(const char* s);
+void warn_text(const char* s);   // help_text in red
 void section(const char* title);
 void page_title(const char* title, const char* sub);
 bool big_button(const char* id, const char* label, ImVec2 size, bool primary = true);

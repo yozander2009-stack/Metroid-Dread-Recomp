@@ -998,6 +998,15 @@ int swr_main(int argc, char** argv){
       for(int i=0;i<3;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
 #endif
   for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"-v")) g_verbose=2; else if(!strncmp(argv[i],"--",2) && strchr(argv[i],'=')){ char k[256]; const char* opt=argv[i]+2; const char* e=strchr(opt,'='); size_t key_len=(size_t)(e-opt); if(key_len>=sizeof k) continue; memcpy(k,opt,key_len); k[key_len]=0; const char* value=e+1; backend_ini(k,value); if(!strcmp(k,"docked")) g_opt_docked=atoi(value); if(!strcmp(k,"fps_limit")) g_opt_fps=atoi(value); else if(!strcmp(k,"profile")) g_opt_prof=atoi(value); } }
+#ifdef _WIN32
+  { /* AMD graphics: Native Vulkan, unless the player chose OpenGL or Vulkan output anyway (the Play screen and the menu
+       write amd_opengl=1 with that choice). Test runs keep their renderer unless they start like a player */
+    extern int g_snxvk_want; extern int backend_gpu_amd(void);
+    int test= (getenv("SWR_TEST_SCRIPT") || getenv("SWR_TEST_EXIT_FRAME")) && !getenv("SWR_TEST_LAUNCHER");
+    if(!g_amd_test && !test && !g_snxvk_want && !getenv("SWR_AMD_OPENGL") && strcmp(ini_get("amd_opengl","0"),"1") && backend_gpu_amd()){
+      backend_ini("renderer","vulkan_native");
+      LOG("renderer: AMD graphics card: Native Vulkan (OpenGL crashes in AMD's driver on many PCs; choosing OpenGL on the Play screen uses it anyway)\n"); } }
+#endif
   snprintf(g_datadir,sizeof g_datadir,"%s%s_data/",g_exedir,g_exename);
   snprintf(g_hints_path,sizeof g_hints_path,"%s%s.hints",g_exedir,g_exename);
   pm_init(&g_hint_lock); pm_init(&g_flock);
