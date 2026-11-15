@@ -48,6 +48,16 @@ void main() {
     if (any(greaterThanEqual(p, ivec2(pc.vp.xy)))) return;
     vec2 sp = (vec2(p) + 0.5) * pc.vp.zw;
     float z = fz(p), lz = fz(p + ivec2(-1, 0)), rz = fz(p + ivec2(1, 0)), tz = fz(p + ivec2(0, -1)), bz = fz(p + ivec2(0, 1));
+    /* SWR: no geometry here (the far plane: the void beyond a room, gaps in the background): no AO. Its view depth is
+       ~3e38: the normal's squares overflowed, normalize() gave NaN, and the NaN became black blocks; blurred, the
+       rectangles at the screen sides and a line where the void shows at eye level. A neighbour in the void takes this
+       pixel's depth for the normal, so silhouettes against it stay finite too */
+    if (!(z < 1.0e7)) {
+        imageStore(oEd, p, vec4(0.0));
+        imageStore(oAO, p, vec4(1.0 / 1.5));
+        return;
+    }
+    lz = lz < 1.0e7 ? lz : z; rz = rz < 1.0e7 ? rz : z; tz = tz < 1.0e7 ? tz : z; bz = bz < 1.0e7 ? bz : z;
     vec4 e = edges(z, lz, rz, tz, bz);
     imageStore(oEd, p, vec4(packE(e)));
     vec3 N = calcN(e, vpos(sp, z), vpos(sp - vec2(pc.vp.z, 0.0), lz), vpos(sp + vec2(pc.vp.z, 0.0), rz),
@@ -85,5 +95,6 @@ void main() {
     }
     vis = max(0.03, pow(vis / pc.p.y, 2.2));
     vis = mix(1.0, vis, smoothstep(0.05, 0.25, abs(dot(N, V)))); /* edge-on surfaces: no AO (unreliable; a line at eye level) */
+    if (isnan(vis) || isinf(vis)) vis = 1.0; /* SWR: never a NaN into the denoise and the scene */
     imageStore(oAO, p, vec4(clamp(vis / 1.5, 0.0, 1.0)));
 }

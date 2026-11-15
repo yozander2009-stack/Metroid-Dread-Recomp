@@ -1888,7 +1888,8 @@ static void dlg_draw(void){
 typedef struct { u64 key; u32 occ, off, verts; float vp[4], vpj[4], dr[2], po[3]; int clip; } DmvRec;
 static struct { GLuint buf[2]; u32 used[2], nrec[2], cur; DmvRec rec[2][DMV_MAX];
   float jx, jy; u32 jframe; int jit_ok, jit_used, hold, misses, failed;
-  GLuint prog, vao, fbo, mv; u32 mvw, mvh; GLint loc_c, loc_p; } g_dmv;
+  GLuint prog, vao, fbo, mv; u32 mvw, mvh; GLint loc_c, loc_p;
+  float cam[2][32]; int camok[2]; GLuint cprog, cvao; GLint cl_t, cl_p, cl_z, cl_s; } g_dmv;
 extern void* glq_alloc(size_t sz, size_t extra, void (*ex)(void*)); extern void glq_commit(void); extern int glq_active(void);
 typedef void (APIENTRY* PFN_BTF)(GLenum); typedef void (APIENTRY* PFN_ETF)(void);
 static PFN_BTF r_btf; static PFN_ETF r_etf;
@@ -1973,6 +1974,14 @@ static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int inde
     glGenBuffers(2,g_dmv.buf);
     for(int i=0;i<2;i++){ glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,g_dmv.buf[i]); glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,DMV_BYTES,NULL,GL_DYNAMIC_COPY); }
     glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,0); }
+  if(!g_dmv.camok[c]){   /* this frame's camera, from its first captured draw: VS bank 3 = projection, then the view matrix */
+    u64 ca=g_cb.cb[0][3]; u32 sz=g_cb.cbsize[0][3]; float m[32];
+    if(ca && sz>=128){ gmem_read(ca,m,128);
+      #define AZ(x) (fabsf(x)<1e-5f)
+      if(m[0]>0.05f && m[5]>0.05f && AZ(m[1])&&AZ(m[2])&&AZ(m[3])&&AZ(m[4])&&AZ(m[6])&&AZ(m[7])&&AZ(m[8])&&AZ(m[9])&&AZ(m[12])&&AZ(m[13])&&AZ(m[15])
+         && fabsf(m[14]+1.f)<1e-4f && AZ(m[28])&&AZ(m[29])&&AZ(m[30]) && fabsf(m[31]-1.f)<1e-4f){ memcpy(g_dmv.cam[c],m,128); g_dmv.camok[c]=1; }
+      #undef AZ
+    } }
   DmvRec* d=&g_dmv.rec[c][g_dmv.nrec[c]];
   u64 vb=((u64)r[0x701]<<32)|r[0x702], ib= indexed? (((u64)r[0x5F2]<<32)|r[0x5F3]) : 0;
   d->key=vs->hash ^ vb*0x9E3779B97F4A7C15ull ^ ib*0xC2B2AE3D27D4EB4Full ^ ((u64)first<<32 ^ count) ^ ((u64)base_vertex<<20) ^ ((u64)instances<<48) ^ (u64)indexed;
@@ -1985,6 +1994,37 @@ static int dlg_capture_begin(u32* r, Sh* vs, GLenum mode, int topology, int inde
   g_dmv.nrec[c]++; g_dmv.used[c]+=(u32)bytes;
   return 1; }
 static void dlg_capture_end(void){ dmv_tf(0); }
+static int inv4(const float* a, float* o){   /* 4x4 inverse, row-major */
+  float t[16];
+  t[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
+  t[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
+  t[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
+  t[12]=-a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
+  t[1]=-a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
+  t[5]=a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
+  t[9]=-a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
+  t[13]=a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
+  t[2]=a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
+  t[6]=-a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
+  t[10]=a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
+  t[14]=-a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
+  t[3]=-a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
+  t[7]=a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
+  t[11]=-a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
+  t[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
+  float det=a[0]*t[0]+a[1]*t[4]+a[2]*t[8]+a[3]*t[12]; if(!(fabsf(det)>1e-12f)) return 0;
+  for(int i=0;i<16;i++) o[i]=t[i]/det; return 1; }
+/* the camera's motion for every pixel: view position from the scene depth (as AO: x,y from the projection's scale, row 0
+   = the top of the picture), moved by last frame's view times this frame's inverse view, projected with last frame's
+   projection. Static scenery gets its true motion even where no captured draw covers it */
+static const char* TAA_VS;   /* below (TAA) */
+static const char* CAMMV_FS="#version 430 core\nlayout(binding=0) uniform sampler2D zt;\n"
+  "uniform vec4 T[4]; uniform vec4 pc; uniform vec4 lz; uniform vec4 sz; out vec2 mv;\n"   /* T rows; pc: P00 P11 now, P00 P11 last frame; lz: view distance = x/(y-depth), zw jitter */
+  "void main(){ float d=texelFetch(zt,ivec2(gl_FragCoord.xy),0).r; float dd=lz.x/(lz.y-d);\n"
+  "  if(!(dd>0.0 && dd<1.0e7)){ mv=vec2(0.0); return; }\n"
+  "  vec2 w=gl_FragCoord.xy-lz.zw, s=w/sz.xy; vec4 v=vec4((2.0*s.x-1.0)*dd/pc.x,(1.0-2.0*s.y)*dd/pc.y,-dd,1.0);\n"
+  "  vec4 q=vec4(dot(T[0],v),dot(T[1],v),dot(T[2],v),dot(T[3],v)); float qd=max(-q.z,1e-3); vec2 s2=vec2(pc.z*q.x/qd*0.5+0.5,0.5-pc.w*q.y/qd*0.5);\n"
+  "  mv=s2*sz.xy-w; }\n";
 /* the motion-vector image for this frame (render size); 0 when there is nothing to draw */
 static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){ gp_mark("ours: motion vectors");
   u32 c=g_dmv.cur, pv=c^1;
@@ -2006,15 +2046,42 @@ static GLuint dlg_mv_pass(Tex* z, u32 w, u32 h){ gp_mark("ours: motion vectors")
   glBindFramebuffer(GL_FRAMEBUFFER,g_dmv.fbo);
   glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,g_dmv.mv,0);
   glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,0,0);
-  glFramebufferTexture2D(GL_FRAMEBUFFER,z->f.fmt==GL_DEPTH_STENCIL? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,z->id,0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,0,0);
   { GLenum b0=GL_COLOR_ATTACHMENT0; glDrawBuffers(1,&b0); }
   glDisable(GL_SCISSOR_TEST); glDisablei(GL_BLEND,0); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE); glDisable(GL_FRAMEBUFFER_SRGB);
   glColorMaski(0,1,1,1,1); glViewportIndexedf(0,0,0,(float)w,(float)h);
   { float zero[4]={0,0,0,0}; glClearBufferfv(GL_COLOR,0,zero); }
+  { static int nc=-1; if(nc<0) nc=getenv("SWR_TAA_NO_CAMMV")!=NULL;
+    const DmvRec* d0=&g_dmv.rec[c][0]; float iv[16];
+    if(!nc && g_dmv.camok[c] && g_dmv.camok[pv] && z->target==GL_TEXTURE_2D && inv4(g_dmv.cam[c]+16,iv)){
+      if(!g_dmv.cprog){ char err[512]; GLuint a=compile(GL_VERTEX_SHADER,TAA_VS,err,sizeof err), b= a? compile(GL_FRAGMENT_SHADER,CAMMV_FS,err,sizeof err) : 0;
+        g_dmv.cprog= a&&b? link2(a,b,0) : 0; if(!g_dmv.cprog){ LOG("taa (OpenGL): camera motion program failed: %s\n",err); nc=1; }
+        else { g_dmv.cl_t=glGetUniformLocation(g_dmv.cprog,"T"); g_dmv.cl_p=glGetUniformLocation(g_dmv.cprog,"pc"); g_dmv.cl_z=glGetUniformLocation(g_dmv.cprog,"lz");
+          g_dmv.cl_s=glGetUniformLocation(g_dmv.cprog,"sz"); glGenVertexArrays(1,&g_dmv.cvao); LOG("taa (OpenGL): camera motion for the whole picture\n"); } }
+      if(g_dmv.cprog){
+        const float* vq=g_dmv.cam[pv]+16; float T[16];
+        for(int i=0;i<4;i++) for(int j=0;j<4;j++){ float s=0; for(int k=0;k<4;k++) s+=vq[i*4+k]*iv[k*4+j]; T[i*4+j]=s; }
+        /* view distance from the stored depth, as AO (ao_pass): NDC depth = -P22 + P23/d, through the viewport's depth range */
+        float n=d0->dr[0], f=d0->dr[1]; if(!(fabsf(f-n)>1e-6f)){ n=0.f; f=1.f; }
+        float A=g_dmv.cam[c][10], B=g_dmv.cam[c][11], s= d0->clip? 1.f/(f-n) : 2.f/(f-n), o= d0->clip? -n/(f-n) : -2.f*n/(f-n)-1.f;
+        float pcv[4]={g_dmv.cam[c][0],g_dmv.cam[c][5],g_dmv.cam[pv][0],g_dmv.cam[pv][5]}, lz[4]={-B/s,-(o+A)/s,d0->vpj[0]-d0->vp[0],d0->vpj[1]-d0->vp[1]};
+        glDisable(GL_DEPTH_TEST); glUseProgram(g_dmv.cprog); glUniform4fv(g_dmv.cl_t,4,T); glUniform4fv(g_dmv.cl_p,1,pcv); glUniform4fv(g_dmv.cl_z,1,lz);
+        { float szv[4]={(float)w,(float)h,0,0}; glUniform4fv(g_dmv.cl_s,1,szv); }
+        glBindSampler(0,0); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,z->id); glBindVertexArray(g_dmv.cvao); glDrawArrays(GL_TRIANGLES,0,3); } } }
+  glFramebufferTexture2D(GL_FRAMEBUFFER,z->f.fmt==GL_DEPTH_STENCIL? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,z->id,0);
   glColorMaski(0,1,1,0,0); glEnable(GL_DEPTH_TEST); glDepthFunc(GL_EQUAL); glDepthMask(GL_FALSE);
   glUseProgram(g_dmv.prog); glBindVertexArray(g_dmv.vao); glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
   u32 drawn=0; int clip=-1, po=-1;
+  static int oldpair=-1; if(oldpair<0) oldpair=getenv("SWR_TAA_OLD_PAIRING")!=NULL;
   for(u32 i=0;i<g_dmv.nrec[c];i++){ const DmvRec* d=&g_dmv.rec[c][i]; const DmvRec* q=NULL;
+    /* only a draw whose key is drawn once in both frames: copies of one mesh (wall pieces, props) share every key part and
+       differ only in constants rewritten in place, so the n-th copy got last frame's n-th, another copy's place when the
+       draw order changed (walls moved by metres in the motion vectors; Vulkan, MEASURED 2026-11-15). They keep the
+       camera's motion from the pass above */
+    if(!oldpair){ u32 nc=0, np=0;
+      for(u32 k=0;k<g_dmv.nrec[c] && nc<2;k++) nc+=g_dmv.rec[c][k].key==d->key;
+      for(u32 k=0;k<g_dmv.nrec[pv] && np<2;k++) np+=g_dmv.rec[pv][k].key==d->key;
+      if(nc!=1 || np!=1) continue; }
     for(u32 k=0;k<g_dmv.nrec[pv] && !q;k++){ const DmvRec* e=&g_dmv.rec[pv][k]; if(e->key==d->key && e->occ==d->occ && e->verts==d->verts) q=e; }
     if(!q) continue;   /* new this frame: no previous position, zero motion */
     glBindBuffer(GL_ARRAY_BUFFER,g_dmv.buf[c]); glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,DMV_STRIDE,(void*)(size_t)d->off);
@@ -2054,7 +2121,7 @@ static const char* TAA_FS="#version 430 core\n"
   "layout(binding=0) uniform sampler2D cur; layout(binding=1) uniform sampler2D hist; layout(binding=2) uniform sampler2D mvt;\n"
   "uniform vec4 info;   /* x history valid, y motion vectors, z weight of this frame */\n"
   "layout(binding=3) uniform sampler2D opq; uniform vec4 info2;   /* x: opaque copy valid, y: reactive gain */\n"
-  "uniform vec4 info3;  /* x: weight of the new frame where nothing moves */\n"
+  "uniform vec4 info3;  /* x: weight of the new frame where nothing moves, y: gain on history the clip moved, z: weight for fast motion */\n"
   "uniform vec4 jit;    /* xy: this frame's jitter in pixels (what was drawn at texel q belongs at q - jitter) */\n"
   "layout(location=0) out vec4 oh; layout(location=1) out vec4 oc;\n"
   "ivec2 sz;\n"
@@ -2085,10 +2152,13 @@ static const char* TAA_FS="#version 430 core\n"
   "      hy*=clamp((m1.x+0.05)/(hm+0.05),0.67,1.5); }   /* history brightness matched to this frame: a flash keeps the history */\n"
   "    vec3 lo=m1-g*sd, hi=m1+g*sd; if(info2.w>0.5){ lo=min(lo,mn); hi=max(hi,mx); }   /* tests: at least the 3x3 min/max */\n"
   "    vec3 h=clamp(hy,lo,hi); vec3 hr=rgb(h);\n"
+  "    if(dot(mv,mv)>=1e-4) wc=max(wc,mix(info.z,info3.z,smoothstep(0.25,6.0,length(mv))));   /* moving: more of the new frame (each resampled history softens detail) */\n"
+  "    wc=max(wc,clamp((abs(hy.x-h.x)-0.004)*info3.y,0.0,0.5));   /* history outside this frame's range (a shot's flash, an area coming into view): follow the new frame */\n"
   "    if((v&1)!=0){ float a=wc/(1.0+dot(c0,vec3(0.2126,0.7152,0.0722))), b=(1.0-wc)/(1.0+dot(hr,vec3(0.2126,0.7152,0.0722))); o=(c0*a+hr*b)/(a+b); }\n"
   "    else o=mix(hr,c0,wc); }\n"
   "  o=clamp(o,vec3(0.0),vec3(0.999));   /* the clip box in YCoCg can reach outside RGB */\n"
   "  oh=vec4(o,1.0); oc=vec4(itm(o),1.0); }\n";
+static float taa_jamp(void);
 static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){ gp_mark("ours: TAA");
   if(g_dmv.failed){ g_taa_failed=1; LOG("taa (OpenGL): no motion vectors on this driver: TAA off\n"); return 0; }
   if(!g_taa.prog){
@@ -2122,17 +2192,21 @@ static int taa_pass(Tex* t, GLuint mv, u32 w, u32 h, int reset){ gp_mark("ours: 
     glActiveTexture(GL_TEXTURE0+3); glBindTexture(GL_TEXTURE_2D,ok? g_taa.opq : g_taa.hist[c^1]);
     static float sg=-1, mm=0; if(sg<0){ const char* e=getenv("SWR_TAA_STATIC_GAMMA"); sg= e? (float)atof(e) : 0.f; mm=getenv("SWR_TAA_MINMAX")? 1.f : 0.f; }
     float r2[4]={ ok? 1.f : 0.f, 4.f, sg, mm }; glUniform4fv(g_taa.loc_r,1,r2);
-    /* where nothing moves, 1/25 of the new (jittered) frame instead of 1/10: at 1/10 every still edge kept an 8-frame jitter
-       shimmer, which shot flashes made visible on the background (MEASURED, still wall in the save room, frame-to-frame
-       change: TAA off 0.002, 1/10 0.058 (0.114 with the automatic sharpening), 1/25 + kernel 4: 0.030, sharpness 3.39 vs
-       3.43). Moving pixels keep 1/10. SWR_TAA_STATIC_W=x (tests) */
-    static float sw=-1; if(sw<0){ const char* e=getenv("SWR_TAA_STATIC_W"); sw= e? (float)atof(e) : 0.04f; }
-    float r3[4]={ sw, 0, 0, 0 }; glUniform4fv(glGetUniformLocation(g_taa.prog,"info3"),1,r3); }
+    /* where nothing moves, 1/40 of the new (jittered) frame: at 1/10 every still edge kept an 8-frame jitter shimmer, which
+       shot flashes made visible on the background (MEASURED, still wall in the save room, frame-to-frame change: TAA off
+       0.002, 1/10 0.058, 1/25 0.030; see taa_jamp for the jitter). Moving pixels get 1/10 to 3/10 by speed (each resampled
+       history softens detail), and history the clip had to move (a shot's flash, an area coming into view) follows the new
+       frame faster. MEASURED owner's room at 2.25x, camera moving: sharpness after/before TAA 0.853 -> 0.909.
+       SWR_TAA_STATIC_W / SWR_TAA_REJ / SWR_TAA_VELW (tests) */
+    static float sw=-1, rj, vw; if(sw<0){ const char* e=getenv("SWR_TAA_STATIC_W"); sw= e? (float)atof(e) : 0.025f;
+      e=getenv("SWR_TAA_REJ"); rj= e? (float)atof(e) : 8.f; e=getenv("SWR_TAA_VELW"); vw= e? (float)atof(e) : 0.3f; }   /* tests */
+    float r3[4]={ sw, rj, vw, 0 }; glUniform4fv(glGetUniformLocation(g_taa.prog,"info3"),1,r3); }
   { static int tv=-1; if(tv<0){ const char* e=getenv("SWR_TAA_VARIANT"); tv= (e? atoi(e) : 0)|32; if(getenv("SWR_TAA_LUMAMATCH")) tv&=~32; }   /* brightness matching: off (made small lights flicker) */
     float in[4]={ g_taa.valid? 1.f : 0.f, mv? 1.f : 0.f, 0.1f, (float)tv }; glUniform4fv(g_taa.loc,1,in);
     static float js=0, jk=0; if(!jk){ const char* e=getenv("SWR_TAA_JSIGN"); js= e? (float)atof(e) : 1.f; e=getenv("SWR_TAA_K"); jk= e? (float)atof(e) : 4.f; }   /* sign +1 measured right; kernel 8 is sharper but shimmers more */
     static float gm=0; if(!gm){ const char* e=getenv("SWR_TAA_GAMMA"); gm= e? (float)atof(e) : 1.25f; }
-    float j[4]={ g_dmv.jit_used? js*g_dmv.jx : 0.f, g_dmv.jit_used? js*g_dmv.jy : 0.f, jk, gm }; glUniform4fv(g_taa.loc_j,1,j); }
+    /* the kernel narrows with the jitter: without jitter the pixel itself is the right sample (its neighbours only blurred) */
+    float a=taa_jamp(), j[4]={ g_dmv.jit_used? js*g_dmv.jx : 0.f, g_dmv.jit_used? js*g_dmv.jy : 0.f, jk/(a*a>1e-4f? a*a : 1e-4f), gm }; glUniform4fv(g_taa.loc_j,1,j); }
   glDrawArrays(GL_TRIANGLES,0,3);
   glCopyImageSubData(g_taa.tmp,GL_TEXTURE_2D,0,0,0,0,t->id,GL_TEXTURE_2D,0,0,0,0,(GLsizei)w,(GLsizei)h,1);
   g_taa.valid=1;
@@ -2190,8 +2264,8 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "uniform vec4 u_x;     /* tests: x 1 = depth mip 0 only, y thin-occluder compensation */\n"
   "const float PI=3.14159265, HPI=1.57079633;\n"
   "vec3 vpos(vec2 sp,float z){ return vec3((u_ndc.xy*sp+u_ndc.zw)*z,z); }\n"
-  "uniform int u_lv;   /* 1: this pass runs at half resolution, on the view-depth level below */\n"
-  "float fz(ivec2 p){ return texelFetch(vz,clamp(p,ivec2(0),ivec2(u_vp.xy)-1),u_lv).r; }\n"
+  "uniform int u_lv;   /* 1: this pass runs at half resolution: each pixel is the top-left full-size pixel of its 2x2 block */\n"
+  "float fz(ivec2 p){ return texelFetch(vz,clamp(p<<u_lv,ivec2(0),textureSize(vz,0)-1),0).r; }   /* a real depth, never a blend of two surfaces */\n"
   "vec4 edges(float c,float l,float r,float t,float b){ vec4 e=vec4(l,r,t,b)-c; float slr=(e.y-e.x)*0.5, stb=(e.w-e.z)*0.5;\n"
   "  vec4 ea=e+vec4(slr,-slr,stb,-stb); e=min(abs(e),abs(ea)); return clamp(1.25-e/(c*0.011),0.0,1.0); }\n"
   "float packE(vec4 e){ e=floor(clamp(e,0.0,1.0)*2.9+0.5); return dot(e,vec4(64.0,16.0,4.0,1.0)/255.0); }\n"
@@ -2203,10 +2277,22 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "  if(ry==0u){ if(rx==1u){ x=63u-x; y=63u-y; } uint tt=x; x=y; y=tt; } } return i; }\n"
   "vec2 noise(ivec2 p){ uint i=hilbert(uint(p.x)&63u,uint(p.y)&63u)+288u*(uint(u_p.w)%64u); return fract(0.5+float(i)*vec2(0.75487766624669276,0.569840290998053266)); }\n"
   "void main(){ ivec2 p=ivec2(gl_GlobalInvocationID.xy); if(any(greaterThanEqual(p,ivec2(u_vp.xy)))) return;\n"
-  "  vec2 sp=(vec2(p)+0.5)*u_vp.zw;\n"
+  "  vec2 sp=(vec2(p<<u_lv)+0.5)/vec2(textureSize(vz,0));\n"
   "  float z=fz(p), lz=fz(p+ivec2(-1,0)), rz=fz(p+ivec2(1,0)), tz=fz(p+ivec2(0,-1)), bz=fz(p+ivec2(0,1));\n"
-  "  vec4 e=edges(z,lz,rz,tz,bz); imageStore(oEd,p,vec4(packE(e)));\n"
-  "  vec3 N=calcN(e,vpos(sp,z),vpos(sp-vec2(u_vp.z,0.0),lz),vpos(sp+vec2(u_vp.z,0.0),rz),vpos(sp-vec2(0.0,u_vp.w),tz),vpos(sp+vec2(0.0,u_vp.w),bz));\n"
+  /* no geometry here (the far plane: the void beyond a room, gaps in the background): no AO. Its view depth is ~3e38:
+     the normal's squares overflowed into NaN, which became black blocks (the rectangles) and a line where the void
+     shows at eye level. A neighbour in the void takes this pixel's depth, so silhouettes against it stay finite */
+  "  if(!(z<1.0e7)){ imageStore(oEd,p,vec4(0.0)); imageStore(oAO,p,vec4(1.0/1.5)); return; }\n"
+  "  lz=lz<1.0e7? lz : z; rz=rz<1.0e7? rz : z; tz=tz<1.0e7? tz : z; bz=bz<1.0e7? bz : z;\n"
+  "  vec4 e=edges(z,lz,rz,tz,bz); imageStore(oEd,p,vec4(packE(e))); vec2 ds=u_vp.zw;\n"
+  /* half resolution: the normal from the full-size neighbours of the sampled pixel. Two pixels apart, the depth step on a
+     ceiling seen almost edge-on counted as an edge, the normal fell back to the weak terms, the edge-on fade missed it and
+     a grey band lay across the surfaces just above eye level (above Samus). The denoiser keeps the half-size edges */
+  "  if(u_lv>0){ ivec2 f=p<<u_lv, zs=textureSize(vz,0)-1; ds=1.0/vec2(textureSize(vz,0));\n"
+  "    lz=texelFetch(vz,clamp(f+ivec2(-1,0),ivec2(0),zs),0).r; rz=texelFetch(vz,clamp(f+ivec2(1,0),ivec2(0),zs),0).r;\n"
+  "    tz=texelFetch(vz,clamp(f+ivec2(0,-1),ivec2(0),zs),0).r; bz=texelFetch(vz,clamp(f+ivec2(0,1),ivec2(0),zs),0).r;\n"
+  "    lz=lz<1.0e7? lz : z; rz=rz<1.0e7? rz : z; tz=tz<1.0e7? tz : z; bz=bz<1.0e7? bz : z; e=edges(z,lz,rz,tz,bz); }\n"
+  "  vec3 N=calcN(e,vpos(sp,z),vpos(sp-vec2(ds.x,0.0),lz),vpos(sp+vec2(ds.x,0.0),rz),vpos(sp-vec2(0.0,ds.y),tz),vpos(sp+vec2(0.0,ds.y),bz));\n"
   "  z*=0.99999; vec3 P=vpos(sp,z); vec3 V=normalize(-P);\n"
   "  float er=u_p.x*1.457, fr=0.615*er, ff=er*(1.0-0.615), fm=-1.0/fr, fa=ff/fr+1.0;\n"
   "  float ssr=er/(z*u_ndc.x*u_vp.z);\n"
@@ -2227,6 +2313,7 @@ static const char* AO_MAIN_CS="#version 430 core\nlayout(local_size_x=8,local_si
   "    vis+=pl*((cn+2.0*h0*sin(n)-cos(2.0*h0-n))/4.0+(cn+2.0*h1*sin(n)-cos(2.0*h1-n))/4.0); }\n"
   "  vis=max(0.03,pow(vis/u_p.y,2.2));\n"
   "  vis=mix(1.0,vis,smoothstep(0.05,0.25,abs(dot(N,V))));   /* edge-on surfaces: no AO (unreliable there; a line at eye level) */\n"
+  "  if(isnan(vis) || isinf(vis)) vis=1.0;\n"   /* never a NaN into the denoise and the scene */
   "  imageStore(oAO,p,vec4(clamp(vis/1.5,0.0,1.0))); }\n";
 static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_size_y=8) in;\n"
   "layout(binding=0) uniform sampler2D aoT; layout(binding=1) uniform sampler2D edT; layout(binding=2) uniform sampler2D col;\n"
@@ -2246,9 +2333,20 @@ static const char* AO_DEN_CS="#version 430 core\nlayout(local_size_x=8,local_siz
   "  vec3 c=texelFetch(col,p<<u_lv,0).rgb; c=max(c,vec3(0.0)); float l=dot(c/(1.0+max(c.r,max(c.g,c.b))),vec3(0.2126,0.7152,0.0722));\n"
   "  float r=mix(clamp(sum/sw*1.5,0.0,1.0),1.0,smoothstep(0.25,0.75,l));   /* AO dims indirect light: lit highlights keep their brightness */\n"
   "  imageStore(oF,p,vec4(r)); }\n";
-static const char* AO_APPLY_FS="#version 430 core\nlayout(binding=0) uniform sampler2D aoF; uniform vec4 u_a; out vec4 o;\n"
-  "void main(){ float a=textureLod(aoF,gl_FragCoord.xy/u_a.zw,0.0).r; o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
-static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n, lv; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a, main_lv, den_lv; } g_ao;
+static const char* AO_APPLY_FS="#version 430 core\nlayout(binding=0) uniform sampler2D aoF; layout(binding=1) uniform sampler2D vzT; uniform vec4 u_a; out vec4 o;\n"
+  "uniform int u_lv;\n"
+  "void main(){ ivec2 f=ivec2(gl_FragCoord.xy); float a;\n"
+  "  if(u_lv==0) a=texelFetch(aoF,f,0).r;\n"
+  /* half resolution: the 2x2 nearest AO texels, bilinear weights times depth similarity to this pixel (each texel was
+     computed at full-size pixel 2q), so AO does not spill across an edge between a near and a far surface */
+  "  else { ivec2 hs=textureSize(aoF,0)-1, zs=textureSize(vzT,0)-1; float zc=texelFetch(vzT,f,0).r;\n"
+  "    vec2 u=vec2(f)*0.5; ivec2 q0=ivec2(floor(u)); vec2 fr=u-vec2(q0); float s=0.0, ws=0.0, bd=1e30, ba=1.0;\n"
+  "    for(int j=0;j<4;j++){ ivec2 d=ivec2(j&1,j>>1), q=min(q0+d,hs); float zq=texelFetch(vzT,min(q*2,zs),0).r, aq=texelFetch(aoF,q,0).r;\n"
+  "      float bw=(d.x==1? fr.x : 1.0-fr.x)*(d.y==1? fr.y : 1.0-fr.y), dz=abs(zq-zc)/max(min(zc,zq),1.0);\n"
+  "      float w=bw*exp(-dz*40.0); s+=aq*w; ws+=w; if(bw>0.0 && dz<bd){ bd=dz; ba=aq; } }\n"
+  "    a= ws>1e-4? s/ws : ba; }\n"
+  "  o=vec4(vec3(mix(1.0,a,u_a.x)),1.0); }\n";
+static struct { GLuint pre, mainp, den, app, vao, fbo, vz, ao, ed, fin; u32 w, h, n, lv; GLint pre_dep, main_vp, main_ndc, main_p, den_vp, app_a, main_lv, den_lv, app_lv; } g_ao;
 static GLuint ao_cs(const char* src){ char err[1024]; err[0]=0; GLuint s=compile(GL_COMPUTE_SHADER,src,err,sizeof err); GLuint p= s? link2(s,0,0) : 0;
   if(!p) LOG("ao: compute program failed: %s\n",err); return p; }
 static void ao_tex(GLuint* t, GLenum f, u32 w, u32 h, int levels){
@@ -2265,15 +2363,15 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
     if(!g_ao.pre || !g_ao.mainp || !g_ao.den || !g_ao.app){ g_ao_failed=1; LOG("ao: programs failed: AO off\n"); return 0; }
     g_ao.pre_dep=glGetUniformLocation(g_ao.pre,"u_dep"); g_ao.main_vp=glGetUniformLocation(g_ao.mainp,"u_vp"); g_ao.main_ndc=glGetUniformLocation(g_ao.mainp,"u_ndc");
     g_ao.main_p=glGetUniformLocation(g_ao.mainp,"u_p"); g_ao.den_vp=glGetUniformLocation(g_ao.den,"u_vp"); g_ao.app_a=glGetUniformLocation(g_ao.app,"u_a");
-    g_ao.main_lv=glGetUniformLocation(g_ao.mainp,"u_lv"); g_ao.den_lv=glGetUniformLocation(g_ao.den,"u_lv");
+    g_ao.main_lv=glGetUniformLocation(g_ao.mainp,"u_lv"); g_ao.den_lv=glGetUniformLocation(g_ao.den,"u_lv"); g_ao.app_lv=glGetUniformLocation(g_ao.app,"u_lv");
     glGenVertexArrays(1,&g_ao.vao); glGenFramebuffers(1,&g_ao.fbo);
     LOG("ao: XeGTAO on (OpenGL)\n"); }
   /* at a frame cap of 120+ and 2560x1440 and above the AO term is computed at half resolution (on the view-depth level
      below) and filtered up: ~0.9 ms of GPU time at 2.2x, the largest of our passes (MEASURED owner settings, 240 cap:
      233-237 -> 240 FPS). Thin contact shadows come out lighter, so at 60 it stays full. SWR_AO_FULL=1 = always full */
-  static int full=-1; if(full<0) full=getenv("SWR_AO_FULL")!=NULL;
-  extern int g_opt_fps;
-  u32 lv= !full && (g_opt_fps>=120 || g_opt_fps==0) && (u64)w*h>=2560ull*1440ull? 1 : 0, aw=(w+lv)>>lv, ah=(h+lv)>>lv;
+  static int full=-1, half; if(full<0){ full=getenv("SWR_AO_FULL")!=NULL; half= getenv("SWR_AO_HALF")? atoi(getenv("SWR_AO_HALF")) : 0; }   /* tests: SWR_AO_HALF=1 half at any cap, =2 half on odd frames only */
+  extern int g_opt_fps, g_frames;
+  u32 lv= half==2? (u32)(g_frames&1) : !full && (half || (g_opt_fps>=120 || g_opt_fps==0) && (u64)w*h>=2560ull*1440ull)? 1 : 0, aw=(w+lv)>>lv, ah=(h+lv)>>lv;
   if(g_ao.w!=w || g_ao.h!=h || g_ao.lv!=lv){
     ao_tex(&g_ao.vz,GL_R32F,w,h,5); ao_tex(&g_ao.ao,GL_R8,aw,ah,1); ao_tex(&g_ao.ed,GL_R8,aw,ah,1); ao_tex(&g_ao.fin,GL_R8,aw,ah,1);
     glBindTexture(GL_TEXTURE_2D,g_ao.fin); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
@@ -2321,19 +2419,42 @@ static int ao_pass(Tex* t, Tex* z, u32 w, u32 h){ gp_mark("ours: XeGTAO");
   glDisable(GL_POLYGON_OFFSET_FILL); glColorMaski(0,1,1,1,0); glViewportIndexedf(0,0,0,(float)w,(float)h);
   { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_AO_DEBUG")!=NULL;   /* test: the AO term alone in place of the scene */
     if(!dbg){ glEnablei(GL_BLEND,0); glBlendEquationSeparatei(0,GL_FUNC_ADD,GL_FUNC_ADD); glBlendFuncSeparatei(0,GL_ZERO,GL_SRC_COLOR,GL_ZERO,GL_ONE); } else glDisablei(GL_BLEND,0); }
-  glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,(float)w,(float)h}; glUniform4fv(g_ao.app_a,1,a); }
-  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_ao.fin); glBindVertexArray(g_ao.vao);
+  glUseProgram(g_ao.app); { float a[4]={(float)g_opt_ao/100.f,0,(float)w,(float)h}; glUniform4fv(g_ao.app_a,1,a); } glUniform1i(g_ao.app_lv,(GLint)lv);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_ao.fin); glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,g_ao.vz);
+  glActiveTexture(GL_TEXTURE0); glBindVertexArray(g_ao.vao);
   glDrawArrays(GL_TRIANGLES,0,3);
   glDisablei(GL_BLEND,0); glColorMaski(0,1,1,1,1);
+  { /* test: SWR_AO_DUMP=F0-F1:prefix writes the AO term (after the denoise, at its own resolution) as prefix<frame>.pgm */
+    static int cfg, f0, f1; static char pre[512]; extern int g_frames;
+    if(!cfg){ cfg=1; const char* e=getenv("SWR_AO_DUMP"); const char* c= e? strchr(e,':') : NULL; if(c && sscanf(e,"%d-%d",&f0,&f1)==2) snprintf(pre,sizeof pre,"%s",c+1); else f1=-1; }
+    if(g_frames>=f0 && g_frames<=f1){ u8* px=malloc((size_t)aw*ah);
+      if(px){ glBindTexture(GL_TEXTURE_2D,g_ao.fin); glPixelStorei(GL_PACK_ALIGNMENT,1); glGetTexImage(GL_TEXTURE_2D,0,GL_RED,GL_UNSIGNED_BYTE,px); mb_reset();
+        char fn[600]; snprintf(fn,sizeof fn,"%s%d.pgm",pre,g_frames); FILE* f=fopen(fn,"wb");
+        if(f){ fprintf(f,"P5\n%u %u\n255\n",aw,ah); fwrite(px,1,(size_t)aw*ah,f); fclose(f); } free(px); } } }
   state_dirty(); g_fb_sig_ok=0; g_clip_mode=-1; g_pipe_on=0; mb_reset();
   return 1; }
 
+/* test: SWR_SCENE_DUMP=F0-F1:prefix writes the scene target after AO/TAA (before the game's post effects), tone-mapped,
+   half size, as prefix<frame>.ppm; with SWR_SCENE_DUMP_PRE=1 also before TAA, as prefix pre<frame>.ppm */
+static void scene_dump(Tex* t, u32 w, u32 h, const char* sfx){
+  static int cfg, f0, f1; static char pre[512]; extern int g_frames;
+  if(!cfg){ cfg=1; const char* e=getenv("SWR_SCENE_DUMP"); const char* c= e? strchr(e,':') : NULL; if(c && sscanf(e,"%d-%d",&f0,&f1)==2) snprintf(pre,sizeof pre,"%s",c+1); else f1=-1; }
+  if(g_frames>=f0 && g_frames<=f1 && t->target==GL_TEXTURE_2D){ float* px=malloc((size_t)w*h*16);
+    if(px){ glBindTexture(GL_TEXTURE_2D,t->id); glPixelStorei(GL_PACK_ALIGNMENT,4); glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,px); mb_reset();
+      u32 ow=w/2, oh=h/2; u8* o=malloc((size_t)ow*oh*3);
+      if(o){ for(u32 y=0;y<oh;y++) for(u32 x=0;x<ow;x++) for(int k=0;k<3;k++){ float s=0;
+            for(int dy=0;dy<2;dy++) for(int dx=0;dx<2;dx++){ float v=px[(((size_t)(h-1-(y*2+dy)))*w+x*2+dx)*4+k]; if(v<0) v=0; s+=v/(1.f+v); }
+            o[((size_t)y*ow+x)*3+k]=(u8)(s/4.f*255.f+0.5f); }
+        char fn[600]; snprintf(fn,sizeof fn,"%s%s%d.ppm",pre,sfx,g_frames); FILE* f=fopen(fn,"wb");
+        if(f){ fprintf(f,"P6\n%u %u\n255\n",ow,oh); fwrite(o,1,(size_t)ow*oh*3,f); fclose(f); } free(o); }
+      free(px); } } }
 static int dlg_eval(void){
   Tex* t=g_dlg.need; Tex* z=g_dlg.need_z; g_dlg.need=g_dlg.need_z=NULL;
   if(!t || !z) return 0;
   u32 w=RW(t), h=RH(t);
   if(reshade_gl_on()) rs_depth_copy(z,w,h);
   if(dlg_ao() && !g_taa.ao_done) ao_pass(t,z,w,h);   /* before TAA: its noise is resolved over frames (normally done at the opaque point) */
+  { static int sp=-1; if(sp<0) sp=getenv("SWR_SCENE_DUMP_PRE")!=NULL; if(sp) scene_dump(t,w,h,"pre"); }
   if(dlg_aa()){
     GLuint mv=dlg_mv_pass(z,w,h);
     if(dlg_dlss()) dlgl_queue(t->id,z->id,mv,z->f.ifmt,w,h,g_dmv.jit_used? g_dmv.jx : 0.0f,g_dmv.jit_used? g_dmv.jy : 0.0f,g_dlg.reset);
@@ -2341,22 +2462,18 @@ static int dlg_eval(void){
     g_dlg_wasreset=g_dlg.reset; g_dlg_evrc=g_dlg_rc;
     g_dlg.reset=0; t->wgen++; g_dlg.evals++; }
   g_dlg.evaluated=1;
-  { /* test: SWR_SCENE_DUMP=F0-F1:prefix writes the scene target after AO/TAA (before the game's post effects), tone-mapped,
-       half size, as prefix<frame>.ppm */
-    static int cfg, f0, f1; static char pre[512]; extern int g_frames;
-    if(!cfg){ cfg=1; const char* e=getenv("SWR_SCENE_DUMP"); const char* c= e? strchr(e,':') : NULL; if(c && sscanf(e,"%d-%d",&f0,&f1)==2) snprintf(pre,sizeof pre,"%s",c+1); else f1=-1; }
-    if(g_frames>=f0 && g_frames<=f1 && t->target==GL_TEXTURE_2D){ float* px=malloc((size_t)w*h*16);
-      if(px){ glBindTexture(GL_TEXTURE_2D,t->id); glPixelStorei(GL_PACK_ALIGNMENT,4); glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,px); mb_reset();
-        u32 ow=w/2, oh=h/2; u8* o=malloc((size_t)ow*oh*3);
-        if(o){ for(u32 y=0;y<oh;y++) for(u32 x=0;x<ow;x++) for(int k=0;k<3;k++){ float s=0;
-              for(int dy=0;dy<2;dy++) for(int dx=0;dx<2;dx++){ float v=px[(((size_t)(h-1-(y*2+dy)))*w+x*2+dx)*4+k]; if(v<0) v=0; s+=v/(1.f+v); }
-              o[((size_t)y*ow+x)*3+k]=(u8)(s/4.f*255.f+0.5f); }
-          char fn[600]; snprintf(fn,sizeof fn,"%s%d.ppm",pre,g_frames); FILE* f=fopen(fn,"wb");
-          if(f){ fprintf(f,"P6\n%u %u\n255\n",ow,oh); fwrite(o,1,(size_t)ow*oh*3,f); fclose(f); } free(o); }
-        free(px); } } }
+  scene_dump(t,w,h,"");
   { static int said; if(!said){ said=1; LOG("scene point (OpenGL, %s): target %llx %ux%u, depth %llx\n",dlg_dlss()? "DLAA" : dlg_taa()? "TAA" : "ReShade depth",
       (unsigned long long)t->gva,w,h,(unsigned long long)z->gva); } }
   return 1; }
+
+/* TAA's jitter: half (+-0.25 px) at 1x, less above, none from 2x up. The extra pixels already smooth the edges there, and
+   the jitter is what makes still edges shimmer. MEASURED, owner's save room, frame-to-frame change on a still wall and
+   sharpness: 2.25x TAA off 0.002, full jitter 0.030, none 0.003; 1x TAA off 0.002 / 3.31, full jitter 0.053 / 2.94,
+   half jitter with 1/40 for still pixels 0.040 / 3.08. DLAA keeps the full jitter. SWR_TAA_JAMP=x (tests) */
+static float taa_jamp(void){ if(dlg_dlss()) return 1.f;
+  static float e=-2.f; if(e<-1.5f){ const char* s=getenv("SWR_TAA_JAMP"); e= s? (float)atof(s) : -1.f; }
+  return e>=0.f? e : g_scale>=2.f? 0.f : g_scale<=1.f? 0.5f : 0.5f*(2.f-g_scale); }
 
 /* each present */
 static void dlg_frame(void){
@@ -2370,8 +2487,8 @@ static void dlg_frame(void){
     else if(!g_dlg.stable || ++g_dlg.streak>=30){ g_dlg.stable=g_dlg.frame_best; g_dlg.stable_z=g_dlg.frame_best_z; g_dlg.streak=0; g_dlg.reset=1; } }
   else if(++g_dlg.missing>=30) g_dlg.stable=0;
   g_dlg.chosen=g_dlg.stable; g_dlg.chosen_z=g_dlg.stable_z;
-  g_dmv.cur^=1; g_dmv.nrec[g_dmv.cur]=0; g_dmv.used[g_dmv.cur]=0;
-  { u32 i=(g_dmv.jframe++%8)+1; g_dmv.jx=halton(i,2)-0.5f; g_dmv.jy=halton(i,3)-0.5f; }
+  g_dmv.cur^=1; g_dmv.nrec[g_dmv.cur]=0; g_dmv.used[g_dmv.cur]=0; g_dmv.camok[g_dmv.cur]=0;
+  { u32 i=(g_dmv.jframe++%8)+1; float a=taa_jamp(); g_dmv.jx=(halton(i,2)-0.5f)*a; g_dmv.jy=(halton(i,3)-0.5f)*a; }
   if(g_dmv.jit_used && !g_dlg.evaluated){ g_dmv.hold=60; g_dmv.misses++; } else if(g_dmv.hold) g_dmv.hold--;   /* jittered without DLSS: that frame shook */
   if(sp_trace()){ extern int g_frames; LOG("scenept: frame %d end: evaluated %d hold %d jit_used %d reads %u\n",g_frames,g_dlg.evaluated,g_dmv.hold,g_dmv.jit_used,g_dlg_rc); }
   { static int on=-1, n; if(on<0) on=getenv("SWR_TRACE_TAA")!=NULL; extern int g_frames;

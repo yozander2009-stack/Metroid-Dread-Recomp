@@ -7,8 +7,9 @@ layout(set = 0, binding = 0) uniform sampler2D cur;
 layout(set = 0, binding = 1) uniform sampler2D hist;
 layout(set = 0, binding = 2) uniform sampler2D mvt;
 layout(push_constant) uniform PC {
-    vec4 info; // x history valid, y motion vectors, z weight of this frame
-    vec4 jit;  // xy: this frame's jitter in pixels (what was drawn at texel q belongs at q - jitter)
+    vec4 info; // x history valid, y motion vectors, z weight of this frame, w the same where nothing moves
+    vec4 jit;  // xy: this frame's jitter in pixels (what was drawn at texel q belongs at q - jitter), z: kernel constant
+    vec4 ad;   // x: gain on history the clip moved, y: weight of this frame for fast motion
 } pc;
 layout(location = 0) out vec4 oh;
 layout(location = 1) out vec4 oc;
@@ -46,7 +47,7 @@ void main() {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), sz - 1);
             vec3 t = tm(texelFetch(cur, q, 0).rgb);
             vec2 d = vec2(x, y) - pc.jit.xy;
-            float w = exp(-4.0 * dot(d, d)); // unjittered: a Gaussian at the true sample spots (8 = sharper but shimmers)
+            float w = exp(-pc.jit.z * dot(d, d)); // unjittered: a Gaussian at the true sample spots, narrower with less jitter
             c0 += t * w;
             cw += w;
             vec3 s = ycc(t);
@@ -64,10 +65,13 @@ void main() {
     vec2 uv = (vec2(p) + 0.5 + mv) / vec2(sz);
     vec3 o = c0;
     if (pc.info.x > 0.5 && all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
-        vec3 h = clamp(ycc(hs(uv)), m1 - 1.25 * sd, m1 + 1.25 * sd);
+        vec3 hy = ycc(hs(uv));
+        vec3 h = clamp(hy, m1 - 1.25 * sd, m1 + 1.25 * sd);
         // where nothing moves, less of the jittered new frame: at 1/10 static edges kept an 8-frame jitter shimmer
         // (MEASURED on OpenGL: frame-to-frame change on a still wall 0.058 -> 0.030, sharpness unchanged)
-        float wc = dot(mv, mv) < 1e-4 ? min(pc.info.z, pc.info.w) : pc.info.z;
+        // moving: more of the new frame, faster motion more (each resampled history softens detail)
+        float wc = dot(mv, mv) < 1e-4 ? min(pc.info.z, pc.info.w) : mix(pc.info.z, pc.ad.y, smoothstep(0.25, 6.0, length(mv)));
+        wc = max(wc, clamp((abs(hy.x - h.x) - 0.004) * pc.ad.x, 0.0, 0.5)); // history outside this frame's range: follow it
         o = mix(rgb(h), c0, wc);
     }
     o = clamp(o, vec3(0.0), vec3(0.999)); // the clip box in YCoCg can reach outside RGB

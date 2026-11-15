@@ -1,0 +1,28 @@
+#version 450
+// SWR (dlss.c cam_pass): the camera's motion for every pixel, from the scene depth and the game's camera (vertex
+// constant bank 3: projection, then the view matrix); the captured draws are drawn over it (dlss_mv). Static scenery
+// gets its true motion where no captured draw covers it. Same maths as the OpenGL renderer's CAMMV_FS (gpu_gl.c).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D zt;
+layout(set = 0, binding = 1, rg16f) writeonly uniform image2D omv;
+layout(push_constant) uniform PC {
+    vec4 T[4]; // rows: last frame's view times this frame's inverse view
+    vec4 pc;   // P00 P11 this frame, P00 P11 last frame
+    vec4 lz;   // view distance = x / (y - depth); zw: this frame's jitter in pixels
+    vec4 sz;   // width, height
+} p;
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, ivec2(p.sz.xy)))) return;
+    float d = texelFetch(zt, q, 0).r, dd = p.lz.x / (p.lz.y - d);
+    vec2 mv = vec2(0.0);
+    if (dd > 0.0 && dd < 1.0e7) { // the far plane and the void beyond rooms: no motion
+        vec2 w = vec2(q) + 0.5 - p.lz.zw, s = w / p.sz.xy; // where the surface is without the jitter; row 0 = the top
+        vec4 v = vec4((2.0 * s.x - 1.0) * dd / p.pc.x, (1.0 - 2.0 * s.y) * dd / p.pc.y, -dd, 1.0);
+        vec4 r = vec4(dot(p.T[0], v), dot(p.T[1], v), dot(p.T[2], v), dot(p.T[3], v));
+        float rd = max(-r.z, 1e-3);
+        vec2 s2 = vec2(p.pc.z * r.x / rd * 0.5 + 0.5, 0.5 - p.pc.w * r.y / rd * 0.5);
+        mv = s2 * p.sz.xy - w;
+    }
+    imageStore(omv, q, vec4(mv, 0.0, 0.0));
+}

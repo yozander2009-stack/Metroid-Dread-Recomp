@@ -10,6 +10,7 @@
 #include "nx/gpu/vk/vk.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -512,6 +513,7 @@ static void dl_fail(const char* what, NgxResult r) {
    Jitter: the scene draws' viewport moves by a sub-pixel Halton(2,3) offset, which shifts what they rasterize the way
    a jittered projection would; the deferred passes that read render targets by screen position are left alone. */
 #include "nx/gpu/vk/dlss_mv_spv.h"
+#include "nx/gpu/vk/cam_mv_spv.h"
 #define XFB_BYTES (64u << 20) /* per frame: 4M vertices */
 #define XFB_MAX 2048          /* captured draws per frame */
 typedef struct {
@@ -531,8 +533,21 @@ static struct {
     VkFormat pipe_depth;
     int reads_rt; /* the draw being set up samples a render target */
     float jx, jy; /* this frame's jitter, render pixels */
+    float jamp;   /* its amplitude (1 = +-0.5 px) */
     u32 jframe;
     int jit_ok, jit_used, hold, misses;
+    /* SWR: each frame's camera (VS bank 3 of its first captured draw: projection, view matrix) for cam_pass */
+    float cam[2][32];
+    int camok[2], camclip[2], cb3clip, cfail;
+    u64 cb3; /* the draw being set up: its vertex constant bank 3 (vk_ao_note) */
+    u32 cb3_size;
+    VkPipeline cpipe;
+    VkPipelineLayout clayout;
+    VkDescriptorSetLayout cdsl;
+    VkDescriptorPool cpool;
+    VkDescriptorSet cset;
+    VkSampler csamp;
+    VkImageView ckey_z, ckey_mv;
 } g_mv;
 
 int vk_dlss_xfb_wanted(void);
@@ -643,6 +658,18 @@ int vk_dlss_capture_begin(VkCommandBuffer cb, Surf* zt, int depth_write, int pla
     vkCmdBeginTransformFeedbackEXT(cb, 0, 0, NULL, NULL);
     g_mv.nrec[c]++;
     g_mv.used[c] += bytes;
+    if (!g_mv.camok[c] && g_mv.cb3 && g_mv.cb3_size >= 128) { /* SWR: this frame's camera, from its first captured draw */
+        float m[32];
+        gmem_read(g_mv.cb3, m, sizeof m);
+#define AZ(x) (fabsf(x) < 1e-5f)
+        if (m[0] > 0.05f && m[5] > 0.05f && AZ(m[1]) && AZ(m[2]) && AZ(m[3]) && AZ(m[4]) && AZ(m[6]) && AZ(m[7]) && AZ(m[8]) && AZ(m[9]) &&
+            AZ(m[12]) && AZ(m[13]) && AZ(m[15]) && fabsf(m[14] + 1.f) < 1e-4f && AZ(m[28]) && AZ(m[29]) && AZ(m[30]) && fabsf(m[31] - 1.f) < 1e-4f) {
+            memcpy(g_mv.cam[c], m, sizeof m);
+            g_mv.camclip[c] = g_mv.cb3clip;
+            g_mv.camok[c] = 1;
+        }
+#undef AZ
+    }
     return 1;
 }
 void vk_dlss_capture_end(VkCommandBuffer cb);
@@ -716,6 +743,122 @@ static int mv_pipeline(VkFormat depth) {
     return 1;
 }
 
+/* SWR: the camera's motion for every pixel, from the scene depth and the game's camera (shaders/cam_mv.comp), before
+   the captured draws go on top (mv_pass, which pairs only draws whose key is unique). Copies of one mesh (wall pieces)
+   share a key, so they get the camera's motion, which is right for scenery. As OpenGL (gpu_gl.c CAMMV_FS).
+   1 = written (g_dl.mv in GENERAL after a compute write). SWR_TAA_NO_CAMMV=1: off (tests) */
+static int cam_inv4(const float* a, float* o) { /* 4x4 inverse, row-major */
+    float t[16];
+    t[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    t[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    t[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    t[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    t[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    t[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    t[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    t[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    t[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    t[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    t[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    t[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    t[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    t[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    t[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    t[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    float det = a[0] * t[0] + a[1] * t[4] + a[2] * t[8] + a[3] * t[12];
+    if (!(fabsf(det) > 1e-12f)) return 0;
+    for (int i = 0; i < 16; i++) o[i] = t[i] / det;
+    return 1;
+}
+static int cam_setup(void) {
+    if (g_mv.cpipe) return 1;
+    if (g_mv.cfail) return 0;
+    VkDescriptorSetLayoutBinding b[2] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT}};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 112};
+    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = ps};
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
+                               .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    int ok = vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_mv.cdsl) == VK_SUCCESS;
+    if (ok) {
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_mv.cdsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        ok = vkCreatePipelineLayout(g_vk.dev, &li, NULL, &g_mv.clayout) == VK_SUCCESS;
+    }
+    if (ok) ok = vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_mv.cpool) == VK_SUCCESS;
+    if (ok) {
+        VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_mv.cpool,
+                                          .descriptorSetCount = 1, .pSetLayouts = &g_mv.cdsl};
+        ok = vkAllocateDescriptorSets(g_vk.dev, &ai, &g_mv.cset) == VK_SUCCESS;
+    }
+    if (ok) ok = vkCreateSampler(g_vk.dev, &sci, NULL, &g_mv.csamp) == VK_SUCCESS;
+    if (ok) {
+        VkShaderModule m = vk_module_spv(g_cam_mv_comp, sizeof g_cam_mv_comp / 4);
+        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                    .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                          .layout = g_mv.clayout};
+        ok = m && vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &g_mv.cpipe) == VK_SUCCESS;
+        if (m) vkDestroyShaderModule(g_vk.dev, m, NULL);
+    }
+    if (!ok) {
+        g_mv.cfail = 1;
+        g_mv.cpipe = VK_NULL_HANDLE;
+        LOG("taa (vulkan): camera motion pass could not be set up\n");
+        return 0;
+    }
+    LOG("taa (vulkan): camera motion for the whole picture\n");
+    return 1;
+}
+static int cam_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
+    u32 c = g_mv.cur, p = c ^ 1;
+    static int off = -1;
+    if (off < 0) off = getenv("SWR_TAA_NO_CAMMV") != NULL;
+    float iv[16];
+    if (off || !g_mv.camok[c] || !g_mv.camok[p] || !cam_inv4(g_mv.cam[c] + 16, iv) || !cam_setup()) return 0;
+    VkImageView zv = depth_view(z);
+    if (!zv) return 0;
+    if (g_mv.ckey_z != zv || g_mv.ckey_mv != g_dl.mv_view) {
+        vk_finish(); /* the set may be in use by a frame in flight */
+        VkDescriptorImageInfo d[2] = {{g_mv.csamp, zv, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_dl.mv_view, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[2] = {
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 0, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &d[0]},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 1, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &d[1]}};
+        vkUpdateDescriptorSets(g_vk.dev, 2, wr, 0, NULL);
+        g_mv.ckey_z = zv;
+        g_mv.ckey_mv = g_dl.mv_view;
+    }
+    float pcs[28];
+    const float* vq = g_mv.cam[p] + 16;
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float s = 0;
+            for (int k = 0; k < 4; k++) s += vq[i * 4 + k] * iv[k * 4 + j];
+            pcs[i * 4 + j] = s; /* last frame's view times this frame's inverse view */
+        }
+    /* view distance from the stored depth, as AO (evaluate_ao): NDC depth = -P22 + P23/d, 0..1 or -1..1 clip */
+    float A = g_mv.cam[c][10], B = g_mv.cam[c][11], mul, add;
+    if (g_mv.camclip[c]) { mul = -B; add = -A; } else { mul = -0.5f * B; add = 0.5f * (1.f - A); }
+    pcs[16] = g_mv.cam[c][0]; pcs[17] = g_mv.cam[c][5]; pcs[18] = g_mv.cam[p][0]; pcs[19] = g_mv.cam[p][5];
+    pcs[20] = mul; pcs[21] = add; pcs[22] = g_mv.jit_used ? g_mv.jx : 0.0f; pcs[23] = g_mv.jit_used ? g_mv.jy : 0.0f;
+    pcs[24] = (float)w; pcs[25] = (float)h; pcs[26] = 0.0f; pcs[27] = 0.0f;
+    vk_surf_use(cb, z, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+               VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mv.cpipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mv.clayout, 0, 1, &g_mv.cset, 0, NULL);
+    vkCmdPushConstants(cb, g_mv.clayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pcs, pcs);
+    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    return 1;
+}
+
 /* the frame's captured draws again into the motion-vector image; 0 when there was nothing to draw */
 static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
     u32 c = g_mv.cur, p = c ^ 1, drawn = 0;
@@ -730,9 +873,15 @@ static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
                            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
-    vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    int cam = cam_pass(cb, z, w, h);
+    if (cam)
+        vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    else
+        vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vk_surf_use(cb, z, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
@@ -753,12 +902,25 @@ static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
     vkCmdSetScissor(cb, 0, 1, &sc);
     static int skipdraw = -1;
     if (skipdraw < 0) skipdraw = getenv("SWR_DLSS_MV_SKIPDRAW") != NULL;
+    static int oldpair = -1;
+    if (oldpair < 0) oldpair = getenv("SWR_TAA_OLD_PAIRING") != NULL;
     for (u32 i = 0; i < (skipdraw ? 0 : g_mv.nrec[c]); i++) {
         const XfbRec* r = &g_mv.rec[c][i];
         const XfbRec* q = NULL;
+        /* SWR: a draw is paired with last frame's only when its key is drawn once in both frames. Copies of one mesh
+           (wall pieces, props) share every key part and differ only in constants the game rewrites in place, so the
+           n-th copy paired with last frame's n-th: when the draw order changed (shots, effects, culling as the camera
+           moved), copies got another copy's old position and walls moved by metres in the motion vectors. MEASURED
+           2026-11-15: 46 of 127 captured draws shared a key; a still camera showed 8+ px of motion on walls */
+        if (!oldpair) {
+            u32 nc = 0, np = 0;
+            for (u32 k = 0; k < g_mv.nrec[c] && nc < 2; k++) nc += g_mv.rec[c][k].key == r->key;
+            for (u32 k = 0; k < g_mv.nrec[p] && np < 2; k++) np += g_mv.rec[p][k].key == r->key;
+            if (nc != 1 || np != 1) continue;
+        }
         for (u32 k = 0; k < g_mv.nrec[p] && !q; k++)
             if (g_mv.rec[p][k].key == r->key && g_mv.rec[p][k].occ == r->occ && g_mv.rec[p][k].verts == r->verts) q = &g_mv.rec[p][k];
-        if (!q) continue; /* new this frame: no previous position, zero motion */
+        if (!q) continue; /* new this frame: no previous position, the camera's motion (or zero) */
         VkBuffer bufs[2] = {g_mv.buf[c], g_mv.buf[p]};
         VkDeviceSize offs[2] = {r->off, q->off};
         vkCmdBindVertexBuffers(cb, 0, 2, bufs, offs);
@@ -772,7 +934,7 @@ static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
     vk_barrier(cb, g_dl.mv, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
-    return drawn ? drawn : 1; /* the image is in GENERAL either way */
+    return cam ? drawn + 2 : drawn ? drawn : 1; /* the image is in GENERAL either way; with the camera pass it has vectors */
 }
 
 /* each present: the capture buffers swap, the jitter moves on */
@@ -780,12 +942,16 @@ static void mv_frame(int evaluated) {
     g_mv.cur ^= 1;
     g_mv.nrec[g_mv.cur] = 0;
     g_mv.used[g_mv.cur] = 0;
+    g_mv.camok[g_mv.cur] = 0;
     u32 i = (g_mv.jframe++ % 8) + 1;
-    { /* SWR_DLSS_JAMP=a scales the jitter (test) */
-        static float amp = -1;
-        if (amp < 0) amp = getenv("SWR_DLSS_JAMP") ? (float)atof(getenv("SWR_DLSS_JAMP")) : 1.0f;
-        g_mv.jx = (halton(i, 2) - 0.5f) * amp;
-        g_mv.jy = (halton(i, 3) - 0.5f) * amp;
+    { /* TAA's jitter: half at 1x, less above, none from 2x up (the extra pixels already smooth the edges; the jitter is
+         what makes still edges shimmer). DLSS keeps the full one. As OpenGL (gpu_gl.c taa_jamp). SWR_DLSS_JAMP=a (test) */
+        static float amp = -2;
+        if (amp < -1.5f) amp = getenv("SWR_DLSS_JAMP") ? (float)atof(getenv("SWR_DLSS_JAMP")) : -1.0f;
+        float a = amp >= 0.0f ? amp : dl_dlss() ? 1.0f : g_vk_scale >= 2.0f ? 0.0f : g_vk_scale <= 1.0f ? 0.5f : 0.5f * (2.0f - g_vk_scale);
+        g_mv.jamp = a;
+        g_mv.jx = (halton(i, 2) - 0.5f) * a;
+        g_mv.jy = (halton(i, 3) - 0.5f) * a;
     }
     if (g_mv.jit_used && !evaluated) { /* jittered, but DLSS didn't run: that frame shook */
         g_mv.hold = 60;
@@ -966,7 +1132,7 @@ static int taa_layout(void) {
                                               .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
     VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
     if (vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &g_taa.dsl) != VK_SUCCESS) return 0;
-    VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48};
     VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                       .pSetLayouts = &g_taa.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
     if (vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &g_taa.layout) != VK_SUCCESS) return 0;
@@ -1132,9 +1298,17 @@ static void evaluate_taa(Surf* t, Surf* z) {
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.layout, 0, 1, &g_taa.set[c], 0, NULL);
-    float pc[8] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, 0.04f, /* w: weight where nothing moves; + the jitter */
-                   g_mv.jit_used ? g_mv.jx : 0.0f, g_mv.jit_used ? g_mv.jy : 0.0f, 0.0f, 0.0f};
-    vkCmdPushConstants(cb, g_taa.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    static float sw = -1, rj, vw; /* as OpenGL's TAA_FS; SWR_TAA_STATIC_W / _REJ / _VELW (tests) */
+    if (sw < 0) {
+        const char* e = getenv("SWR_TAA_STATIC_W"); sw = e ? (float)atof(e) : 0.025f;
+        e = getenv("SWR_TAA_REJ"); rj = e ? (float)atof(e) : 8.0f;
+        e = getenv("SWR_TAA_VELW"); vw = e ? (float)atof(e) : 0.3f;
+    }
+    float pc[12] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, sw, /* w: weight where nothing moves; + the jitter */
+                    g_mv.jit_used ? g_mv.jx : 0.0f, g_mv.jit_used ? g_mv.jy : 0.0f,
+                    4.0f / (g_mv.jamp * g_mv.jamp > 1e-4f ? g_mv.jamp * g_mv.jamp : 1e-4f), /* kernel narrows with the jitter */
+                    0.0f, rj, vw, 0.0f, 0.0f};
+    vkCmdPushConstants(cb, g_taa.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     g_taa.hist_layout[c] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1226,6 +1400,9 @@ static int dl_ao(void) { return g_opt_ao > 0 && !g_ao_failed; }
 
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip);
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip) {
+    g_mv.cb3 = cb3; /* for the camera of the motion vectors (vk_dlss_capture_begin, later in the same draw) */
+    g_mv.cb3_size = cb3_size;
+    g_mv.cb3clip = clip & 1;
     if (!g_opt_ao || !zt || !g_dl.chosen_z || zt->gva != g_dl.chosen_z || !cb3 || cb3_size < 64) return;
     float m[16];
     gmem_read(cb3, m, 64);
