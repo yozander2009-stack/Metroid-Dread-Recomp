@@ -18,7 +18,8 @@ res = os.path.join(srv_dir, 'result.txt')
 fails, n = [], 0
 try:
     for state in ('normal', 'available', 'rebuild', 'dup'):
-        if state == 'rebuild': open(ok_path, 'w', encoding='utf-8').write(ok0.replace('"patches_sha256": "', '"patches_sha256": "00'))
+        if state == 'rebuild':   # another hash (a prefix alone kept the real one as a substring: not stale)
+            import re; open(ok_path, 'w', encoding='utf-8').write(re.sub(r'"patches_sha256": "[0-9a-f]{64}', '"patches_sha256": "' + '0' * 64, ok0))
         else: open(ok_path, 'w', encoding='utf-8').write(ok0)
         for page in range(1, 10):
             if os.path.exists(res): os.remove(res)
