@@ -117,7 +117,9 @@ int pc_wait(PCond* c, PMutex* m, i64 ns){
   return !ok&&error==ERROR_TIMEOUT?1:0; }
 typedef struct { PThreadFn fn; void* arg; } TArg;
 
-static unsigned __stdcall tstart(void* p){ TArg a=*(TArg*)p; free(p); plat_diag_role("runtime"); a.fn(a.arg); return 0; }
+/* 64 KB kept free at the bottom of each thread's stack: on a stack overflow the crash handler (veh_fatal) still has
+   room to write its line to the log */
+static unsigned __stdcall tstart(void* p){ TArg a=*(TArg*)p; free(p); { ULONG g=64*1024; SetThreadStackGuarantee(&g); } plat_diag_role("runtime"); a.fn(a.arg); return 0; }
 
 int plat_thread(PThreadFn fn, void* arg, size_t stack){
   TArg* a=malloc(sizeof *a); a->fn=fn; a->arg=arg;

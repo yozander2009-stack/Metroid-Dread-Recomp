@@ -58,6 +58,7 @@ static void outs_pages(const CsOut* out, int n, int delta) {
 
 static VkCommandPool g_cpool;
 static VkCommandBuffer g_ccb;
+int vk_cb_is_compute(VkCommandBuffer cb) { return cb && cb == g_ccb; } /* SWR: GPU markers */
 static VkDescriptorPool g_dpool;
 static int g_recording, g_landing;
 static int g_inflight; /* submitted and waited for in cs_land, results not landed yet */
@@ -1450,6 +1451,7 @@ rebind:
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p->p);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk_playout, 0, 1, &set, 0, NULL);
     vk_note_dispatch("guest", g_dn_code, gx, gy, gz);
+    vk_ck(cb, VK_CK_DISPATCH, gx, gy, gz, (u32)g_dn_code); /* SWR: GPU markers */
     rec_CmdDispatch(cb, gx, gy, gz);
     if (resident) {
         vk_all_barrier(cb); /* its writes before what reads them next */

@@ -117,6 +117,24 @@ void vk_set_vi(VkCommandBuffer cb, const VkPipelineVertexInputStateCreateInfo* v
 void vk_sc_lock(void); /* the swapchain: acquire and present (record.c) */
 void vk_sc_unlock(void);
 void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz);
+/* SWR: what the GPU had reached when the device was lost (device.c; structure and NVIDIA part from upstream ScarletNX
+   6b28a5fd). Every rendering pass, dispatch, deswizzle and submission end leaves a marker, an index into a ring of
+   what it was. AMD (VK_AMD_buffer_marker, on by default there): the newest marker each queue started and the newest
+   whose earlier work had all finished, written into a host buffer; after a loss the work between the two is what the
+   GPU was still busy with. NVIDIA (VK_NV_device_diagnostic_checkpoints) with SWR_VK_CHECKPOINTS=1; SWR_VK_MARKERS=1
+   asks for AMD's markers on another vendor that has them; SWR_VK_NO_MARKERS=1: none. vk_device_fault_log prints them */
+enum { VK_CK_DESWIZZLE, VK_CK_DISPATCH, VK_CK_PASS, VK_CK_SUBMIT, VK_CK_KINDS };
+extern int g_vk_markers; /* 0 none, 1 AMD buffer markers, 2 NVIDIA checkpoints */
+void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d);
+#define vk_ck(cb, kind, a, b, c, d)                                                                                    \
+    do {                                                                                                               \
+        if (g_vk_markers) vk_ck_((cb), (kind), (a), (b), (c), (d));                                                    \
+    } while (0)
+void vk_ck_report(const char* why);
+int vk_cb_is_compute(VkCommandBuffer cb); /* compute.c: the compute queue's command buffer */
+void rec_CmdWriteBufferMarkerAMD(VkCommandBuffer cb, VkPipelineStageFlagBits stage, VkBuffer buf, VkDeviceSize off,
+                                 u32 marker);
+void rec_CmdSetCheckpointNV(VkCommandBuffer cb, const void* marker);
 extern VkState g_vk;
 
 /* device.c */

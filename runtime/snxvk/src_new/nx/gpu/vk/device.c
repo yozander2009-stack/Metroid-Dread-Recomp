@@ -204,8 +204,140 @@ void vk_set_vi(VkCommandBuffer cb, const VkPipelineVertexInputStateCreateInfo* v
     rec_CmdSetVertexInputEXT(cb, nb, b, na, a);
 }
 
+/* SWR: the GPU markers (vk.h vk_ck) */
+int g_vk_markers;
+#define CK_RING (1u << 16)
+typedef struct {
+    u32 kind, a, b, c, d, queue;
+} VkCk;
+static VkCk* g_ck;
+static u32 g_ck_next; /* atomic: compute records on its own thread */
+static VkBuffer g_ck_buf;
+static VkDeviceMemory g_ck_mem;
+static volatile u32* g_ck_words; /* graphics started, graphics finished, compute started, compute finished */
+static const char* const g_ck_names[VK_CK_KINDS] = {
+    "deswizzle (row bytes, rows, slices, to block linear)",
+    "game compute dispatch (groups x, y, z, program)",
+    "rendering pass (width, height, color targets, depth)",
+    "end of a submission (number)",
+};
+void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d) {
+    if (!g_ck) return;
+    u32 at = __atomic_fetch_add(&g_ck_next, 1, __ATOMIC_RELAXED);
+    u32 q = vk_cb_is_compute(cb) ? 1u : 0u;
+    VkCk* e = &g_ck[at % CK_RING];
+    e->kind = kind;
+    e->a = a;
+    e->b = b;
+    e->c = c;
+    e->d = d;
+    e->queue = q;
+    if (g_vk_markers == 1) { /* marker values are at + 1: 0 is "none yet" */
+        rec_CmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ck_buf, q * 8, at + 1);
+        rec_CmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ck_buf, q * 8 + 4, at + 1);
+    } else
+        rec_CmdSetCheckpointNV(cb, (const void*)(uintptr_t)((u64)at + 1));
+}
+static void ck_init(void) {
+    if (!g_vk_markers) return;
+    g_ck = calloc(CK_RING, sizeof *g_ck);
+    if (!g_ck) {
+        g_vk_markers = 0;
+        return;
+    }
+    if (g_vk_markers == 1) { /* a small host-visible buffer the GPU writes the markers into: readable after a loss */
+        u32 fam[2] = {g_vk.gfx_family, g_vk.compute_family};
+        int two = fam[0] != fam[1];
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = 64,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 .sharingMode = two ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE,
+                                 .queueFamilyIndexCount = two ? 2u : 0u,
+                                 .pQueueFamilyIndices = fam};
+        VkMemoryRequirements mr;
+        VkPhysicalDeviceMemoryProperties mp;
+        u32 type = ~0u;
+        void* p = NULL;
+        VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        int ok = vkCreateBuffer(g_vk.dev, &bi, NULL, &g_ck_buf) == VK_SUCCESS;
+        if (ok) {
+            vkGetBufferMemoryRequirements(g_vk.dev, g_ck_buf, &mr);
+            vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+            for (int pass = 0; pass < 2 && type == ~0u; pass++) /* system memory first, then any host-visible */
+                for (u32 i = 0; i < mp.memoryTypeCount && type == ~0u; i++)
+                    if ((mr.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & want) == want &&
+                        (pass || !(mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)))
+                        type = i;
+            VkMemoryAllocateInfo ai = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = type};
+            ok = type != ~0u && vkAllocateMemory(g_vk.dev, &ai, NULL, &g_ck_mem) == VK_SUCCESS &&
+                 vkBindBufferMemory(g_vk.dev, g_ck_buf, g_ck_mem, 0) == VK_SUCCESS &&
+                 vkMapMemory(g_vk.dev, g_ck_mem, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS;
+        }
+        if (!ok) {
+            WARN("vulkan: no buffer for the GPU markers: a lost device's report won't say what the GPU was doing\n");
+            g_vk_markers = 0;
+            return;
+        }
+        memset(p, 0, 16);
+        g_ck_words = (volatile u32*)p;
+    }
+    LOG("vulkan: GPU markers on (%s): a lost device's report names the work the GPU was busy with\n",
+        g_vk_markers == 1 ? "AMD buffer markers" : "NVIDIA diagnostic checkpoints");
+}
+static void ck_entry(const char* state, u32 m) {
+    const VkCk* e = &g_ck[(m - 1) % CK_RING];
+    LOG("vulkan:   %s marker %u: %s: %u, %u, %u, %u\n", state, m, e->kind < VK_CK_KINDS ? g_ck_names[e->kind] : "?",
+        e->a, e->b, e->c, e->d);
+}
+/* the work the GPU was busy with: on AMD, each queue's markers after the newest finished one, up to the newest
+   started (the work it hung in is among them) and the first few it hadn't started; on NVIDIA, what the driver says
+   each queue's stages reached */
+void vk_ck_report(const char* why) {
+    static int said;
+    if (!g_vk_markers || !g_ck || said++) return;
+    u32 newest = __atomic_load_n(&g_ck_next, __ATOMIC_RELAXED);
+    u64 submitted = 0, done = 0;
+    vk_submit_progress(&submitted, &done);
+    LOG("vulkan: GPU markers, %s: %u recorded; graphics submissions done %llu of %llu\n", why, newest,
+        (unsigned long long)done, (unsigned long long)submitted);
+    if (g_vk_markers == 1) {
+        for (u32 q = 0; q < 2; q++) {
+            u32 started = g_ck_words[q * 2], finished = g_ck_words[q * 2 + 1], shown = 0, after = 0;
+            LOG("vulkan: %s queue: started the work through marker %u, finished all of it through marker %u\n",
+                q ? "compute" : "graphics", started, finished);
+            for (u32 m = finished + 1; m <= newest && shown < 24 && after < 3; m++) {
+                if (newest - m >= CK_RING || g_ck[(m - 1) % CK_RING].queue != q) continue;
+                ck_entry(m <= started ? "started, not finished:" : "not started yet:", m);
+                shown++;
+                after += m > started;
+            }
+        }
+        return;
+    }
+    VkQueue qs[2] = {g_vk.gfx, g_vk.compute};
+    for (u32 q = 0; q < (g_vk.compute != g_vk.gfx ? 2u : 1u); q++) {
+        enum { MAX = 32 };
+        VkCheckpointDataNV data[MAX];
+        u32 n = 0;
+        vkGetQueueCheckpointDataNV(qs[q], &n, NULL);
+        if (n > MAX) n = MAX;
+        for (u32 i = 0; i < n; i++) data[i] = (VkCheckpointDataNV){.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+        vkGetQueueCheckpointDataNV(qs[q], &n, data);
+        LOG("vulkan: %s queue: %u stages reached a marker\n", q ? "compute" : "graphics", n);
+        for (u32 i = 0; i < n; i++) {
+            u64 m = (u64)(uintptr_t)data[i].pCheckpointMarker;
+            if (!m || newest - (u32)m >= CK_RING) continue;
+            char st[48];
+            snprintf(st, sizeof st, "stage %#x reached", (unsigned)data[i].stage);
+            ck_entry(st, (u32)m);
+        }
+    }
+}
+
 void vk_device_fault_log(void) {
     static int done;
+    vk_ck_report("the device was lost");
     for (u32 i = 0; i < 16; i++) {
         u32 j = (g_dn_at + i) & 15;
         if (g_dn[j].what)
@@ -639,6 +771,22 @@ static int create_device(void) {
         chain = &ffault;
         ext[next++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     }
+    /* SWR: the GPU markers (vk_ck): AMD's by default on AMD (two small writes per pass, dispatch and submission),
+       NVIDIA's only when asked (upstream keeps them off by default) */
+    if (!getenv("SWR_VK_NO_MARKERS")) {
+        SnxVkExtensions ck;
+        snx_vk_device_extensions(g_vk.phys, &ck);
+        if (snx_vk_extensions_has(&ck, VK_AMD_BUFFER_MARKER_EXTENSION_NAME) &&
+            (g_vk.props.vendorID == 0x1002 || getenv("SWR_VK_MARKERS"))) {
+            g_vk_markers = 1;
+            ext[next++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME;
+        } else if (getenv("SWR_VK_CHECKPOINTS") &&
+                   snx_vk_extensions_has(&ck, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)) {
+            g_vk_markers = 2;
+            ext[next++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+        }
+        snx_vk_extensions_free(&ck);
+    }
     u32 nq = g_vk.compute_family == g_vk.gfx_family ? 1 : 2;
     if (g_vk.video_family != ~0u)
         qci[nq++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -683,6 +831,7 @@ static int create_device(void) {
                                   .flags = has_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     if (!VK_OK(vmaCreateAllocator(&vai, &g_vk.vma))) return 0;
     vk_dlss_init();
+    ck_init(); /* SWR: the GPU markers' ring and buffer */
     LOG("vulkan: %s, Vulkan %u.%u.%u, driver %08x, graphics queue family %u, compute %u%s\n", g_vk.props.deviceName,
         VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
         VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.props.driverVersion, g_vk.gfx_family, g_vk.compute_family,

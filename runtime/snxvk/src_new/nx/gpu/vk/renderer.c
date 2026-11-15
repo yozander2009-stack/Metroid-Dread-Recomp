@@ -500,8 +500,10 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
                 vk_barrier(cb, sc, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-        } else
+        } else {
+            if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); } /* SWR */
             VK_OK(r);
+        }
     }
     if (game) {
         /* the time from the last present, for the stats line: frames slower than 50 ms (a hitch at any pace a game
@@ -664,8 +666,10 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
             recreate = 1;
         else if (r == VK_ERROR_SURFACE_LOST_KHR)
             g_lost = 1;
-        else
+        else {
+            if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); } /* SWR */
             VK_OK(r);
+        }
     }
     if (recreate && !g_lost && !g_vk.sc_lost) { /* not when this frame's create found the surface lost */
         vk_finish();

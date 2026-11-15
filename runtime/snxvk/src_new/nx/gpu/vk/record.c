@@ -391,6 +391,8 @@ void rec_CmdDrawIndexed(VkCommandBuffer cb, u32 indices, u32 instances, u32 firs
 }
 REC3(CmdBindIndexBuffer, VkBuffer, VkDeviceSize, VkIndexType)
 REC3(CmdDispatch, u32, u32, u32)
+REC4(CmdWriteBufferMarkerAMD, VkPipelineStageFlagBits, VkBuffer, VkDeviceSize, u32) /* SWR: GPU markers */
+REC1(CmdSetCheckpointNV, const void*)
 REC0(CmdEndRendering)
 REC1(CmdSetCullMode, VkCullModeFlags)
 REC1(CmdSetFrontFace, VkFrontFace)
@@ -926,6 +928,8 @@ static void rendering_run(const void* p) {
     vkCmdBeginRendering(x->cb, &ri);
 }
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* ri) {
+    vk_ck(cb, VK_CK_PASS, ri->renderArea.extent.width, ri->renderArea.extent.height, ri->colorAttachmentCount,
+          ri->pDepthAttachment ? 1u : 0u); /* SWR: GPU markers */
     int chained = ri->pNext || (ri->pDepthAttachment && ri->pDepthAttachment->pNext) ||
                   (ri->pStencilAttachment && ri->pStencilAttachment->pNext);
     for (u32 i = 0; i < ri->colorAttachmentCount && !chained; i++) chained = ri->pColorAttachments[i].pNext != NULL;

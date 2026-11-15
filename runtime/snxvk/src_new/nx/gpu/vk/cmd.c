@@ -255,7 +255,10 @@ static void timeline_wait(u64 value) {
     SNX_ZONE_C(z_wait, "vk timeline wait", 0xb05252);
     gpu_wait_note("a graphics submission", value);
     SNX_ZONE_V(z, "timeline wait", value);
-    VK_OK(vkWaitSemaphores(g_vk.dev, &wi, UINT64_MAX));
+    VkResult waited = vkWaitSemaphores(g_vk.dev, &wi, UINT64_MAX);
+    /* SWR (as upstream): going on would take the wait as done and flood the log; a lost device ends the game here */
+    if (waited == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); }
+    VK_OK(waited);
     SNX_ZONE_END(z);
     gpu_wait_note(NULL, 0);
 }
@@ -488,6 +491,10 @@ static void submit(const VkSemaphoreSubmitInfo* xw, const VkSemaphoreSubmitInfo*
     if (xs) s[1] = *xs;
     /* ended and submitted after its commands, on the recording thread (a submission that fails signals the timeline
        from the host there, so waits for it end) */
+    vk_ck(cb, VK_CK_SUBMIT, (u32)(g_gval + 1), 0, 0, 0); /* SWR: GPU markers */
+    { static long long test = -2; /* SWR_VK_CK_TEST=N: the markers' report at submission N (tests) */
+      if (test == -2) test = getenv("SWR_VK_CK_TEST") ? atoll(getenv("SWR_VK_CK_TEST")) : -1;
+      if (test > 0 && (long long)g_gval + 1 == test) vk_ck_report("test report"); }
     vk_rec_submit(cb, w, nw, s, xs ? 2u : 1u);
     memset(g_after, 0, sizeof g_after);
     __atomic_store_n(&g_gval, g_gval + 1, __ATOMIC_RELAXED); /* read by the stall report too */
@@ -498,8 +505,11 @@ static void submit(const VkSemaphoreSubmitInfo* xw, const VkSemaphoreSubmitInfo*
     f->last = g_gval;
     /* results of submissions the GPU has finished land now, so a later release doesn't find them pending */
     u64 done = 0;
-    if (land && VK_OK(vkGetSemaphoreCounterValue(g_vk.dev, g_gsem, &done)))
-        land_through(done < g_gval ? done : g_gval);
+    if (land) {
+        VkResult cr = vkGetSemaphoreCounterValue(g_vk.dev, g_gsem, &done);
+        if (cr == VK_ERROR_DEVICE_LOST) { vk_device_fault_log(); fatal("vulkan: the GPU device was lost (driver reset or crash)"); } /* SWR */
+        if (VK_OK(cr)) land_through(done < g_gval ? done : g_gval);
+    }
     SNX_ZONE_END(z_submit);
 }
 
