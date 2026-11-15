@@ -991,7 +991,7 @@ static int pipe_workers(void) {
         pc_init(&g_pj_work);
         pc_init(&g_pj_done);
         for (int i = 0; i < n; i++)
-            if (!plat_thread(pipe_worker, NULL, (size_t)1 << 20)) g_pj_threads++;
+            if (!plat_thread(pipe_worker, NULL, (size_t)8 << 20)) g_pj_threads++; /* SWR: the driver compiles here: 8 MB */
     }
     return g_pj_threads;
 }
@@ -1478,7 +1478,9 @@ static void pf_load_pipe(void* ctx, const u64 m[5], const void* key, u32 keylen)
    SPIR-V and ShaderInfo of the PF_SHADER records depend on: the build (commit, compiler, host), and for a tree with
    changes, which has one commit for every build of it, the runtime's own file; the driver. The guest part's length
    goes in *guest */
+extern int g_shader_helper_loop_cap; /* spirv_translate.c: -1 until the first fragment program with loops */
 static void pf_key(char* out, size_t n, size_t* guest) {
+    if (g_shader_helper_loop_cap < 0) g_shader_helper_loop_cap = getenv("SWR_VK_NO_HELPER_LOOP_CAP") ? 0 : 1;
     const VkPhysicalDeviceProperties* d = &g_vk.props;
     const char* commit = snx_build_commit();
     size_t len = strlen(commit);
@@ -1504,7 +1506,9 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                   g_vk_buffer_image_slots,
                   d->limits.maxPerStageDescriptorStorageImages,
                   d->limits.maxDescriptorSetStorageImages,
-                  0x53570001u /* SWR translator revision: 1 = FragCoord scale from SNX_RS.y (per-target scales) */};
+                  0x53570002u /* SWR translator revision: 1 = FragCoord scale from SNX_RS.y (per-target scales),
+                                 2 = helper lanes leave fragment loops (upstream d48364cc) */,
+                  (u32)g_shader_helper_loop_cap};
     /* a tree with changes builds under one commit name: the runtime's own bytes tell those builds apart. Not its
        modification time, which a copy of the same runtime (each game has one) changes */
     if (len >= 6 && !strcmp(commit + len - 6, "-dirty")) {

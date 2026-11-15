@@ -30,6 +30,14 @@ Local changes to upstream (marked "SWR" in the code):
                         until main.c pace_update got its guard (2026-10-29); staging there fell from 23-63 to <1 MB a frame
   gpu/vk/surface.c      pitch-linear targets aren't written back at each release without memory traps (we have none)
   gpu/gpu.c, vk/owned.c SWR_VK_GW / SWR_VK_GW_WATCH: logs GPU writes into guest memory (diagnostic, inert by default)
+  gpu/shader/spirv_translate.c  backport of upstream d48364cc (2026-11-13): a helper lane leaves a fragment
+                        program's loop after 65536 back-edges (a never-ending helper loop hung the GPU:
+                        VK_ERROR_DEVICE_LOST); SWR_VK_NO_HELPER_LOOP_CAP=1 = off (tests). pipeline.c's
+                        translator revision 0x53570002 keeps older kept SPIR-V from being reused
+  gpu/vk/render.c       vp_sane: a viewport that isn't finite skips the draw, one outside the device's limits is
+                        moved into them (Vulkan leaves both undefined)
+  gpu/vk/pipeline.c, record.c, release.c: 8 MB stack reservations for the threads that call into the driver
+                        (pipeline creation compiles shaders on them)
 
 Build: set GLSLANG=<glslang.exe 16.6.0> and run python\python.exe work-profiler\build_snxvk2.py
 (SWR_NO_DLSS=1: runtime\snxvk\libsnxvk_new_nodlss.a, the public build), then the normal --build-runtime links it and

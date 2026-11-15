@@ -5,6 +5,7 @@
 /* Direct Maxwell to SPIR-V translation. Unsupported instructions reject the entire module. */
 #include "common/utilities/spirv_emit.h"
 #include "nx/gpu/shader/translator.h"
+#include "nx/runtime/platform/log.h" /* SWR: the helper-loop cap says once that it is in */
 #include <assert.h>
 #include <stdlib.h>
 
@@ -59,6 +60,9 @@ typedef struct {
        driver drop a quad's remaining helpers from execution while they still hold the loop open: AMD's Windows
        compiler then repeats the loop with no lane left to end it, until the GPU is reset. */
     u32 discarded;
+    /* SWR backport of upstream d48364cc: a fragment program with loops counts the back-edges a lane took in this
+       Function variable (0: none); helper_loop_exit reads it */
+    u32 helper_rounds;
     u32 branch_cond; /* with structured flow, the condition of the branch that ends the block, 0 for always */
     u32 branch_target; /* and the word a BRX that ends it goes to */
 } DirectCtx;
@@ -707,6 +711,27 @@ static u32 lane_dead(DirectCtx* c) {
     return spv_emit_bool_binary(&c->emit, c->bool_type, 1, helper, spv_emit_load(&c->emit, c->bool_type, c->discarded));
 }
 static u32 cc_or(DirectCtx* c, u32 x, u32 y) { return spv_emit_bool_binary(&c->emit, c->bool_type, 1, x, y); }
+/* SWR backport of upstream d48364cc (2026-11-13): whether this lane leaves the loop at this back-edge: a helper lane
+   that took HELPER_LOOP_ROUNDS back-edges. A helper lane runs outside the primitive, only for its quad's derivatives,
+   and its attributes are extrapolated: a screen-space ray march then runs on infinite or NaN distances and never ends,
+   that lane keeps the whole wave, and the GPU hangs until the driver resets it (VK_ERROR_DEVICE_LOST). The console
+   doesn't hang: NVIDIA's driver disables loads in fragment helpers. A Vulkan driver must give helpers their loads
+   (AMD's does). Lanes that are not helpers run the program as written, with no limit. A helper's writes are dropped,
+   so only its quad's derivatives after the loop can differ. SWR_VK_NO_HELPER_LOOP_CAP=1: off (tests) */
+#define HELPER_LOOP_ROUNDS 65536u
+int g_shader_helper_loop_cap = -1;
+static int helper_loop_cap(void) {
+    if (g_shader_helper_loop_cap < 0) g_shader_helper_loop_cap = getenv("SWR_VK_NO_HELPER_LOOP_CAP") ? 0 : 1;
+    return g_shader_helper_loop_cap;
+}
+static u32 helper_loop_exit(DirectCtx* c) {
+    u32 rounds = spv_emit_isub_u32(&c->emit, c->u32_type, spv_emit_load(&c->emit, c->u32_type, c->helper_rounds),
+                                   spv_emit_constant_u32(&c->emit, c->u32_type, 0xffffffffu)); /* + 1 */
+    spv_emit_store(&c->emit, c->helper_rounds, rounds);
+    u32 over = spv_emit_u_less(&c->emit, c->bool_type, spv_emit_constant_u32(&c->emit, c->u32_type, HELPER_LOOP_ROUNDS),
+                               rounds);
+    return cc_and(c, over, spv_emit_is_helper(&c->emit, c->bool_type));
+}
 static u32 cc_xor(DirectCtx* c, u32 x, u32 y) { return spv_emit_bool_binary(&c->emit, c->bool_type, 2, x, y); }
 static u32 cc_test(DirectCtx* c, u32 code) {
     if (code == 0 || code == 15) return code == 15 ? c->true_value : c->false_value;
@@ -3268,13 +3293,22 @@ static int structure_step(DirectCtx* c, StructEmit* se) {
                 spv_emit_label(&c->emit, l[1]);
                 se->open = 1;
                 break;
-            case SHS_CLOSE:
+            case SHS_CLOSE: {
                 if (se->open) se_break(c, se, t->a);
                 /* a block scope's continue target is never reached: the loop it would repeat runs once */
                 spv_emit_label(&c->emit, l[2]);
-                spv_emit_branch(&c->emit, l[0]);
+                /* SWR backport d48364cc: a helper lane that took too many back-edges leaves the loop */
+                int helper_exit = c->helper_rounds && st->scope[t->a].loop, was_used = se->used[t->a];
+                if (helper_exit) {
+                    spv_emit_branch_conditional(&c->emit, helper_loop_exit(c), l[3], l[0]);
+                    se->used[t->a] = 1;
+                } else
+                    spv_emit_branch(&c->emit, l[0]);
                 spv_emit_label(&c->emit, l[3]);
-                if (!se->used[t->a]) {
+                if (helper_exit && !was_used) { /* a loop no lane leaves but by EXIT: the helper ends here */
+                    spv_emit_kill(&c->emit);
+                    se->open = 0;
+                } else if (!se->used[t->a]) {
                     spv_emit_void_op(&c->emit, SPV_OP_UNREACHABLE, NULL, 0);
                     se->open = 0;
                 } else {
@@ -3282,6 +3316,7 @@ static int structure_step(DirectCtx* c, StructEmit* se) {
                     if (st->scope[t->a].check) se_pending(c, se, t->a);
                 }
                 break;
+            }
             case SHS_IF:
                 se_ensure_open(c, se);
                 sel += se->selections ? 2 : 0;
@@ -5201,6 +5236,18 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
         pc = spv_emit_function_variable_init(&c->emit, reg_ptr, spv_emit_constant_u32(&c->emit, c->u32_type, 11));
     if (structure && structure->uses_flag) se.flag = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
     c->discarded = has_flow && stage == ST_FS ? spv_emit_function_variable_init(&c->emit, pred_ptr, c->false_value) : 0;
+    { /* SWR backport d48364cc: a fragment program with loops counts the back-edges a lane takes (helper_loop_exit) */
+        int loops = has_flow && !structure;
+        for (u32 k = 0; structure && k < structure->nscopes && !loops; k++) loops = structure->scope[k].loop;
+        c->helper_rounds = 0;
+        if (stage == ST_FS && loops && helper_loop_cap()) {
+            c->helper_rounds = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
+            spv_emit_capability(&c->emit, SPV_CAPABILITY_DEMOTE_TO_HELPER_INVOCATION); /* IsHelperInvocationEXT */
+            spv_emit_demote_extension(&c->emit);
+            static int said; /* whether a game's fragment programs have loops at all (the logs then say the cap is in) */
+            if (!said++) LOG("vulkan: fragment programs with loops: helper lanes leave them after 65536 rounds\n");
+        }
+    }
     for (clip = 0; clip < clip_count; clip++) {
         u32 index = spv_emit_constant_u32(&c->emit, c->u32_type, clip);
         u32 ptr = spv_emit_output_element_pointer(&c->emit, c->f32_type, clip_output, index);
@@ -8387,6 +8434,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
         u32 next_pc = spv_emit_load(&c->emit, c->u32_type, pc);
         u32 finished =
             spv_emit_i_equal(&c->emit, c->bool_type, next_pc, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX));
+        if (c->helper_rounds) finished = cc_or(c, finished, helper_loop_exit(c)); /* SWR backport d48364cc */
         spv_emit_branch_conditional(&c->emit, finished, loop_merge, loop_continue);
         spv_emit_label(&c->emit, loop_continue);
         spv_emit_branch(&c->emit, loop_header);

@@ -85,7 +85,7 @@ static int rec_enabled(void) {
             g_ring = malloc(REC_CAP);
             pm_init(&g_m);
             pc_init(&g_cv);
-            if (!g_ring || plat_thread(rec_thread, NULL, (size_t)1 << 20)) {
+            if (!g_ring || plat_thread(rec_thread, NULL, (size_t)8 << 20) /* SWR: 8 MB, driver calls */) {
                 char why[256];
                 WARN("vulkan: could not start the command recording thread (%s): recording on the GPU thread\n",
                      snx_os_error(why, sizeof why));

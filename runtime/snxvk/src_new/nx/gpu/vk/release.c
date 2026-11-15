@@ -238,7 +238,7 @@ static void release(Release* r) {
     if (!g_rthread) {
         pc_init(&g_rcv);
         g_rthread = 1;
-        if (plat_thread(release_thread, NULL, (size_t)1 << 20)) {
+        if (plat_thread(release_thread, NULL, (size_t)8 << 20) /* SWR: 8 MB */) {
             char why[256];
             fatal("could not start the GPU release thread: %s", snx_os_error(why, sizeof why));
         }

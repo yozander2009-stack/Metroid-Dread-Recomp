@@ -9,6 +9,7 @@
    guest's position. Window-origin bit 4 controls triangle facing independently of that mapping. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h> /* SWR: isfinite (vp_sane) */
 #include <string.h>
 #include "nx/runtime/options.h"
 #include "nx/gpu/gpu.h"
@@ -1931,6 +1932,33 @@ VkViewport vk_render_viewport_at(const u32* r, u32 index) {
     return vp;
 }
 VkViewport vk_render_viewport(const u32* r) { return vk_render_viewport_at(r, 0); }
+/* SWR: Vulkan leaves a viewport undefined when a value isn't finite, its size is over maxViewportDimensions or an edge
+   is outside viewportBoundsRange, and some drivers crash or hang on one. 0: not finite (the draw is skipped, as one
+   with no area); otherwise it is moved into the limits (its transform is undefined anyway). Logged a few times */
+static int vp_sane(VkViewport* v) {
+    if (!isfinite(v->x) || !isfinite(v->y) || !isfinite(v->width) || !isfinite(v->height) || !isfinite(v->minDepth) ||
+        !isfinite(v->maxDepth)) {
+        LOG_LIMIT(4, "vulkan: a viewport that isn't finite (%g %g %g %g): the draw is skipped\n", v->x, v->y, v->width,
+                  v->height);
+        return 0;
+    }
+    const VkPhysicalDeviceLimits* L = &g_vk.props.limits;
+    VkViewport o = *v;
+    float mw = (float)L->maxViewportDimensions[0], mh = (float)L->maxViewportDimensions[1];
+    float lo = L->viewportBoundsRange[0], hi = L->viewportBoundsRange[1];
+    if (v->width > mw) v->width = mw;
+    if (v->height > mh) v->height = mh;
+    if (v->height < -mh) v->height = -mh;
+    if (v->x < lo) v->x = lo;
+    if (v->x + v->width > hi) v->x = hi - v->width;
+    float y0 = v->y < v->y + v->height ? v->y : v->y + v->height, y1 = v->y < v->y + v->height ? v->y + v->height : v->y;
+    if (y0 < lo) v->y += lo - y0;
+    else if (y1 > hi) v->y -= y1 - hi;
+    if (memcmp(&o, v, sizeof o))
+        LOG_LIMIT(4, "vulkan: a viewport outside the device's limits (%g %g %g %g): moved to (%g %g %g %g)\n", o.x, o.y,
+                  o.width, o.height, v->x, v->y, v->width, v->height);
+    return 1;
+}
 /* the vertices of the geometry program's input primitive: the tessellator's output primitive (0xC8: the domain in
    bits 0-1, isolines 0, and the output in bits 8-9, points 0), or the draw's topology */
 static u32 gs_input_vertices(u32 topology, int tes_on, u32 params) {
@@ -3181,7 +3209,7 @@ retry:
 
     VkViewport vp = vk_render_viewport(r);
     u32 viewports = last->si.writes_viewport ? GUEST_VIEWPORTS : 1;
-    if (viewports == 1 && !(vp.width > 0 && vp.height != 0)) {
+    if (viewports == 1 && (!(vp.width > 0 && vp.height != 0) || !vp_sane(&vp))) {
         draw_images_discard(&images);
         return; /* its one viewport has no area: nothing is drawn, so nothing is recorded */
     }
@@ -3211,7 +3239,7 @@ retry:
         }
         viewport[i].x += vp.x - vp_unjittered.x; /* SwitchRecomp, DLSS: the same jitter on every viewport */
         viewport[i].y += vp.y - vp_unjittered.y;
-        int area = viewport[i].width > 0 && viewport[i].height != 0;
+        int area = viewport[i].width > 0 && viewport[i].height != 0 && vp_sane(&viewport[i]); /* SWR: finite, in range */
         if (!area) /* An empty guest viewport clips everything. Vulkan still needs a valid transform. */
             viewport[i] = (VkViewport){0, 0, 1, 1, 0, 1};
         VkRect2D sc = {{0, 0}, area ? g_rp.ext : (VkExtent2D){0, 0}};
