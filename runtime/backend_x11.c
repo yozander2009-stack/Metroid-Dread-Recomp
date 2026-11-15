@@ -90,7 +90,8 @@ static int xi_opcode; static int g_mlast=0, g_mlx, g_mly;   /* XInput2 raw motio
 extern int g_opt_fps;
 void backend_ini(const char* k, const char* v){
   if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
-  else if(!strcmp(k,"renderer")){ extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
+  else if(!strcmp(k,"renderer")){ extern int g_amd_test; extern const char* g_amd_test_renderer; if(g_amd_test) v=g_amd_test_renderer;   /* AMD test mode (main.c) */
+    extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
   else if(!strcmp(k,"frames")) g_maxframes=atoi(v);
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);

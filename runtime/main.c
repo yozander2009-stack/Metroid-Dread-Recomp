@@ -9,6 +9,8 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/file.h>
+#include <unistd.h>
+#include <dlfcn.h>
 #else
 #include <windows.h>
 #endif
@@ -282,6 +284,9 @@ void crash_report(void* host_pc, void* fault, int sig){
       else { extern int plat_module_of(const void*, char*, int, u64*); char mn[260]; u64 mo=0;
         if(plat_module_of(host_pc,mn,sizeof mn,&mo)) logf_(0,"  in %s (+%llx), a thread %s\n",mn,(unsigned long long)mo, kthread_cur()? "of the game" : "of the runtime (GPU, audio, video or window): a graphics driver's DLL here points at the driver");
         else logf_(0,"  in no loaded module, a thread %s\n", kthread_cur()? "of the game" : "of the runtime"); } }
+#else
+    { Dl_info di; if(dladdr(host_pc,&di) && di.dli_fname)   /* which shared object: a graphics driver's, a system one, the game code's */
+        logf_(0,"  in %s (+%llx), a thread %s\n",di.dli_fname,(unsigned long long)((u8*)host_pc-(u8*)di.dli_fbase), kthread_cur()? "of the game" : "of the runtime (GPU, audio, video or window)"); }
 #endif
     if(ga && ga<0x1000000ull) logf_(0,"  the address is a null pointer plus an offset: the game probably got NULL from its allocator (out of memory?). Try memory_gb=6 in the .ini\n"); }
   if(g_mod){ /* closest recompiled fn below host pc */
@@ -916,7 +921,8 @@ void services_init(void){
   svc_core_init(); svc_hid_init(); svc_fs_init(); svc_vi_init(); nv_init(); svc_pl_init(); svc_launcher_init();
 }
 
-/* AMD test mode (Windows, issue #68): the game's EXE copied next to it as "<anything> AMD test.exe" uses the game's own
+/* AMD test mode (issue #68): the game's program copied next to it as "<anything> AMD test.exe" (Windows) or
+   "Metroid Dread AMD test" (Linux: the AMD-test AppImage puts it in the installed game's folder) uses the game's own
    files (ini, saves, game code), skips the Play screen, runs Native Vulkan, and at exit (crash and errors included)
    starts itself again with --amd-report, which packs the logs, shows the zip and opens the issue page */
 int g_amd_test;
@@ -927,6 +933,20 @@ void amd_test_report(void){
   wchar_t self[1024], cmd[1100]; GetModuleFileNameW(NULL,self,1024); _snwprintf(cmd,1100,L"\"%ls\" --amd-report",self); cmd[1099]=0;
   STARTUPINFOW si={sizeof si}; PROCESS_INFORMATION pi;
   if(CreateProcessW(self,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)){ CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+#elif defined(SWR_HAVE_FRONTEND)
+  /* may run in the crash handler: only fork, setsid, open, dup2 and exec until the new program runs */
+  static int done; if(!g_amd_test || done++) return;
+  static char self[1024]; ssize_t n=readlink("/proc/self/exe",self,sizeof self-1); if(n<=0) return; self[n]=0;
+  pid_t pid=fork();
+  if(pid==0){ setsid(); int fd=open("/dev/null",O_RDWR); if(fd>=0){ dup2(fd,0); dup2(fd,1); dup2(fd,2); }
+    execl(self,self,"--amd-report",(char*)NULL); _exit(127); }
+#endif
+}
+static void amd_env(const char* k, const char* v){
+#ifdef _WIN32
+  char b[200]; snprintf(b,sizeof b,"%s=%s",k,v); _putenv(b); SetEnvironmentVariableA(k,v);
+#else
+  setenv(k,v,1);
 #endif
 }
 
@@ -935,7 +955,7 @@ static void split_path(const char* argv0){
   char* s1=strrchr(p,'/'), *s2=strrchr(p,'\\'), *s=s1>s2? s1 : s2;
   const char* base= s? s+1 : p;
   strncpy(g_exename,base,255); char* dot=strrchr(g_exename,'.'); if(dot && (!strcmp(dot,".exe")||!strcmp(dot,".EXE"))) *dot=0;
-#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
+#if defined(SWR_HAVE_FRONTEND)
   { /* letters and digits only, lowercase: "AMD test", "AMD-test" and GitHub's "AMD.test" all read "amdtest" */
     char low[256]; size_t k=0; for(size_t i=0;g_exename[i] && k<255;i++) if(isalnum((unsigned char)g_exename[i])) low[k++]=(char)tolower((unsigned char)g_exename[i]); low[k]=0;
     if(strstr(low,"amdtest")){ g_amd_test=1; strcpy(g_exename,"Metroid Dread"); } }
@@ -945,23 +965,29 @@ static void split_path(const char* argv0){
 
 int swr_main(int argc, char** argv){
   split_path(argv[0]);
-#if defined(_WIN32) && defined(SWR_HAVE_FRONTEND)
+#if defined(SWR_HAVE_FRONTEND)
   if(g_amd_test){
     for(int i=1;i<argc;i++) if(!strcmp(argv[i],"--amd-report")){ extern int fe_amd_report(const char*); fe_amd_report(g_exedir); _exit(0); }
+#ifdef _WIN32
     char ok[1300]; snprintf(ok,sizeof ok,"%sMetroid Dread_data\\setup.ok",g_exedir);
     if(GetFileAttributesA(ok)==INVALID_FILE_ATTRIBUTES){
       MessageBoxA(NULL,"Put this file in your Metroid Dread folder, next to Metroid Dread.exe, and run it from there.\n\n"
                   "(The game must have been set up once with Metroid Dread.exe.)","Metroid Dread - AMD test",MB_OK|MB_ICONINFORMATION);
       _exit(0); }
-    _putenv("SWR_VK_BL_LOG=1"); SetEnvironmentVariableA("SWR_VK_BL_LOG","1");   /* the first deswizzles, logged */
+#else
+    char ok[1300]; snprintf(ok,sizeof ok,"%sMetroid Dread_data/setup.ok",g_exedir);
+    if(access(ok,F_OK)!=0){
+      plat_message("Set up Metroid Dread once with its AppImage (v0.5.9), then start this test again.",0,1);
+      _exit(0); }
+#endif
+    amd_env("SWR_VK_BL_LOG","1");   /* the first deswizzles, logged */
     { /* launches alternate: Native Vulkan, then OpenGL with every GL call on the GPU thread (SWR_NO_GLQ=1: the AMD
          OpenGL crashes are all in SwapBuffers on the separate GL thread), then Native Vulkan again */
       char st[1300]; snprintf(st,sizeof st,"%samd_test_next.txt",g_exedir);
       int gl=0; FILE* f=fopen(st,"r"); if(f){ char b[32]={0}; if(fgets(b,sizeof b,f)) gl= !strncmp(b,"opengl",6); fclose(f); }
       f=fopen(st,"w"); if(f){ fputs(gl? "vulkan_native\n" : "opengl\n",f); fclose(f); }
-      if(gl){ g_amd_test_renderer="opengl"; _putenv("SWR_NO_GLQ=1"); SetEnvironmentVariableA("SWR_NO_GLQ","1"); }
-      _putenv(gl? "SWR_AMD_TEST_MODE=opengl" : "SWR_AMD_TEST_MODE=vulkan_native");   /* the report process says which */
-      SetEnvironmentVariableA("SWR_AMD_TEST_MODE",gl? "opengl" : "vulkan_native");
+      if(gl){ g_amd_test_renderer="opengl"; amd_env("SWR_NO_GLQ","1"); }
+      amd_env("SWR_AMD_TEST_MODE",gl? "opengl" : "vulkan_native");   /* the report process says which */
       LOG("AMD test build: this run tests %s\n",gl? "OpenGL with every OpenGL call on the GPU thread (SWR_NO_GLQ=1)" : "Native Vulkan"); }
   }
 #endif

@@ -75,7 +75,9 @@ void fatal(const char* fmt, ...){
 #if defined(_WIN32)
   { extern void win_fatal_box(const char*); win_fatal_box(buf); }
 #elif !defined(__ANDROID__)
-  { char m[4400]; snprintf(m,sizeof m,"%s\n\nDetails are in %s.log",buf,g_exename); plat_message(m,1,1); }
+  { extern int g_amd_test;   /* test runs and the AMD test: no dialog, the game closes by itself (the .log has the message) */
+    if(!g_amd_test && !getenv("SWR_TEST_SCRIPT") && !getenv("SWR_NO_FATAL_BOX")){
+      char m[4400]; snprintf(m,sizeof m,"%s\n\nDetails are in %s.log",buf,g_exename); plat_message(m,1,1); } }
 #endif
 #if defined(__ANDROID__)
   { extern void overlay_message(const char*); extern void gpu_gl_present_cpu(const u32*,int,int,int); char m[600]; snprintf(m,sizeof m,"Error: %.500s\n(see %s.log)",buf,g_exename); overlay_message(m);

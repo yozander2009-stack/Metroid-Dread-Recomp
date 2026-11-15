@@ -115,12 +115,8 @@ static void env(const char* name, bool on) {
 #else
 static void env(const char* name, bool on) { if (on) setenv(name, "1", 1); else unsetenv(name); }
 #endif
-#ifdef _WIN32
-extern "C" int g_amd_test;   // main.c: this EXE is "... AMD test.exe"
+extern "C" int g_amd_test;   // main.c: this program is "... AMD test.exe" / "Metroid Dread AMD test"
 static bool fe_amd_test() { return g_amd_test != 0; }
-#else
-static bool fe_amd_test() { return false; }
-#endif
 static void apply_env(const IniFile& ini) {
     // never inherit stray test / diagnostic switches
     std::vector<std::string> drop;
@@ -1398,15 +1394,44 @@ static void x_close() {
 static double x_now() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 } // namespace fe
 
+extern "C" void plat_message(const char* text, int error, int wait);   // plat.c: kdialog / zenity
+// AMD test mode's report (main.c starts this program again with --amd-report once the game has exited): the logs
+// packed, the folder and the issue page opened, a message
+extern "C" int fe_amd_report(const char* exedir) {
+    usleep(1500000);   // the game's process finishes and closes its log
+    P.init(exedir, "Metroid Dread");
+    g_hw = detect_hardware(); g_hw_done = true;
+    const char* mode = getenv("SWR_AMD_TEST_MODE"); bool gl = mode && !strcmp(mode, "opengl");
+    std::string info = fmt("version %s\nAMD test build (Linux): %s\ngpu %s\ncpu %s\n%s\n", installed_version().c_str(),
+                           gl ? "OpenGL, calls on the GPU thread (SWR_NO_GLQ)" : "Native Vulkan",
+                           g_hw.gpu.c_str(), cpu_name().c_str(), hw_line().c_str());
+    std::string zip, err;
+    bool ok = make_report(info, &zip, &err);
+    if (getenv("SWR_FE_TEST") || getenv("SWR_AMD_REPORT_QUIET")) {   // tests: the zip's path (or the error) into SWR_FE_RESULT, no windows
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "amd report ok=%d zip=%s err=%s\n", ok, zip.c_str(), err.c_str()); fclose(f); }
+        return ok ? 0 : 1;
+    }
+    if (!ok) { plat_message(("Metroid Dread - AMD test: the report could not be saved.\n\n" + err).c_str(), 1, 1); return 1; }
+    open_in_explorer(reports_dir());
+    open_in_explorer("https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/68");
+    std::string m = std::string("Thank you for testing!\n\nThis run tested ") + (gl ? "OpenGL" : "Native Vulkan") +
+                    ". The test report is saved here:\n" + zip +
+                    "\n\nThe GitHub page for this problem is now open in your browser. Drag the zip file into a comment there.\n\n" +
+                    (gl ? "The next start of the AMD test tests Native Vulkan again." : "Please start the AMD test once more: the next run tests OpenGL.");
+    plat_message(m.c_str(), 0, 1);
+    return 0;
+}
+
 extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const char* exename) {
     P.init(exedir, exename);
     IniFile ini; ini.load(P.ini);
-    bool play = false, launcher = false;
+    bool play = g_amd_test != 0, launcher = false;   // AMD test mode: straight into the game
     for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--play")) play = true; if (!strcmp(argv[i], "--launcher")) launcher = true; }
     bool skip = (play || ini.get("skip_launcher", "0") == "1") && !launcher;   // --launcher: the Play screen even when it is skipped
     GameCheck g = check_installed();
     if (!g.code_ok || !g.data_ok) return 1;   // setup first, whatever was asked
-    if (skip && code_needs_rebuild()) { g_rebuild_on_start = true; return 1; }   // never old game code: rebuild, then play
+    if (skip && !g_amd_test && code_needs_rebuild()) { g_rebuild_on_start = true; return 1; }   // never old game code: rebuild, then play
     if (skip) { apply_env(ini); return 0; }
     return 1;
 }

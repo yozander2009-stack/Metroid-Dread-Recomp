@@ -1,0 +1,20 @@
+#!/bin/sh
+# Metroid Dread AMD test (Linux, issue #68): a debugging build for AMD graphics, not a game update. It uses the game the
+# Metroid Dread AppImage installed (METROID_DREAD_HOME or ~/.local/share/MetroidDreadRecomp): its test program is put
+# next to the game as "Metroid Dread AMD test" and starts straight into the game, Native Vulkan on the first start and
+# OpenGL on the next. When the game closes or crashes it saves a report zip and opens issue #68 in the browser.
+# The game's own program, settings and saves are not changed.
+HERE="$(dirname "$(readlink -f "$0")")"
+GAME="${METROID_DREAD_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/MetroidDreadRecomp}"
+T="$GAME/Metroid Dread AMD test"
+if [ ! -f "$GAME/Metroid Dread_data/setup.ok" ]; then
+  M="Set up Metroid Dread once with its AppImage (v0.5.9), then start this test again."
+  zenity --info --no-markup --title="Metroid Dread - AMD test" --text="$M" 2>/dev/null ||
+    kdialog --title "Metroid Dread - AMD test" --msgbox "$M" 2>/dev/null || echo "$M" >&2
+  exit 1
+fi
+if ! cmp -s "$HERE/usr/bin/metroid-dread" "$T"; then
+  cp -f "$HERE/usr/bin/metroid-dread" "$T.new" && chmod +x "$T.new" && mv -f "$T.new" "$T" || exit 1
+fi
+cd "$GAME" || exit 1
+exec "$T" "$@"
