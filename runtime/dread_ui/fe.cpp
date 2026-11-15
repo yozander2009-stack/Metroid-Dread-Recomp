@@ -68,6 +68,8 @@ static Nav g_nav; static PadState g_pad; static PromptStyle g_prompts = PROMPT_A
 static std::string g_flash; static double g_flash_t;
 static SetupJob g_job; enum SetupStep { SS_WELCOME, SS_RUNNING, SS_FAILED, SS_DONE } ; static SetupStep g_ss = SS_WELCOME;
 static bool g_restart_after_setup, g_do_restart;   // updates: start the new EXE after the rebuild / now
+static bool g_play_after_setup;   // PLAY with game code that needs a rebuild: the game starts when the rebuild is done
+static bool g_rebuild_on_start;   // the Play screen was to be skipped (skip_launcher, --play) but the game code needs a rebuild
 static bool g_first_install;   // the game was not compiled when this screen opened: settings are picked after setup
 static std::vector<OldInstall> g_old; static bool g_mig_settings = true, g_mig_saves = true, g_mig_mods = true, g_mig_caches = true;
 static std::string g_mig_report;
@@ -324,6 +326,7 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
             if (row_button("##other", "Choose other game files", "BACK")) { g_ss = SS_WELCOME; g_page_changed = true; }
             if (row_button("##log", "Open the full log (setup.log)", "OPEN")) open_in_notepad(join(P.exedir, "setup.log"));
         } else if (g_ss == SS_DONE) {
+            if (g_play_after_setup && !g_restart_after_setup) { g_play_after_setup = false; g_ini.load(P.ini); go(PG_PLAY); g_play = true; }
             ImGui::Dummy({1, S(8)});
             if (!g_mig_report.empty()) help_text(g_mig_report.c_str());
             if (big_button("##cont", g_restart_after_setup ? "RESTART" : "CONTINUE", {S(320), S(64)})) {
@@ -349,6 +352,18 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
 static void start_rebuild(bool restart_after) {
     g_job = SetupJob(); g_job.base = P.data; g_job.t0 = ImGui::GetTime(); g_restart_after_setup = restart_after;
     g_ss = setup_start(g_job) ? SS_RUNNING : SS_FAILED; go(PG_SETUP);
+}
+// The game code must be rebuilt before it runs: this version's game patches differ from the ones it was built with, or
+// an update's recompiler changed. Old code would run without this version's game fixes (#75: a Linux player's game kept
+// the old 1024-buffer particle pool of a version before 0.5.9 and the acid crash came back)
+static bool code_needs_rebuild() { return code_patches_stale() || update_state().stage == UP_REBUILD; }
+// PLAY: the game, or first the rebuild and then the game
+static void play_or_rebuild() {
+    GameCheck c = check_installed(); if (!c.code_ok || !c.data_ok) { go(PG_SETUP); return; }
+    if (!code_needs_rebuild()) { g_play = true; return; }
+    UpdateState u = update_state();
+    if (u.stage == UP_REBUILD && u.restart) { start_rebuild(true); return; }   // a new EXE as well: the rebuild restarts into it
+    g_play_after_setup = true; start_rebuild(false);
 }
 // banner: only when there is something to do; otherwise the full UPDATES section on the Play page
 // drawn twice on the Play page (the banner under PLAY and the UPDATES section): each copy in its own ID scope, or
@@ -419,11 +434,11 @@ static void page_play() {
     logo(dl, {p.x, p.y + S(10)}, S(70), true);
     ImGui::Dummy({1, S(250)});
     GameCheck g = check_installed();
-    bool ready = g.code_ok && g.data_ok;
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(ready ? C_OK : C_WARN));
-    ImGui::TextUnformatted(ready ? "READY" : g.summary.c_str()); ImGui::PopStyleColor();
+    bool ready = g.code_ok && g.data_ok, rb = ready && code_needs_rebuild();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(ready && !rb ? C_OK : C_WARN));
+    ImGui::TextUnformatted(!ready ? g.summary.c_str() : rb ? "NEW GAME FIXES: PLAY BUILDS THEM IN FIRST (A FEW MINUTES)" : "READY"); ImGui::PopStyleColor();
     ImGui::Dummy({1, S(8)});
-    if (big_button("##play", "PLAY", {S(420), S(86)})) { if (ready) g_play = true; else go(PG_SETUP); }
+    if (big_button("##play", "PLAY", {S(420), S(86)})) play_or_rebuild();
     ImGui::Dummy({1, S(14)});
 #ifdef _WIN32
     { UpStage st = update_state().stage; if (st == UP_AVAILABLE || st == UP_DOWNLOADING || st == UP_REBUILD || (st == UP_INSTALLED && update_state().restart) || code_patches_stale()) { update_rows(true); ImGui::Dummy({1, S(10)}); } }
@@ -908,6 +923,7 @@ static void sidebar(ImVec2 a, ImVec2 b) {
 
 static void frame() {
     ImGuiIO& io = ImGui::GetIO(); float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    if (g_rebuild_on_start && g_page != PG_SETUP) { g_rebuild_on_start = false; play_or_rebuild(); }
     // small screens (720p, Steam Deck): the height term alone made the text tiny (#48); the pages scroll, so let the width decide
     float sc = std::max(std::min(0.85f, W / 1500.0f), std::max(0.55f, std::min(2.2f, std::min(H / 1080.0f, W / 1700.0f))));
     if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
@@ -971,7 +987,7 @@ static void handle_nav() {
         if (g_nav.act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) go((Page)(g_page <= PG_PLAY ? PG_ABOUT : g_page - 1));
         if (g_nav.act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) go((Page)(g_page >= PG_ABOUT ? PG_PLAY : g_page + 1));
         if (back && g_page != PG_PLAY) go(PG_PLAY);
-        if (g_nav.act[NAV_PLAY]) { if (g_page == PG_PLAY) { GameCheck c = check_installed(); if (c.code_ok && c.data_ok) g_play = true; } else go(PG_PLAY); }
+        if (g_nav.act[NAV_PLAY]) { if (g_page == PG_PLAY) { GameCheck c = check_installed(); if (c.code_ok && c.data_ok) play_or_rebuild(); } else go(PG_PLAY); }
     } else if (back && g_ss == SS_FAILED) { g_ss = SS_WELCOME; g_page_changed = true; }
     if (ImGui::IsKeyPressed(ImGuiKey_F11)) { bool fs = !backend_is_fullscreen(); backend_fe_fullscreen(fs); set("fullscreen", fs ? "1" : "0"); }
 }
@@ -986,9 +1002,9 @@ static void launcher_tick() {
     done = true;
     const char* mode = getenv("RECOMPLAUNCHER_MODE");
     if (mode && !strcmp(mode, "bigpicture") && !getb("fullscreen")) { set("fullscreen", "1"); backend_fe_fullscreen(1); }
-    if (g_page != PG_PLAY || code_patches_stale()) return;
-    UpStage st = update_state().stage; if (st == UP_REBUILD || st == UP_INSTALLED) return;
-    GameCheck c = check_installed(); if (c.code_ok && c.data_ok) g_play = true;
+    if (g_page != PG_PLAY) return;
+    UpStage st = update_state().stage; if (st == UP_INSTALLED) return;
+    GameCheck c = check_installed(); if (c.code_ok && c.data_ok) play_or_rebuild();
 }
 
 // ---------------------------------------------------------------- test hooks (SWR_FE_TEST=1 only; inert otherwise)
@@ -1165,6 +1181,7 @@ extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const c
     bool skip = (play || ini.get("skip_launcher", "0") == "1") && !(GetAsyncKeyState(VK_SHIFT) & 0x8000);
     GameCheck g = check_installed();
     if (!g.code_ok || !g.data_ok) return 1;   // setup first, whatever was asked
+    if (skip && !g_amd_test && code_needs_rebuild()) { g_rebuild_on_start = true; return 1; }   // never old game code: rebuild, then play
     if (skip) { apply_env(ini); return 0; }
     return 1;
 }
@@ -1389,6 +1406,7 @@ extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const c
     bool skip = (play || ini.get("skip_launcher", "0") == "1") && !launcher;   // --launcher: the Play screen even when it is skipped
     GameCheck g = check_installed();
     if (!g.code_ok || !g.data_ok) return 1;   // setup first, whatever was asked
+    if (skip && code_needs_rebuild()) { g_rebuild_on_start = true; return 1; }   // never old game code: rebuild, then play
     if (skip) { apply_env(ini); return 0; }
     return 1;
 }
