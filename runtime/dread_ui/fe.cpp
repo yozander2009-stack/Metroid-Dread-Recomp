@@ -537,7 +537,7 @@ static void page_display() {
 static void page_graphics() {
     page_title("GRAPHICS", "Resolution, renderer and image quality.");
     section("RESOLUTION"); resolution_rows(false);
-    section("RENDERER"); bool rch = draw_opt("renderer", get("renderer") == "vulkan_native" ? "EXPERIMENTAL" : nullptr);
+    section("RENDERER"); bool rch = draw_opt("renderer", nullptr);   // Native Vulkan is no longer experimental (since 0.5.9)
 #ifdef _WIN32
     if (backend_gpu_amd()) {   // AMD: Native Vulkan unless chosen otherwise here (main.c reads amd_opengl)
         if (rch) set("amd_opengl", get("renderer") == "vulkan_native" ? "0" : "1");
