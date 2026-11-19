@@ -608,7 +608,7 @@
   },
   "code_154.c": {
    "pristine": "64bcbf7ee0b0fcc6b042888bad3ec0c4bbd32c8690832de1b41171cd8d2fbe8d",
-   "result": "c503c89a8cdecaf75c0eafc4072a65f0d9c9e60cafc6dcd68c2bee574ce75360",
+   "result": "dde3b6ffcfeddc5741c5cd2c000da8dcbe2c2c89f84a2a341b090d97fe09e888",
    "hunks": [
     [
      30096,
@@ -647,6 +647,20 @@
      [
       " if(swr_cheats&8u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD energy number (while it counts) shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
       " else { c->x[30]=153002772; F_923E640(c,153347648); if(UNLIKELY(c->pc!=153002772)) return; }"
+     ]
+    ],
+    [
+     34077,
+     34077,
+     [
+      " if(c->x[0]==0) goto L_91EA4E0;   /* SWR #73: no HUD energy-tank entry there (energy above the tanks walked past the list) */"
+     ]
+    ],
+    [
+     34103,
+     34103,
+     [
+      " if(c->x[8]==0) goto L_91EA4E0;   /* SWR #73: empty OnEnergyRecover slot: skip the call instead of jumping to 0 */"
      ]
     ]
    ]
