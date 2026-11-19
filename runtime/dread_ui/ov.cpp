@@ -26,7 +26,7 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
-extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); void cheats_set(int, int); }   // runtime cheats.c
+extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); int cheats_kind(int); void cheats_set(int, int); }   // runtime cheats.c
 #ifdef _WIN32
 extern "C" int backend_gpu_amd(void);   // backend_win32.c
 #else
@@ -135,7 +135,8 @@ void tab_content(int t) {
                                                    : fmt("Put amiibo dumps (.bin) in %s", amiibo_dir()).c_str()); }
             if (cheats_count() > 0) { section("CHEATS");
                 for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue;
-                    bool on = cheats_is_on(i) != 0; if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on)) cheats_set(i, on ? 1 : 0); } }
+                    bool on = cheats_is_on(i) != 0; const char* tag = cheats_kind(i) == 2 ? "PATCHES GAME CODE: NO EFFECT" : nullptr;   // built-in ones come first
+                    if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on, tag)) cheats_set(i, on ? 1 : 0); } }
             section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
 #ifndef SWR_NO_SKIPCUT
         opt_row("skip_cutscenes");

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <functional>
 
 namespace fe {
 
@@ -93,13 +94,17 @@ extern const char* const PT_PACK_URL;
 bool pt_pack_installed();
 bool pt_pack_import(const std::string& folder_or_zip, std::string* err);   // the download as it comes (Yuzu layout is fine)
 bool mod_remove(const std::string& name);
-// cheats (runtime cheats.c): <data>/cheats/*.txt in Atmosphere format; which run is cheats/enabled.txt
-struct CheatEntry { std::string name, file; bool on, master; };
+// cheats (runtime cheats.c): the built-in cheats, then <data>/cheats/*.txt in Atmosphere format; which run is cheats/enabled.txt.
+// kind: 0 changes values, 1 its code patches switch a built-in game patch, 2 patches other game code (no effect here)
+struct CheatEntry { std::string name, file, help; bool on, master, builtin; int kind; };
 std::string cheats_dir();
 std::string game_build_id();   // exefs/main's build id, 16 hex digits (Atmosphere's cheat file name)
-std::vector<CheatEntry> cheats_list();
+unsigned game_text_size();     // exefs/main's code size: cheats that write below it patch instructions
+std::vector<std::string> list_files(const std::string& dir);   // the files in a folder (no subfolders), sorted
+void walk_files(const std::string& root, const std::function<void(const std::string& rel)>& f);   // every file below root (never links)
+std::vector<CheatEntry> cheats_list();   // fe.cpp
 void cheats_write(const std::vector<CheatEntry>& c);
-bool cheat_import(const std::string& txt, std::string* err);
+bool cheat_import(const std::string& txt_or_folder, std::string* err, int* added = nullptr);
 // button-icon packs (Controls > Button icons): fixed folder names the runtime picks from (svc_fs.c)
 struct IconPack { const char* name; const char* label; const char* author; const char* url; };
 extern const IconPack ICON_PACKS[3];

@@ -360,6 +360,77 @@
     ]
    ]
   },
+  "code_043.c": {
+   "pristine": "fec56f7c7748830ffcb82c00e522bf5e1bbf76613d289dcab2fc42107ba2a31d",
+   "result": "2b6538202f31f090d3fdd2178c072542b7972df3daeda08dc8291e1b34238dff",
+   "hunks": [
+    [
+     16245,
+     16245,
+     [
+      "extern volatile unsigned swr_cheats;   /* SWR cheats (code_071.c): 4 = an E.M.M.I. grab always ends in a break-free */"
+     ]
+    ],
+    [
+     16261,
+     16262,
+     [
+      " c->x[8]=(u64)((swr_cheats&4u)? 1u : RD8((c->x[8]+92)));   /* SWR cheats: the E.M.M.I. grab sees Samus's can't-die flag (life +92): she breaks free */"
+     ]
+    ],
+    [
+     16719,
+     16720,
+     [
+      " c->x[8]=(u64)((swr_cheats&4u)? 1u : RD8((c->x[8]+92)));   /* SWR cheats: the E.M.M.I. grab sees Samus's can't-die flag (life +92): she breaks free */"
+     ]
+    ],
+    [
+     21773,
+     21774,
+     [
+      " c->x[8]=(u64)((swr_cheats&4u)? 1u : RD8((c->x[8]+92)));   /* SWR cheats: the E.M.M.I. grab sees Samus's can't-die flag (life +92): she breaks free */"
+     ]
+    ],
+    [
+     21922,
+     21923,
+     [
+      " c->x[8]=(u64)((swr_cheats&4u)? 1u : RD8((c->x[8]+92)));   /* SWR cheats: the E.M.M.I. grab sees Samus's can't-die flag (life +92): she breaks free */"
+     ]
+    ]
+   ]
+  },
+  "code_071.c": {
+   "pristine": "46f841ae1a696795d2500e6420315b12eec6f062ec31006ffc282fd90322d895",
+   "result": "8ea02c45737f383f236c249cdcc043d9c677ccd25d49c3887150a8456ba1715f",
+   "hunks": [
+    [
+     28363,
+     28363,
+     [
+      "/* SWR cheats (GitHub issue #70): the runtime's built-in cheats (cheats.c) set these bits, the game patches read them.",
+      "   1 missiles and 2 power bombs don't go down (below), 4 an E.M.M.I. grab always ends in a break-free (code_043.c),",
+      "   8 Samus's energy doesn't go down (code_150.c) */",
+      "SWR_EXPORT volatile unsigned swr_cheats;"
+     ]
+    ],
+    [
+     28386,
+     28387,
+     [
+      " SETSB(1,(swr_cheats&1u)? 0ull : 0xBF800000ull);   /* SWR cheats: infinite missiles (the game adds -1 here) */"
+     ]
+    ],
+    [
+     39502,
+     39503,
+     [
+      " SETSB(1,(swr_cheats&2u)? 0ull : 0xBF800000ull);   /* SWR cheats: infinite power bombs (the game adds -1 here) */"
+     ]
+    ]
+   ]
+  },
   "code_097.c": {
    "pristine": "f28dcb754fa4f22454d0c765b19674dec0970fcfe419dffa51918b7385f34ba8",
    "result": "4e8172b68d99c8a31614a11e55026362a515bd1f1c0ebccaff3083ee5aa3df44",
@@ -488,6 +559,30 @@
     ]
    ]
   },
+  "code_150.c": {
+   "pristine": "e653615f19899bde6a851c9f0f616f0993e957b3fb9894f4542bcf4aac79d464",
+   "result": "f4fd9df341b5c3280c499c98666c0366dd42b0c56ab69eb767fcf1aad13b9a0e",
+   "hunks": [
+    [
+     10102,
+     10102,
+     [
+      "extern volatile unsigned swr_cheats;   /* SWR cheats (code_071.c): 8 = Samus's energy doesn't go down */",
+      "/* SWR cheats: is this life component Samus's? Found as the game finds her (F_8DF1788 on the game object, life at +448) */",
+      "static int swr_samus_life(u8* const M, u64 life){",
+      "  u64 g=RD64(RD64(164360192+136)), t= g? RD64(g+10680) : 0, p= t? RD64(t+16) : 0;",
+      "  return p && RD64(p+448)==life; }"
+     ]
+    ],
+    [
+     10154,
+     10155,
+     [
+      " SETS(0,(UNLIKELY(swr_cheats&8u) && swr_samus_life(M,c->x[20]))? c->v[1].f[0] : c->v[1].f[0]-c->v[0].f[0]);   /* SWR cheats: Samus's energy doesn't go down */"
+     ]
+    ]
+   ]
+  },
   "code_152.c": {
    "pristine": "6c5f1074fc4e6dd25c25fc175ce5a1526d6898c22b988511f127184426c5abab",
    "result": "e11a1f0ba0d348e6bc1a6b82eac958790f84f7f81801bc716aff8b9f6ddaedcb",
@@ -507,6 +602,35 @@
      8664,
      [
       " if(swr_cut60b()){ c->pc=c->x[30]; return; }   /* SWR: RET, X0 unchanged */"
+     ]
+    ]
+   ]
+  },
+  "code_154.c": {
+   "pristine": "64bcbf7ee0b0fcc6b042888bad3ec0c4bbd32c8690832de1b41171cd8d2fbe8d",
+   "result": "170d0bf452280c19d646d1268ce1bde7abf8b8295ace0ea78e3b8f8e126fc080",
+   "hunks": [
+    [
+     30096,
+     30096,
+     [
+      "extern volatile unsigned swr_cheats;   /* SWR cheats (code_071.c): 1 infinite missiles, 2 infinite power bombs */"
+     ]
+    ],
+    [
+     30305,
+     30306,
+     [
+      " if(swr_cheats&1u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD missile counter shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
+      " else { c->x[30]=152992768; F_923E640(c,153347648); if(UNLIKELY(c->pc!=152992768)) return; }"
+     ]
+    ],
+    [
+     32724,
+     32725,
+     [
+      " if(swr_cheats&2u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD power-bomb counter shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
+      " else { c->x[30]=152999336; F_923E640(c,153347648); if(UNLIKELY(c->pc!=152999336)) return; }"
      ]
     ]
    ]

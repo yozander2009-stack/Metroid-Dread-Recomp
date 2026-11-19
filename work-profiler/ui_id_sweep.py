@@ -21,7 +21,7 @@ try:
         if state == 'rebuild':   # another hash (a prefix alone kept the real one as a substring: not stale)
             import re; open(ok_path, 'w', encoding='utf-8').write(re.sub(r'"patches_sha256": "[0-9a-f]{64}', '"patches_sha256": "' + '0' * 64, ok0))
         else: open(ok_path, 'w', encoding='utf-8').write(ok0)
-        for page in range(1, 10):
+        for page in range(1, 11):   # fe.cpp PG_PLAY .. PG_ABOUT
             if os.path.exists(res): os.remove(res)
             env = {k: v for k, v in os.environ.items() if not k.startswith('SWR_')}
             env.update(SWR_FE_TEST='1', SWR_FE_PAGE=str(page), SWR_FE_EXIT_FRAME='150', SWR_FE_RESULT=res)

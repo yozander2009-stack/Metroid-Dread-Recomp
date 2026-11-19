@@ -252,6 +252,20 @@ static ROpen* rf_acquire(const char*path){
 }
 static void rf_release(ROpen*r){pm_unlock(&r->io);pm_lock(&g_romlock);r->refs--;pc_signal(&open_available);pm_unlock(&g_romlock);}
 
+/* Built-in cheats (cheats.c): the HUD's missile and power-bomb counters print U+00AA (used in none of the game's texts nor
+   the Portuguese fan translation) while infinite missiles / power bombs is on, and every glyph table maps it to its own
+   infinity glyph (U+221E) as the game reads the table (system/fonts/symbols/*_glyphtable.buct: "MUCT", count at +8,
+   entries {u16 code point, u16 0xFFFF, u32 glyph} from +24) */
+static void glyph_inf(const char* path, u64 foff, u8* d, u64 n){
+  size_t L=strlen(path); if(L<16 || strcmp(path+L-16,"_glyphtable.buct")) return;
+  FILE* f=fopen(path,"rb"); if(!f) return; u8* t=malloc(65536); size_t got= t? fread(t,1,65536,f) : 0; fclose(f);
+  u32 cnt=0, inf=0; u64 field=0; int have=0;
+  if(got>=24 && !memcmp(t,"MUCT",4)){ memcpy(&cnt,t+8,4);
+    if(24+(u64)cnt*8<=got) for(u32 i=0;i<cnt;i++){ u16 cp; memcpy(&cp,t+24+(u64)i*8,2);
+      if(cp==0x221E){ memcpy(&inf,t+24+(u64)i*8+4,4); have|=1; } else if(cp==0xAA){ field=24+(u64)i*8+4; have|=2; } } }
+  free(t);
+  if(have==3) for(int k=0;k<4;k++){ u64 at=field+k; if(at>=foff && at<foff+n) d[at-foff]=((u8*)&inf)[k]; } }
+
 int romfs_read(u64 off, void* dst, u64 size){
   u8* d=dst;u64 begin=plat_ns(),requested=size;const char*last_path=NULL;
   if(nrch) return chunk_read(off,d,size);
@@ -270,6 +284,7 @@ int romfs_read(u64 off, void* dst, u64 size){
     last_path=f->path;ROpen*file=rf_acquire(f->path);
     if(!file->f || plat_pread(file->f,d,n,off-f->off)<(int)n){memset(d,0,n);}
     rf_release(file);
+    glyph_inf(f->path,off-f->off,d,n);   /* the infinity sign for the infinite-ammo HUD */
     d+=n; off+=n; size-=n;
   }
   u64 elapsed=plat_ns()-begin;__atomic_add_fetch(&g_fs_read_ns,elapsed,__ATOMIC_RELAXED);

@@ -435,43 +435,19 @@ std::string game_build_id() {
     unsigned char b[0x48]; size_t n = fread(b, 1, sizeof b, f); fclose(f); if (n < 0x48 || memcmp(b, "NSO0", 4)) return "";
     char s[17]; for (int i = 0; i < 8; i++) snprintf(s + i * 2, 3, "%02X", b[0x40 + i]); return s;
 }
-static bool is_bid_file(const std::string& n) {
-    if (n.size() != 20) return false; for (int i = 0; i < 16; i++) if (!isxdigit((unsigned char)n[i])) return false;
-    return strcasecmp(n.c_str() + 16, ".txt") == 0;
+unsigned game_text_size() {
+    FILE* f = fopen(join(P.data, "exefs/main").c_str(), "rb"); if (!f) return 0;
+    unsigned char b[0x20]; size_t n = fread(b, 1, sizeof b, f); fclose(f); if (n < 0x1C || memcmp(b, "NSO0", 4)) return 0;
+    return b[0x18] | b[0x19] << 8 | b[0x1A] << 16 | (unsigned)b[0x1B] << 24;   // the text segment's size
 }
-std::vector<CheatEntry> cheats_list() {
-    std::vector<CheatEntry> out; std::string d = cheats_dir(), bid = game_build_id(); if (!dir_exists(d)) return out;
-    std::vector<std::string> files;
-    if (DIR* dd = opendir(d.c_str())) { while (dirent* e = readdir(dd)) { std::string n = e->d_name;
-        if (n.size() > 4 && !strcasecmp(n.c_str() + n.size() - 4, ".txt") && strcasecmp(n.c_str(), "enabled.txt") && file_exists(join(d, n))) files.push_back(n); } closedir(dd); }
-    std::sort(files.begin(), files.end());
-    std::string en = read_text(join(d, "enabled.txt"));
-    std::vector<std::string> on; { size_t i = 0; while (i < en.size()) { size_t e = en.find('\n', i); if (e == std::string::npos) e = en.size(); std::string l = en.substr(i, e - i); i = e + 1;
-        while (!l.empty() && (l.back() == '\r')) l.pop_back(); if (!l.empty()) on.push_back(l); } }
-    for (auto& fn : files) {
-        if (is_bid_file(fn) && !bid.empty() && strncasecmp(fn.c_str(), bid.c_str(), 16)) continue;   // another version of the game
-        std::string t = read_text(join(d, fn)); size_t i = 0;
-        while (i < t.size()) { size_t e = t.find('\n', i); if (e == std::string::npos) e = t.size(); std::string l = t.substr(i, e - i); i = e + 1;
-            size_t a = l.find_first_not_of(" \t\xEF\xBB\xBF"); if (a == std::string::npos) continue;
-            char o = l[a], c = o == '[' ? ']' : o == '{' ? '}' : 0; if (!c) continue; size_t z = l.find(c, a + 1); if (z == std::string::npos) continue;
-            std::string name = l.substr(a + 1, z - a - 1); if (name.size() > 95) name.resize(95);
-            bool master = o == '{'; out.push_back({name, fn, master || std::find(on.begin(), on.end(), name) != on.end(), master}); }
-    }
+std::vector<std::string> list_files(const std::string& dir) {
+    std::vector<std::string> out;
+    if (DIR* dd = opendir(dir.c_str())) { while (dirent* e = readdir(dd)) { std::string n = e->d_name; if (n != "." && n != ".." && file_exists(join(dir, n))) out.push_back(n); } closedir(dd); }
+    std::sort(out.begin(), out.end());
     return out;
 }
-void cheats_write(const std::vector<CheatEntry>& c) {
-    std::string s; for (auto& e : c) if (e.on && !e.master) s += e.name + "\n";
-    make_dirs(cheats_dir()); write_text(join(cheats_dir(), "enabled.txt"), s);
-}
-bool cheat_import(const std::string& txt, std::string* err) {
-    std::string name = txt.substr(txt.find_last_of('/') + 1);
-    if (name.size() < 5 || strcasecmp(name.c_str() + name.size() - 4, ".txt")) { *err = "Pick a cheat .txt file"; return false; }
-    if (!strcasecmp(name.c_str(), "enabled.txt")) { *err = "That name is used by the game: rename the file first"; return false; }
-    std::string bid = game_build_id();
-    if (is_bid_file(name) && !bid.empty() && strncasecmp(name.c_str(), bid.c_str(), 16)) { *err = "These cheats are for another version of the game (yours is " + bid + ", version 2.1.0)"; return false; }
-    make_dirs(cheats_dir());
-    if (!copy_file(txt, join(cheats_dir(), name))) { *err = "Could not copy the file"; return false; }
-    return true;
+void walk_files(const std::string& root, const std::function<void(const std::string&)>& f) {
+    walk(root, "", [&](const std::string& r, bool dir, long long) { if (!dir) f(r); });
 }
 const IconPack ICON_PACKS[3] = {
     {"Switch to XBOX Layout", "Xbox", "Krydar", "https://gamebanana.com/dl/679191"},

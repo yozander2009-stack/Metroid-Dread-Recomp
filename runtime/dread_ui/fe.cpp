@@ -22,6 +22,7 @@
 #endif
 #include <cstdio>
 #include <cmath>
+#include <cctype>
 #include <algorithm>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -61,8 +62,8 @@ static bool g_focused = true; static double g_rumble_off;   // window focus; whe
 #endif
 static bool g_quit, g_play, g_resize;
 static IniFile g_ini; static bool g_ini_dirty;
-enum Page { PG_SETUP, PG_PLAY, PG_DISPLAY, PG_GRAPHICS, PG_GAMEPLAY, PG_AUDIO, PG_CONTROLS, PG_MODS, PG_ADVANCED, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = {"SETUP", "PLAY", "DISPLAY", "GRAPHICS", "GAMEPLAY", "AUDIO", "CONTROLS", "MODS", "ADVANCED", "CREDITS"};
+enum Page { PG_SETUP, PG_PLAY, PG_DISPLAY, PG_GRAPHICS, PG_GAMEPLAY, PG_AUDIO, PG_CONTROLS, PG_MODS, PG_CHEATS, PG_ADVANCED, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = {"SETUP", "PLAY", "DISPLAY", "GRAPHICS", "GAMEPLAY", "AUDIO", "CONTROLS", "MODS", "CHEATS", "ADVANCED", "CREDITS"};
 static Page g_page = PG_PLAY; static bool g_page_changed = true;
 static Nav g_nav; static PadState g_pad; static PromptStyle g_prompts = PROMPT_AUTO;
 static std::string g_flash; static double g_flash_t;
@@ -580,19 +581,121 @@ static void page_gameplay() {
 #endif
    
     section("LOADING AND RIDES"); draw_opt("fast_loading"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
-    section("CHEATS");
-    help_text(fmt("Atmosphere cheat files (.txt) for version 2.1.0 (build id %s). Cheats that change values (energy, missiles, items) work; "
-                  "ones that patch the game's code can't, because the code is recompiled. You can also switch them in the in-game menu (F1).", game_build_id().c_str()).c_str());
-    { static std::vector<CheatEntry> ch; if (g_focus_first || ch.empty()) ch = cheats_list(); bool changed = false;
-      if (ch.empty()) row_text("Cheats", "None yet: add a cheat file below.", C_DIM);
-      for (size_t i = 0; i < ch.size(); i++) {
-          if (ch[i].master) { row_text(ch[i].name.c_str(), "Always on (master code)", C_DIM); continue; }
-          bool on = ch[i].on; if (row_bool(fmt("##ch%d", (int)i).c_str(), ch[i].name.c_str(), &on)) { ch[i].on = on; changed = true; } }
-      if (changed) { cheats_write(ch); flash("Cheats saved"); }
-      if (row_button("##chadd", "Add a cheat file (.txt)", "CHOOSE")) {
-          std::string f = pick_file(g_hwnd, "Choose a cheat file", L"Cheats", L"*.txt");
-          if (!f.empty()) { std::string err; if (cheat_import(f, &err)) { ch = cheats_list(); flash("Cheat file added"); } else flash(err); } }
-      if (row_button("##chdir", "Cheats folder", "OPEN")) { make_dirs(cheats_dir()); open_in_explorer(cheats_dir()); } }
+}
+
+// ---------------------------------------------------------------- cheats (fe.h). The runtime's cheats.c parses the files, so the
+// names and what each cheat can do are the game's own; listing and copying files is in fe_sys*.cpp (list_files, walk_files)
+extern "C" {
+int cheats_builtin_count(void); const char* cheats_builtin_name(int i); const char* cheats_builtin_help(int i); const char* cheats_builtin_key(void);
+int cheats_text_scan(const char* text, size_t len, unsigned text_size, void (*fn)(void* u, const char* name, int master, int kind, int words), void* u);
+}
+static std::string lower(std::string s) { for (auto& ch : s) ch = (char)tolower((unsigned char)ch); return s; }
+static bool txt_name(const std::string& n) { return n.size() > 4 && lower(n.substr(n.size() - 4)) == ".txt"; }
+static bool other_version(const std::string& n, const std::string& bid) {   // Atmosphere's <build id>.txt of another version
+    if (n.size() != 20 || !txt_name(n) || bid.empty()) return false;
+    for (int i = 0; i < 16; i++) if (!isxdigit((unsigned char)n[i])) return false;
+    return lower(n.substr(0, 16)) != lower(bid);
+}
+static std::vector<std::string> text_lines(const std::string& t) {
+    std::vector<std::string> out; size_t i = 0;
+    while (i < t.size()) { size_t e = t.find('\n', i); if (e == std::string::npos) e = t.size(); std::string l = t.substr(i, e - i); i = e + 1;
+        while (!l.empty() && l.back() == '\r') l.pop_back(); if (!l.empty()) out.push_back(l); }
+    return out;
+}
+struct CheatScan { std::vector<CheatEntry>* out = nullptr; const std::vector<std::string>* on = nullptr; std::string file; int words = 0; };
+static void cheat_scan_cb(void* u, const char* name, int master, int kind, int words) {
+    CheatScan* s = (CheatScan*)u; s->words += words; if (!s->out) return;
+    bool on = master || std::find(s->on->begin(), s->on->end(), std::string(name)) != s->on->end();
+    s->out->push_back({name, s->file, "", on, master != 0, false, kind});
+}
+std::vector<CheatEntry> cheats_list() {
+    std::vector<CheatEntry> out; std::string d = cheats_dir(), bid = game_build_id(), key = cheats_builtin_key();
+    std::vector<std::string> on = text_lines(read_text(join(d, "enabled.txt")));
+    for (int i = 0; i < cheats_builtin_count(); i++) {
+        std::string n = cheats_builtin_name(i);
+        out.push_back({n, "", cheats_builtin_help(i), std::find(on.begin(), on.end(), key + n) != on.end(), false, true, 0});
+    }
+    if (!dir_exists(d)) return out;
+    unsigned ts = game_text_size();
+    for (auto& fn : list_files(d)) {
+        if (!txt_name(fn) || lower(fn) == "enabled.txt" || other_version(fn, bid)) continue;   // as the runtime skips them
+        std::string t = read_text(join(d, fn)); CheatScan s; s.out = &out; s.on = &on; s.file = fn;
+        cheats_text_scan(t.data(), t.size(), ts, cheat_scan_cb, &s);
+    }
+    return out;
+}
+void cheats_write(const std::vector<CheatEntry>& c) {
+#ifdef _WIN32
+    const char* eol = "\r\n";
+#else
+    const char* eol = "\n";
+#endif
+    std::string s, key = cheats_builtin_key();
+    for (auto& e : c) if (e.on && !e.master) s += (e.builtin ? key : std::string()) + e.name + eol;
+    make_dirs(cheats_dir()); write_text(join(cheats_dir(), "enabled.txt"), s);
+}
+// one cheat file into the cheats folder: 1 added, 0 already there (same contents), -1 refused (err says why). Atmosphere names
+// every file <build id>.txt, so another file of that name gets " (2)" and so on
+static int cheat_import_one(const std::string& src, const std::string& bid, std::string* err) {
+    std::string name = src.substr(src.find_last_of("\\/") + 1);
+    if (!txt_name(name)) { *err = "Pick a cheat .txt file"; return -1; }
+    if (lower(name) == "enabled.txt") { *err = "That name is used by the game: rename the file first"; return -1; }
+    if (other_version(name, bid)) { *err = "These cheats are for another version of the game (yours is " + bid + ", version 2.1.0)"; return -1; }
+    std::string t = read_text(src); CheatScan s;
+    if (cheats_text_scan(t.data(), t.size(), 0, cheat_scan_cb, &s) == 0 || s.words == 0) { *err = name + " has no cheats in it ([name] lines with codes)"; return -1; }
+    std::string d = cheats_dir(), stem = name.substr(0, name.size() - 4), dst; make_dirs(d);
+    for (int k = 1; k < 1000 && dst.empty(); k++) {
+        std::string p = join(d, k == 1 ? name : stem + " (" + std::to_string(k) + ").txt");
+        if (!file_exists(p)) dst = p; else if (read_text(p) == t) return 0;
+    }
+    if (dst.empty() || !write_text(dst, t)) { *err = "Could not copy " + name; return -1; }
+    return 1;
+}
+bool cheat_import(const std::string& src, std::string* err, int* added) {
+    std::string bid = game_build_id(); int n = 0;
+    if (dir_exists(src)) {   // a folder: every cheat file in it, Atmosphere (contents/<title>/cheats) and Yuzu (load/<title>/<name>/cheats) layouts too
+        int same = 0, refused = 0; std::string why;
+        walk_files(src, [&](const std::string& r) {
+            std::string leaf = r.substr(r.find_last_of("\\/") + 1); if (!txt_name(leaf) || lower(leaf) == "enabled.txt") return;
+            std::string e; int k = cheat_import_one(join(src, r), bid, &e); if (k > 0) n++; else if (k == 0) same++; else { refused++; why = e; } });
+        if (!n && !same) { *err = refused ? why : "No cheat .txt files in that folder"; return false; }
+    } else { int k = cheat_import_one(src, bid, err); if (k < 0) return false; n = k; }
+    if (added) *added = n;
+    return true;
+}
+
+static void page_cheats() {
+    page_title("CHEATS", "The built-in cheats are made for this PC version. Atmosphere cheat files (.txt) for version 2.1.0 work when they change "
+               "values (energy, missiles, items); ones that patch the game's code do nothing here, unless the patch is one of the built-in cheats. "
+               "Changes apply when the game starts, and the in-game menu (F1) switches them while you play.");
+    static std::vector<CheatEntry> ch; if (g_focus_first || ch.empty()) ch = cheats_list();
+    bool changed = false, files = false;
+    section("BUILT-IN");
+    for (size_t i = 0; i < ch.size(); i++) {
+        if (!ch[i].builtin) { files = true; continue; }
+        bool on = ch[i].on; if (row_bool(fmt("##chb%d", (int)i).c_str(), ch[i].name.c_str(), &on)) { ch[i].on = on; changed = true; }
+        help_text(ch[i].help.c_str());
+    }
+    section("FROM CHEAT FILES");
+    if (!files) row_text("Cheat files", "None yet: add a file or folder below.", C_DIM);
+    for (size_t i = 0; i < ch.size(); i++) {
+        if (ch[i].builtin) continue;
+        const char* tag = ch[i].kind == 2 ? "PATCHES GAME CODE: NO EFFECT" : ch[i].kind == 1 ? "AS A BUILT-IN CHEAT" : nullptr;
+        if (ch[i].master) { row_text(ch[i].name.c_str(), ch[i].kind == 2 ? "Master code: patches game code, no effect" : "Always on (master code)", C_DIM); continue; }
+        bool on = ch[i].on; if (row_bool(fmt("##ch%d", (int)i).c_str(), ch[i].name.c_str(), &on, tag)) { ch[i].on = on; changed = true; }
+    }
+    if (changed) { cheats_write(ch); flash("Cheats saved"); }
+    section("ADD");
+    std::string err; int added = 0;
+    if (row_button("##chadd", "Add a cheat file (.txt)", "CHOOSE")) {
+        std::string f = pick_file(g_hwnd, "Choose a cheat file", L"Cheats", L"*.txt");
+        if (!f.empty()) { if (cheat_import(f, &err, &added)) { ch = cheats_list(); flash(added ? "Cheat file added" : "That cheat file is already there"); } else flash(err); } }
+    if (row_button("##chfold", "Add a folder of cheat files", "CHOOSE")) {
+        std::string d = pick_folder(g_hwnd, "Choose a folder with cheat files (.txt)");
+        if (!d.empty()) { if (cheat_import(d, &err, &added)) { ch = cheats_list(); flash(added ? fmt("%d cheat file%s added", added, added == 1 ? "" : "s") : "Those cheat files are already there"); } else flash(err); } }
+    if (row_button("##chdir", "Open the cheats folder", "OPEN")) { make_dirs(cheats_dir()); open_in_explorer(cheats_dir()); }
+    help_text(fmt("Cheat files are Atmosphere's format: a [name] line, then its codes. Files named after another version's build id are skipped "
+                  "(this one is %s). A folder is searched for .txt files, Atmosphere's and Yuzu's cheat folders included.", game_build_id().c_str()).c_str());
 }
 
 static void page_audio() {
@@ -902,15 +1005,17 @@ static void sidebar(ImVec2 a, ImVec2 b) {
     dl->AddRectFilled(a, b, IM_COL32(3, 6, 12, 200)); dl->AddLine({b.x - 1, a.y}, {b.x - 1, b.y}, C_LINE);
     logo(dl, {a.x + S(30), a.y + S(36)}, S(30), false);
     float y = a.y + S(160);
+    // the page list above the two lines at the bottom: rows get a little closer on short windows (1280x720)
+    float step = std::min(S(54), (b.y - S(60) - y) / (float)(PG_COUNT - PG_PLAY)), rh = step - S(2);
     for (int p = PG_PLAY; p < PG_COUNT; p++) {
-        ImVec2 r0(a.x, y), r1(b.x, y + S(52));
-        ImGui::SetCursorScreenPos(r0); bool c = ui_button(fmt("##nav%d", p).c_str(), {b.x - a.x, S(52)}); bool h = ImGui::IsItemHovered();
+        ImVec2 r0(a.x, y), r1(b.x, y + rh);
+        ImGui::SetCursorScreenPos(r0); bool c = ui_button(fmt("##nav%d", p).c_str(), {b.x - a.x, rh}); bool h = ImGui::IsItemHovered();
         bool sel = g_page == p;
         if (sel) { dl->AddRectFilledMultiColor(r0, r1, IM_COL32(226, 30, 44, 70), IM_COL32(226, 30, 44, 0), IM_COL32(226, 30, 44, 0), IM_COL32(226, 30, 44, 70)); dl->AddRectFilled(r0, {r0.x + S(5), r1.y}, C_RED); }
         else if (h) dl->AddRectFilled(r0, r1, IM_COL32(64, 214, 255, 18));
-        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.95f, {a.x + S(34), y + S(14)}, sel ? IM_COL32(255, 255, 255, 255) : C_DIM, PAGE_NAMES[p]);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.95f, {a.x + S(34), y + (rh - ImGui::GetFontSize() * 0.95f) / 2}, sel ? IM_COL32(255, 255, 255, 255) : C_DIM, PAGE_NAMES[p]);
         if (c) go((Page)p);
-        y += S(54);
+        y += step;
     }
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.62f, {a.x + S(30), b.y - S(56)}, C_DIM, "SwitchRecomp by MZ Labs  \xC2\xB7  ImGui");
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.62f, {a.x + S(30), b.y - S(36)}, C_DIM, "Game version 2.1.0");
@@ -938,7 +1043,8 @@ static void frame() {
         switch (g_page) {
         case PG_PLAY: page_play(); break; case PG_DISPLAY: page_display(); break; case PG_GRAPHICS: page_graphics(); break;
         case PG_GAMEPLAY: page_gameplay(); break; case PG_AUDIO: page_audio(); break; case PG_CONTROLS: page_controls(); break;
-        case PG_MODS: page_mods(); break; case PG_ADVANCED: page_advanced(); break; case PG_ABOUT: page_about(); break; default: break;
+        case PG_MODS: page_mods(); break; case PG_CHEATS: page_cheats(); break; case PG_ADVANCED: page_advanced(); break;
+        case PG_ABOUT: page_about(); break; default: break;
         }
         ImGui::EndChild();
         ImGui::End();
@@ -1070,6 +1176,20 @@ static void test_tick() {
         std::string err; bool ok = pt_pack_import(getenv("SWR_FE_PT_IMPORT"), &err);
         const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
         if (f) { fprintf(f, "pt_import ok=%d installed=%d err=%s\n", ok, pt_pack_installed(), err.c_str()); fclose(f); }
+        g_quit = true;
+    }
+    if ((getenv("SWR_FE_CHEAT_IMPORT") || getenv("SWR_FE_CHEAT_ON")) && g_frame_no == 30) {   // Cheats page: imports a file or folder as
+        // the buttons do, switches the named ones on ("a|b", as the switches do), writes the list, quits
+        std::string err; int added = 0; bool ok = true;
+        if (getenv("SWR_FE_CHEAT_IMPORT")) ok = cheat_import(getenv("SWR_FE_CHEAT_IMPORT"), &err, &added);
+        std::vector<CheatEntry> ch = cheats_list();
+        if (const char* on = getenv("SWR_FE_CHEAT_ON")) { std::string s = std::string("|") + on + "|";
+            for (auto& e : ch) if (s.find("|" + e.name + "|") != std::string::npos) e.on = true;
+            cheats_write(ch); ch = cheats_list(); }
+        const char* rp = getenv("SWR_FE_RESULT"); FILE* f = rp ? fopen(rp, "a") : nullptr;
+        if (f) { fprintf(f, "cheat_import ok=%d added=%d err=%s\n", ok, added, err.c_str());
+            for (auto& e : ch) fprintf(f, "cheat builtin=%d master=%d kind=%d on=%d file=%s name=%s\n", e.builtin, e.master, e.kind, e.on, e.file.c_str(), e.name.c_str());
+            fclose(f); }
         g_quit = true;
     }
 #ifdef _WIN32
