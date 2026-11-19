@@ -252,6 +252,14 @@ static std::string hw_line() {
 
 // ---------------------------------------------------------------- setup screens
 static std::string g_base, g_update;
+// the compiler setup will use: the bundled Clang when it is there (setup falls back to GCC if it doesn't start), else GCC
+static const char* bundled_compiler() {
+#ifdef _WIN32
+    return file_exists(join(join(join(P.recompiler, "clang"), "bin"), "clang.exe")) ? "Clang" : "GCC";
+#else
+    return file_exists(join(join(join(P.recompiler, "clang"), "bin"), "clang")) ? "Clang" : "GCC";
+#endif
+}
 static void setup_screen(ImVec2 a, ImVec2 b) {
     ImGui::SetNextWindowPos(a); ImGui::SetNextWindowSize({b.x - a.x, b.y - a.y});
     ImGui::Begin("##setup", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -261,9 +269,9 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
     ImGui::SetCursorScreenPos({x0, a.y + S(230)});
     ImGui::BeginChild("##sbody", {colw, b.y - a.y - S(330)}, 0, ImGuiWindowFlags_NoBackground);
     if (g_ss == SS_WELCOME) {
-        page_title("FIRST-TIME SETUP", "This turns your own copy of Metroid Dread (version 2.1.0) into a native PC game. "
-                   "Nothing from Nintendo is included: you provide the game files, and they are compiled on this PC with the bundled GCC. "
-                   "It takes a few minutes and needs about 7 GB of free space here.");
+        page_title("FIRST-TIME SETUP", fmt("This turns your own copy of Metroid Dread (version 2.1.0) into a native PC game. "
+                   "Nothing from Nintendo is included: you provide the game files, and they are compiled on this PC with the bundled %s. "
+                   "It takes a few minutes and needs about 7 GB of free space here.", bundled_compiler()).c_str());
         section("YOUR GAME FILES");
         std::string bl = g_base.empty() ? "CHOOSE" : g_base; if (bl.size() > 48) bl = "..." + bl.substr(bl.size() - 45);
         if (row_button("##base", "Game folder (with exefs and romfs)", bl.c_str())) { std::string p = pick_folder(g_hwnd, "Choose your extracted Metroid Dread folder"); if (!p.empty()) { g_base = p; set("setup_base", p); } }
@@ -992,7 +1000,8 @@ static void page_about() {
         {"zlib (Jean-loup Gailly, Mark Adler)", "Fast game-data decompression (zlib licence)."},
         {"libvpx (WebM project)", "VP9 video playback (BSD)."},
         {"OpenH264 (Cisco)", "H.264 video decoding (BSD)."},
-        {"GCC, binutils, MinGW-w64, Python", "The bundled compiler used by setup (GPL / LGPL with runtime exception, ZPL, PSF)."},
+        {"Clang / LLVM (llvm-mingw on Windows)", "The bundled compiler setup uses first (Apache-2.0 with LLVM exception)."},
+        {"GCC, binutils, MinGW-w64, Python", "The bundled GCC setup falls back to, and the Python that runs setup (GPL / LGPL with runtime exception, ZPL, PSF)."},
         {"Ryujinx and yuzu projects", "Public documentation of the Switch audio renderer and services, used as reference."},
     };
     for (auto& c : cs) { section(c.who); help_text(c.what); }

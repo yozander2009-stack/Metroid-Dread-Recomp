@@ -113,7 +113,8 @@ setup compiles it on your PC. No Nintendo files, keys or firmware are included.
    folder with "exefs" and "romfs" inside (an emulator's "Extract RomFS" / "Extract ExeFS" with the update installed
    gives this too). This program does not dump or decrypt anything itself.
 2. Start "Metroid Dread.exe". The first time it asks for that folder (and, if you extracted the update separately,
-   the update folder), checks every file against the 2.1.0 file list and compiles the game with the bundled GCC.
+   the update folder), checks every file against the 2.1.0 file list and compiles the game with the bundled Clang
+   (GCC when Clang is not there).
    That takes a few minutes and about 7 GB of space next to the EXE (less when your game files are on the same drive).
 3. Then it opens to the Play screen. Settings, controller set-up, mods and save backups are all there.
    In the game, F1 (or the Home / Guide button) opens the menu; most settings change right away.
@@ -363,7 +364,7 @@ SOURCE_README = """# Metroid Dread — recompiled for PC
 
 One Windows EXE that sets up, configures and runs a native PC build of **your own** copy of Metroid Dread 2.1.0.
 It is the SwitchRecomp runtime (by MZ Labs) with a Metroid Dread front end built in: first-run setup that compiles
-the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
+the game with a bundled Clang (GCC as a fallback), a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
 
 ![The Play screen](docs/images/play-screen.png)
 

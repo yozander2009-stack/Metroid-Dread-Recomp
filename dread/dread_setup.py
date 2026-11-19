@@ -2,7 +2,7 @@
 
 Checks the player's own game files (v2.1.0 only), assembles the RomFS (base + update layered, then every file checked
 against the 2.1.0 manifest), translates the ExeFS to C with SwitchRecomp, applies the verified Dread patches, compiles
-with the bundled GCC and links Metroid Dread_code.dll next to the EXE.
+with the bundled Clang (else GCC) and links Metroid Dread_code.dll next to the EXE.
 
 Output protocol on stdout (one line each): '@@P <percent> <stage>|<detail>' progress, '@@E <message>' failure,
 '@@D' done; everything else is log. Every stage leaves a marker so a stopped or failed setup continues where it was.
@@ -391,8 +391,6 @@ def main():
                 log('Regenerated: %d of %d files unchanged (their compiled objects are reused)' % (kept, len(files)))
             with open(gen_marker, 'w') as f:
                 f.write(gen_key)
-        P(31, 'Compiling the game', '0 of %d files' % len(files))
-
         # Clang when it is bundled (recompiler/clang: llvm-mingw on Windows, an LLVM build on Linux), else GCC. MEASURED
         # 2026-11-07: the game code from Clang ran ~6% faster in effect-heavy scenes on the PC, no slower on the Steam
         # Deck, and compiled about 2x (Deck) to 4x (PC, per core) faster. SWR_SETUP_GCC=1 = GCC even when Clang is there
@@ -425,6 +423,8 @@ def main():
                 raise Fail('gcc not found. Install it first (bash linux/install_deps.sh).')
             if not os.path.isfile(LX_COMPAT):
                 raise Fail('linux/lx_compat.h is missing next to the recompiler.')
+        log('Compiler: %s (%s)' % (cc_name(cc), cc))
+        P(31, 'Compiling the game with ' + cc_name(cc), '0 of %d files' % len(files))
         objs = compile_all(files, cc, build, a.jobs, 31, 96)
         P(96, 'Linking', os.path.basename(dll))
         switchrecomp.check_writable(dll)
@@ -453,6 +453,11 @@ def main():
     except Exception as e:
         import traceback; traceback.print_exc(file=sys.stdout)
         print('@@E Unexpected error: %s' % e, flush=True); sys.exit(4)
+
+
+def cc_name(cc):
+    """'Clang' or 'GCC', for the progress line and the log"""
+    return 'Clang' if 'clang' in os.path.basename(cc).lower() else 'GCC'
 
 
 def compile_all(files, cc, build, jobs, p0, p1):
@@ -504,7 +509,7 @@ def compile_all(files, cc, build, jobs, p0, p1):
         with lock:
             st['n'] += 1; st['bytes'] += sizes[src]
             n = st['n']
-            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling the game',
+            P(p0 + (p1 - p0) * st['bytes'] / total, 'Compiling the game with ' + cc_name(cc),
               '%d of %d files%s' % (n, len(files), (', %d reused from before' % st['reused']) if st['reused'] else ''))
             log('  compiled %s (%d/%d, %.0f s)' % (os.path.basename(src), n, len(files), time.time() - t0))
         return obj

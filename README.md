@@ -10,7 +10,7 @@
 
 One Windows EXE that sets up, configures and runs a native PC build of **your own** copy of Metroid Dread 2.1.0.
 It is the SwitchRecomp runtime (by MZ Labs) with a Metroid Dread front end built in: first-run setup that compiles
-the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
+the game with a bundled Clang (GCC as a fallback), a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
 
 ![The Play screen](docs/images/play-screen.png)
 
