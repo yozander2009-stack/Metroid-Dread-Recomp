@@ -296,6 +296,9 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
         setup_unlock();
         if (done && !running && g_ss == SS_RUNNING) {
             g_ss = SS_DONE; g_focus_first = true;
+#ifdef _WIN32
+            update_rebuilt();   // else the REBUILD banner stayed and PLAY rebuilt once more (Linux: fe_update_linux.cpp)
+#endif
             if (!g_old.empty()) { MigrateResult m = migrate(g_old[0], g_mig_settings, g_mig_saves, g_mig_mods, g_mig_caches); g_mig_report = m.text; g_ini.load(P.ini); }
             if (g_first_install && !g_restart_after_setup && (g_old.empty() || !g_mig_settings) && g_ini.get("auto_set", "").empty()) {
                 Rec r = recommend(); apply_rec(r); g_ini.save(); g_ini_dirty = false;   // CONTINUE reloads the .ini from disk
@@ -1120,9 +1123,10 @@ static unsigned long long test_input() {
     while (*p) { char* e; long f = strtol(p, &e, 10); if (*e != ':') break; unsigned long long b = strtoull(e + 1, &e, 16); if (f > g_frame_no) break; v = b; p = *e == ',' ? e + 1 : e; }
     return v;
 }
+static int g_shot_at = -1;   // a frame a test hook picked (SWR_FE_AUTOUPDATE=play): shot as well, with SWR_FE_SHOT_PREFIX
 static void test_shot() {
-    static const char* s = getenv("SWR_FE_SHOTS"); static const char* pre = getenv("SWR_FE_SHOT_PREFIX"); if (!s || !pre) return;
-    bool want = false; for (const char* p = s; *p;) { char* e; long f = strtol(p, &e, 10); if (f == g_frame_no) want = true; if (e == p) break; p = *e == ',' ? e + 1 : e; }
+    static const char* s = getenv("SWR_FE_SHOTS"); static const char* pre = getenv("SWR_FE_SHOT_PREFIX"); if (!pre) return;
+    bool want = g_frame_no == g_shot_at; for (const char* p = s ? s : ""; *p;) { char* e; long f = strtol(p, &e, 10); if (f == g_frame_no) want = true; if (e == p) break; p = *e == ',' ? e + 1 : e; }
     if (!want) return;
 #ifdef _WIN32
     ID3D11Texture2D* bb; g_sc->GetBuffer(0, IID_PPV_ARGS(&bb)); D3D11_TEXTURE2D_DESC d; bb->GetDesc(&d);
@@ -1222,6 +1226,13 @@ static void test_tick() {
         else if (u.stage == UP_INSTALLED && u.restart) { g_do_restart = true; g_quit = true; }
         if (g_ss == SS_DONE && g_restart_after_setup) { g_do_restart = true; g_quit = true; }
         if ((u.stage == UP_CURRENT || u.stage == UP_ERROR || g_ss == SS_FAILED) && !g_job.running) g_quit = true;   // test over
+        // =play: after a rebuild that needs no restart, CONTINUE, a shot of the Play page 60 frames later (with
+        // SWR_FE_SHOT_PREFIX), then PLAY 30 frames after that
+        static int back = -1;
+        if (!strcmp(getenv("SWR_FE_AUTOUPDATE"), "play") && g_ss == SS_DONE && !g_restart_after_setup) {
+            if (back < 0 && g_page == PG_SETUP) { g_ini.load(P.ini); go(PG_PLAY); back = g_frame_no; g_shot_at = back + 60; }
+            else if (back >= 0 && g_frame_no == back + 90 && g_page == PG_PLAY) play_or_rebuild();
+        }
     }
     static const char* rp = getenv("SWR_FE_RESULT"); static double last;
     static unsigned last_nav;

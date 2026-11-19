@@ -135,6 +135,7 @@ UpdateState update_state();
 std::string update_notes_url();
 bool update_rollback(std::string* msg, bool* rebuild, bool* restart);
 bool update_restart();   // starts the game's EXE again; the caller then exits
+void update_rebuilt();   // Windows: a setup finished, so an update's pending rebuild is done (Linux: rebuild_pending)
 // the recompiler's game patches (dread_v210_patches.json) differ from the ones the installed game code was built with
 // (setup.ok's patches_sha256): a newer package unpacked or started by hand, without the updater
 bool code_patches_stale();

@@ -243,6 +243,9 @@ void update_install_async() {
     ulock(); bool ok = g_us.stage == UP_AVAILABLE; uunlock(); if (!ok) return;
     CloseHandle(CreateThread(nullptr, 0, install_thread, nullptr, 0, nullptr));
 }
+// a setup finished: the game code is built with the recompiler installed now, so an update's REBUILD is done (no banner,
+// and PLAY starts the game). A changed EXE still asks for its restart
+void update_rebuilt() { ulock(); if (g_us.stage == UP_REBUILD) { g_us.stage = UP_INSTALLED; g_us.rebuild = false; } uunlock(); }
 
 // ---------------------------------------------------------------- undo (the newest update_backup folder back in place)
 // only the folders installs made (<version>-<date>); "undone-*" holds what an undo replaced and is never restored
