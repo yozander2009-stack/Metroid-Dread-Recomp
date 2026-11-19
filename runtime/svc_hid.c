@@ -46,7 +46,11 @@ static void stick_post(i32* x, i32* y, int left){
   float fx=(float)*x, fy=(float)*y, m=sqrtf(fx*fx+fy*fy);
   if(g_opt_stick_sens!=100 && m>0){ float nm=m*(float)g_opt_stick_sens/100.f; if(nm>32767.f) nm=32767.f; float k=nm/m; fx*=k; fy*=k; m=nm; }
   if(left && g_opt_snapback){ static float dx, dy; static u64 strong_ns, rel_ns; extern u64 plat_ns(void); u64 now=plat_ns();
-    if(rel_ns && now-rel_ns<60000000ull && m>0 && (fx*dx+fy*dy)/m < -0.3f){ fx=fy=0; m=0; }   /* the bounce: centred */
+    /* #54: a bounce stays below ~80% tilt; a real turn reaches full tilt and passes at once */
+    if(rel_ns && now-rel_ns<60000000ull && m>0 && m<26000.f && (fx*dx+fy*dy)/m < -0.3f){ fx=fy=0; m=0; }   /* the bounce: centred */
+    /* #54: a fast spring-back can go from a strong push straight to the other side between two readings, never near the
+       centre: an opposite reading below full tilt right after a strong push is that bounce */
+    else if(!rel_ns && strong_ns && now-strong_ns<150000000ull && m>0 && m<26000.f && (fx*dx+fy*dy)/m < -0.3f){ rel_ns=now; fx=fy=0; m=0; }
     else if(m>16000.f){ dx=fx/m; dy=fy/m; strong_ns=now; rel_ns=0; }
     else if(m<6000.f && strong_ns && now-strong_ns<150000000ull && !rel_ns) rel_ns=now; }
   *x=(i32)lrintf(fx); *y=(i32)lrintf(fy); }
