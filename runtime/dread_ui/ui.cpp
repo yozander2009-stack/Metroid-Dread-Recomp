@@ -582,6 +582,7 @@ static std::vector<Opt> build_options() {
     I("stick_deadzone", "Input", "Controls", "Stick dead zone", LIVE_YES, "7000", 0, 20000, 500, "");
     I("stick_sensitivity", "Input", "Controls", "Stick sensitivity", LIVE_YES, "100", 25, 300, 5, "Percent. Above 100 the sticks reach full tilt sooner; below 100 they move more finely.");
     B("stick_snapback", "Input", "Controls", "Ignore stick snap-back", LIVE_YES, "0", "When you let go of the left stick it can spring past the centre for a moment, which turns Samus around. On: that bounce is ignored for 60 ms after a release.");
+    B("dpad_movement", "Input", "Controls", "Move with the D-pad", LIVE_YES, "0", "On: the D-pad moves Samus too (exact 8-way movement; the left stick still works), and the D-pad's own buttons move to the right stick.");
     I("rumble", "Input", "Controls", "Rumble strength", LIVE_YES, "100", 0, 200, 10, "0 = off. Up to 200% boosts soft effects.");
     B("hd_rumble", "Input", "Controls", "HD rumble", LIVE_RESTART, "1", "Switch Pro Controller, Joy-Con and DualSense play the game's own vibration, left and right, like on the Switch.");
     B("deck_trackpad_rumble", "Input", "Controls", "Steam Deck trackpad rumble", LIVE_RESTART, "0", "On a Steam Deck the trackpads also play the game's vibration frequencies, on top of the normal grip rumble.");

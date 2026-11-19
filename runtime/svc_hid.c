@@ -50,6 +50,16 @@ static void stick_post(i32* x, i32* y, int left){
     else if(m>16000.f){ dx=fx/m; dy=fy/m; strong_ns=now; rel_ns=0; }
     else if(m<6000.f && strong_ns && now-strong_ns<150000000ull && !rel_ns) rel_ns=now; }
   *x=(i32)lrintf(fx); *y=(i32)lrintf(fy); }
+/* [Input] dpad_movement (#79): the D-pad moves Samus like a fully tilted left stick (the stick still works; a held D-pad
+   direction wins), and the D-pad's own buttons move to the right stick, which Dread doesn't use otherwise */
+int g_opt_dpad_move=0;
+static void dpad_move(u64* btn, i32* lx, i32* ly, i32 rx, i32 ry){
+  const u64 D=0xF000ull;   /* Left 12, Up 13, Right 14, Down 15 */
+  u64 b=*btn; int dx=(int)((b>>14)&1)-(int)((b>>12)&1), dy=(int)((b>>13)&1)-(int)((b>>15)&1);
+  if(dx||dy){ i32 v=(dx&&dy)? 23170 : 32767; *lx=dx*v; *ly=dy*v; }
+  b&=~D;
+  if(rx<-16000) b|=1ull<<12; if(ry>16000) b|=1ull<<13; if(rx>16000) b|=1ull<<14; if(ry<-16000) b|=1ull<<15;
+  *btn=b; }
 void hid_update(void){
   if(!g_hid_shm) return;
   i32 lx=g_pad.lx, ly=g_pad.ly, rx=g_pad.rx, ry=g_pad.ry;   /* copies: g_pad is only rewritten by the next input poll */
@@ -58,6 +68,7 @@ void hid_update(void){
   g_samp++;
   u8 st[0x28]; memset(st,0,sizeof st);
   u64 btn=g_pad.buttons;
+  if(g_opt_dpad_move) dpad_move(&btn,&lx,&ly,rx,ry);
   /* sticks also set the stick-direction button bits, like hw */
   if(lx<-16000) btn|=1ull<<16; if(ly>16000) btn|=1ull<<17; if(lx>16000) btn|=1ull<<18; if(ly<-16000) btn|=1ull<<19;
   if(rx<-16000) btn|=1ull<<20; if(ry>16000) btn|=1ull<<21; if(rx>16000) btn|=1ull<<22; if(ry<-16000) btn|=1ull<<23;
