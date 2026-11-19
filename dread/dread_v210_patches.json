@@ -608,13 +608,13 @@
   },
   "code_154.c": {
    "pristine": "64bcbf7ee0b0fcc6b042888bad3ec0c4bbd32c8690832de1b41171cd8d2fbe8d",
-   "result": "170d0bf452280c19d646d1268ce1bde7abf8b8295ace0ea78e3b8f8e126fc080",
+   "result": "c503c89a8cdecaf75c0eafc4072a65f0d9c9e60cafc6dcd68c2bee574ce75360",
    "hunks": [
     [
      30096,
      30096,
      [
-      "extern volatile unsigned swr_cheats;   /* SWR cheats (code_071.c): 1 infinite missiles, 2 infinite power bombs */"
+      "extern volatile unsigned swr_cheats;   /* SWR cheats (code_071.c): 1 infinite missiles, 2 infinite power bombs, 8 infinite HP */"
      ]
     ],
     [
@@ -626,11 +626,27 @@
      ]
     ],
     [
+     31902,
+     31903,
+     [
+      " if(swr_cheats&8u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD energy number shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
+      " else { c->x[30]=152996952; F_923E640(c,153347648); if(UNLIKELY(c->pc!=152996952)) return; }"
+     ]
+    ],
+    [
      32724,
      32725,
      [
       " if(swr_cheats&2u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD power-bomb counter shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
       " else { c->x[30]=152999336; F_923E640(c,153347648); if(UNLIKELY(c->pc!=152999336)) return; }"
+     ]
+    ],
+    [
+     33966,
+     33967,
+     [
+      " if(swr_cheats&8u){ WR8(c->x[0],0xAA); WR8(c->x[0]+1,0); }   /* SWR cheats: the HUD energy number (while it counts) shows the infinity sign (U+00AA, which svc_fs.c maps to it) */",
+      " else { c->x[30]=153002772; F_923E640(c,153347648); if(UNLIKELY(c->pc!=153002772)) return; }"
      ]
     ]
    ]

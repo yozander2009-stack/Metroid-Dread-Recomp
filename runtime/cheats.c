@@ -24,7 +24,7 @@ volatile u64 g_cheat_keys;   /* the buttons the game gets (backends), for the ke
 enum { CB_MISSILES=1, CB_PBOMBS=2, CB_EMMI=4, CB_HP=8 };   /* swr_cheats bits, as the game patches read them */
 /* the built-in cheats: game patches (bits), or a cheat in the usual dmnt format that the VM below runs (code) */
 static const struct { const char* name; const char* help; u32 bits; const char* code; } BUILTIN[]={
-  {"Infinite HP","Samus's energy never goes down.",CB_HP,NULL},
+  {"Infinite HP","Samus's energy never goes down; the HUD shows an infinity sign for it.",CB_HP,NULL},
   {"Infinite ammo","Missiles and power bombs never go down; the HUD shows an infinity sign for them.",CB_MISSILES|CB_PBOMBS,NULL},
   {"E.M.M.I. counter always succeeds","An E.M.M.I. that catches Samus always lets her break free.",CB_EMMI,NULL},
   /* while B (jump) is held: Samus's vertical speed set to 1536 up (a jump starts at ~1600). Samus as the game finds her
