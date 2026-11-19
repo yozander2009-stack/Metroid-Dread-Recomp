@@ -326,7 +326,10 @@ static bool ov_begin(int w, int h, bool vk) {
     }
     static bool was_open;
     if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; } return false; }
-    if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; } }
+    if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; }
+        // #78: the key-up of the Esc that closed the menu last time never reached it (closed menus get no keys), so ImGui
+        // still held Esc and its key repeat "pressed" it on the first frame: the menu closed again at once
+        if (ImGui::GetCurrentContext()) ImGui::GetIO().ClearInputKeys(); }
     if (!g_ready) {
         IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO(); io.ConfigDebugHighlightIdConflicts = false;   /* no programmer popups for players */
         io.IniFilename = nullptr; io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -361,7 +364,7 @@ static bool ov_begin(int w, int h, bool vk) {
     nav_frame_begin();
     g_row.pad_left = left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow); g_row.pad_right = right || ImGui::IsKeyPressed(ImGuiKey_RightArrow); g_row.confirm = act[NAV_CONFIRM];
     if (g_rev.active && act[NAV_CONFIRM]) { g_rev.active = false; g_row.confirm = false; }   // "Keep these display settings?": confirm keeps
-    bool close = act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    bool close = act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape, false);   // a held Esc closes once, never by key repeat
     if (close) { if (g_rev.active) revert_display(); else { Lock k; g_q.open = false; } }
     if (act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) { g_tab = (g_tab + NTABS - 1) % NTABS; g_tab_changed = true; }
     if (act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) { g_tab = (g_tab + 1) % NTABS; g_tab_changed = true; }
