@@ -1225,14 +1225,13 @@ static void test_tick() {
         else if (u.stage == UP_REBUILD && g_ss != SS_RUNNING && g_ss != SS_DONE && g_ss != SS_FAILED) start_rebuild(u.restart);
         else if (u.stage == UP_INSTALLED && u.restart) { g_do_restart = true; g_quit = true; }
         if (g_ss == SS_DONE && g_restart_after_setup) { g_do_restart = true; g_quit = true; }
-        if ((u.stage == UP_CURRENT || u.stage == UP_ERROR || g_ss == SS_FAILED) && !g_job.running) g_quit = true;   // test over
         // =play: after a rebuild that needs no restart, CONTINUE, a shot of the Play page 60 frames later (with
-        // SWR_FE_SHOT_PREFIX), then PLAY 30 frames after that
-        static int back = -1;
-        if (!strcmp(getenv("SWR_FE_AUTOUPDATE"), "play") && g_ss == SS_DONE && !g_restart_after_setup) {
+        // SWR_FE_SHOT_PREFIX), then PLAY 30 frames after that (on Linux the stage is CURRENT by then: not "test over")
+        static const bool play = !strcmp(getenv("SWR_FE_AUTOUPDATE"), "play"); static int back = -1;
+        if (play && g_ss == SS_DONE && !g_restart_after_setup) {
             if (back < 0 && g_page == PG_SETUP) { g_ini.load(P.ini); go(PG_PLAY); back = g_frame_no; g_shot_at = back + 60; }
             else if (back >= 0 && g_frame_no == back + 90 && g_page == PG_PLAY) play_or_rebuild();
-        }
+        } else if ((u.stage == UP_CURRENT || u.stage == UP_ERROR || g_ss == SS_FAILED) && !g_job.running) g_quit = true;   // test over
     }
     static const char* rp = getenv("SWR_FE_RESULT"); static double last;
     static unsigned last_nav;
