@@ -507,11 +507,13 @@ static int create_device(void) {
         /* SWR: SWR_VK_DYN_VI (the .ini's vk_dynamic_vertex_input, snxvk_glue.c) 0 = off, else on where the device
            has it. MEASURED 2026-11-12 on a Ryzen 9900X's Radeon iGPU (RDNA2, AMD driver 26.10.1): with it OFF, the first block
            linear deswizzle of a render target (blocklinear.c, from vk_rt_reload) faults reading 0xbeefdead...
-           (device lost); with it on, the same dispatch runs. SWR_VK_NO_DYN_VI=1 = off (tests) */
+           (device lost); with it on, the same dispatch runs. SWR_VK_NO_DYN_VI=1 = off (tests).
+           Unset (auto): off on AMD's Windows driver. Players on an RX 6700 (RDNA2, 26.10.1) and an AMD handheld
+           got a black picture with it on (every render target black before present) and a working game with it
+           off (#68, 2026-11-19/20) */
         {
             const char* dv = getenv("SWR_VK_DYN_VI");
-            int want = !(dv && *dv == '0');
-            (void)p12;
+            int want = dv && (*dv == '0' || *dv == '1') ? *dv == '1' : p12.driverID != VK_DRIVER_ID_AMD_PROPRIETARY;
             g_vk.has_dyn_vi = snx_vk_extensions_has(&e, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) && want &&
                               !getenv("SWR_VK_NO_DYN_VI");
         }
