@@ -305,7 +305,7 @@
   },
   "code_017.c": {
    "pristine": "edff8041521b19ebad7c077414343c68aa513e72abf1f1bf65f73746e895270c",
-   "result": "0f1b59f6f7672a5222d5c3a8f27db9f9501f32451f1006af91a93783274fb447",
+   "result": "53b7022c75e2b2e359f69b5afe012a5ad7345614980ecacf9206d544e754ffa0",
    "hunks": [
     [
      30139,
@@ -317,14 +317,24 @@
       "   capped at 16:9: the vertical view stays the 16:9 one and the extra width shows more to the sides. 16:9 and narrower",
       "   (16:10) are unchanged. SWR_NO_HORPLUS=1 = the game's own (tests) */",
       "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
-      "static int swr_horplus(void){ static int v=-1; if(v<0){ char b[8]; v= !(GetEnvironmentVariableA(\"SWR_NO_HORPLUS\",b,sizeof b)>0 && b[0]=='1'); } return v; }"
+      "static int swr_horplus(void){ static int v=-1; if(v<0){ char b[8]; v= !(GetEnvironmentVariableA(\"SWR_NO_HORPLUS\",b,sizeof b)>0 && b[0]=='1'); } return v; }",
+      "/* SWR 16:10 camera (GitHub #83): a picture narrower than 16:9 (16:10) keeps the 16:9 width and sees more vertically, but",
+      "   the gameplay camera worked out its view from that taller picture: in rooms whose camera limits fit the 16:9 view but",
+      "   not the taller one it jumped to another part of the room and lost Samus (every jump in the Artaria cave right of the",
+      "   first save station). The game camera's own logic (the 9 calls below, each after F_8137FA0 = the active game camera)",
+      "   now gets the 16:9 aspect; the renderer's 6 calls keep the real one, so the picture keeps its extra height. Like the",
+      "   Z-57 spawn check in F_821E588, the game plays as at 16:9 and the extra rows only show more. Bit-by-bit MEASURED:",
+      "   each of the calls returning to 8769E90 / 876A788 / 8A263D0 alone stopped the jump, render-side calls change the picture */",
+      "static int swr_cam_logic(u64 ra){ switch(ra){ case 0x87691A4: case 0x8769E90: case 0x876A5A8: case 0x876A788: case 0x879D5AC:",
+      "  case 0x8A263D0: case 0x8E99F34: case 0x90EA48C: case 0x90EA5A4: return 1; } return 0; }"
      ]
     ],
     [
      30155,
      30155,
      [
-      " if(swr_horplus() && c->v[8].f[0]>16.0f/9.0f) c->v[8].f[0]=16.0f/9.0f;   /* SWR Hor+: the aspect capped at 16:9 */"
+      " if(swr_horplus() && c->v[8].f[0]>16.0f/9.0f) c->v[8].f[0]=16.0f/9.0f;   /* SWR Hor+: the aspect capped at 16:9 */",
+      " if(c->v[8].f[0]<16.0f/9.0f && swr_cam_logic(c->x[30])) c->v[8].f[0]=16.0f/9.0f;   /* SWR 16:10 camera (#83): game camera logic sees 16:9 */"
      ]
     ],
     [
