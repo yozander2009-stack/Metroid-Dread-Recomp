@@ -630,16 +630,15 @@ static const volatile int* g_particle_pool;   /* swr_particle_pool in a patched 
 static void pace_update(void){
   static int off=-1; if(off<0) off=getenv("SWR_NO_SLOWMO_60")!=NULL;
   int f=g_opt_fps;
-  if(f>60 && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
+  if((f>60 || f==0) && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
     if(o && o<(1ull<<40)){ float s; u32 v=*(volatile u32*)GP(o+1700); memcpy(&s,&v,4);
-      /* hit pauses (a hit or a counter: scale 0.01 for ~0.2 s, 10 times in a 9-minute owner session) also dip below
-         0.95; pacing those at 60 showed as frame drops. Only slow motion that lasts 0.4 s gets 60: the E.M.M.I.
-         slide (~2 s) still does, just 0.4 s later, which only extends the slow motion it is already in */
-      static int was; static u64 t0; int slow= s>0.0f && s<0.95f; u64 now=plat_ns();
-      if(!slow) t0=0; else if(!t0) t0=now;
-      int lng= slow && now-t0>=400000000ull;
-      if(lng!=was){ was=lng; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",lng?"lasting":"ended",s,lng?60:f); }
-      if(lng) f=60; } }
+      /* From its first frame, and with no cap too. A 0.4 s delay (so brief hit pauses, scale 0.01 for ~0.2 s, stayed at
+         the cap) broke the E.M.M.I. counter and slide again: its first 0.4 s ran at the cap with tiny steps, so the
+         slide fell short at 240 and Samus died right after it at 144 (#85, #80, #21; v0.5.10 log: "lasting" only
+         0.4 s in). A hit pause now shows at 60 for its ~0.2 s, while the game itself is nearly frozen */
+      static int was; int slow= s>0.0f && s<0.95f;
+      if(slow!=was){ was=slow; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",slow?"on":"ended",s,slow?60:f); }
+      if(slow) f=60; } }
   /* Particle vertex-buffer pool. The game keeps 1024 of them (F_8173910; [GOT+2000] -> the count in use; F_8174D48 takes
      array[count] and count++ with no check). Effects take them every frame and give them back about 0.5 s later, so at
      high frame rates more are in use at once, and an acid splash takes ~125 in one or two frames. At 1025 the game read
@@ -715,7 +714,9 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
     }
   }
   /* while recording keep at least the 60 cap, uncapped + per-frame logic = sped up video */
-  if(g_opt_fps || g_rec_active){ int pf=g_pace_fps; u64 per= pace_period_ns(pf);
+  /* no cap (fps_limit=0): g_pace_fps is 0 unless pace_update asks for 60 or 120 (slow motion, the particle pool): the
+     presentation pacers stay off then, so this limiter does it */
+  if(g_opt_fps || g_rec_active || g_pace_fps){ int pf=g_pace_fps; u64 per= pace_period_ns(pf);
     if(g_opt_fps>=10 && g_opt_fps<60){ static int said; if(!said){ said=1; WARN("fps_limit=%d would run the game at %d%% speed (one game step per image): using 60\n",g_opt_fps,g_opt_fps*100/60); } }
     u64 now=plat_ns(); u64 next=g_last_present+per;
     if(limiter_trace){trace_begin=now;trace_deadline=next;}
