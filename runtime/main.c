@@ -1018,13 +1018,12 @@ int swr_main(int argc, char** argv){
 #endif
 #endif
   ini_open(ini);
-#if !defined(_WIN32)
-  { /* no Play screen here (Linux; on Windows the Play screen sets them, or the old Python launcher does): the [Launcher] choices the game reads as switches, as fe.cpp sets them on Windows.
-       A switch already in the environment (tests, a launch script) is left as it is */
+  { /* the [Launcher] choices the game reads as switches, as the Play screen (fe.cpp) sets them: also when the game starts
+       without the Play screen (Linux, a shortcut or script straight to the game), so loading screens and cutscenes run at
+       the frame rate however it was started. A switch already in the environment (tests, a launch script) is left as it is */
     static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"},{"loading_60fps","SWR_LOADING_60","1"},{"cutscenes_60fps","SWR_CUTSCENES_60FPS","1"}};
     if((!getenv("SWR_TEST_SCRIPT") && !getenv("SWR_TEST_EXIT_FRAME")) || getenv("SWR_TEST_LAUNCHER"))   /* SWR_TEST_LAUNCHER=1: tests that start like a player */
       for(int i=0;i<3;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
-#endif
   for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"-v")) g_verbose=2; else if(!strncmp(argv[i],"--",2) && strchr(argv[i],'=')){ char k[256]; const char* opt=argv[i]+2; const char* e=strchr(opt,'='); size_t key_len=(size_t)(e-opt); if(key_len>=sizeof k) continue; memcpy(k,opt,key_len); k[key_len]=0; const char* value=e+1; backend_ini(k,value); if(!strcmp(k,"docked")) g_opt_docked=atoi(value); if(!strcmp(k,"fps_limit")) g_opt_fps=atoi(value); else if(!strcmp(k,"profile")) g_opt_prof=atoi(value); } }
 #ifdef _WIN32
   { /* AMD graphics: Native Vulkan, unless the player chose OpenGL or Vulkan output anyway (the Play screen and the menu
