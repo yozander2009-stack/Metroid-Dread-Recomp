@@ -820,26 +820,37 @@ static int cam_setup(void) {
     LOG("taa (vulkan): camera motion for the whole picture\n");
     return 1;
 }
-static int cam_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
-    u32 c = g_mv.cur, p = c ^ 1;
+/* SWR: what may wait for the GPU (vk_finish: the depth view, the set's images) done BEFORE the caller takes the frame's
+   command buffer: vk_finish submits it, and AMD's driver crashed (null read in vkCmdPipelineBarrier2) when cam_pass
+   went on recording into the submitted one (first TAA frame, Radeon iGPU, 2026-11-20). NVIDIA let it pass */
+static int cam_off(void) {
     static int off = -1;
     if (off < 0) off = getenv("SWR_TAA_NO_CAMMV") != NULL;
-    float iv[16];
-    if (off || !g_mv.camok[c] || !g_mv.camok[p] || !cam_inv4(g_mv.cam[c] + 16, iv) || !cam_setup()) return 0;
+    return off;
+}
+static void cam_prepare(Surf* z) {
+    u32 c = g_mv.cur, p = c ^ 1;
+    if (cam_off() || !g_mv.camok[c] || !g_mv.camok[p] || !cam_setup()) return;
     VkImageView zv = depth_view(z);
-    if (!zv) return 0;
-    if (g_mv.ckey_z != zv || g_mv.ckey_mv != g_dl.mv_view) {
-        vk_finish(); /* the set may be in use by a frame in flight */
-        VkDescriptorImageInfo d[2] = {{g_mv.csamp, zv, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_dl.mv_view, VK_IMAGE_LAYOUT_GENERAL}};
-        VkWriteDescriptorSet wr[2] = {
-            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 0, .descriptorCount = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &d[0]},
-            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 1, .descriptorCount = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &d[1]}};
-        vkUpdateDescriptorSets(g_vk.dev, 2, wr, 0, NULL);
-        g_mv.ckey_z = zv;
-        g_mv.ckey_mv = g_dl.mv_view;
-    }
+    if (!zv || (g_mv.ckey_z == zv && g_mv.ckey_mv == g_dl.mv_view)) return;
+    vk_finish(); /* the set may be in use by a frame in flight */
+    VkDescriptorImageInfo d[2] = {{g_mv.csamp, zv, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_dl.mv_view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &d[0]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_mv.cset, .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &d[1]}};
+    vkUpdateDescriptorSets(g_vk.dev, 2, wr, 0, NULL);
+    g_mv.ckey_z = zv;
+    g_mv.ckey_mv = g_dl.mv_view;
+}
+static int cam_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
+    u32 c = g_mv.cur, p = c ^ 1;
+    float iv[16];
+    if (cam_off() || !g_mv.camok[c] || !g_mv.camok[p] || !cam_inv4(g_mv.cam[c] + 16, iv) || !cam_setup()) return 0;
+    /* cam_prepare made the view and the set; one that still differs would need a vk_finish here, which would leave cb
+       submitted: skip this frame's camera motion instead */
+    if (g_dl.zimg != z->img || !g_dl.zview || g_mv.ckey_z != g_dl.zview || g_mv.ckey_mv != g_dl.mv_view) return 0;
     float pcs[28];
     const float* vq = g_mv.cam[p] + 16;
     for (int i = 0; i < 4; i++)
@@ -1007,6 +1018,7 @@ static void evaluate_dlss(Surf* t, Surf* z) {
         g_dl.reset = 1;
         LOG("dlss: DLSS feature %ux%u created (quality value %d)\n", w, h, quality_value());
     }
+    cam_prepare(z); /* before the command buffer: it may vk_finish */
     cb = vk_cmd();
     /* inputs readable by compute, the output writable */
     vk_surf_use(cb, t, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
@@ -1274,6 +1286,7 @@ static void evaluate_taa(Surf* t, Surf* z) {
         vkUpdateDescriptorSets(g_vk.dev, 3, wr, 0, NULL);
         memcpy(g_taa.set_key[c], key, sizeof key);
     }
+    cam_prepare(z); /* before the command buffer: it may vk_finish */
     VkCommandBuffer cb = vk_cmd();
     int have_mv = mv_for_fragment(cb, z, w, h);
     vk_surf_use(cb, t, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);

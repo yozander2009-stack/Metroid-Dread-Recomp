@@ -278,6 +278,14 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS* e){
 
 static LONG WINAPI veh_fatal(EXCEPTION_POINTERS* e){
   DWORD c=e->ExceptionRecord->ExceptionCode;
+  { /* SWR_VEH_AV_LOG=1 (tests): first-chance access violations named, for a crash another handler ends without ours
+       (a video driver's own filter) */
+    static int on=-1; static volatile LONG n; if(on<0) on=getenv("SWR_VEH_AV_LOG")!=NULL;
+    if(on && c==EXCEPTION_ACCESS_VIOLATION && InterlockedIncrement(&n)<=64){ char m[260]; u64 off=0;
+      if(!plat_module_of((void*)e->ContextRecord->Rip,m,sizeof m,&off)) snprintf(m,sizeof m,"?");
+      logf_(0,"first-chance access violation in %s +%llx, address %p, thread %lu\n",m,(unsigned long long)off,
+            (void*)e->ExceptionRecord->ExceptionInformation[1],(unsigned long)GetCurrentThreadId());
+      log_runtime_callers(e->ContextRecord); log_flush(); } }
   if(c==EXCEPTION_STACK_OVERFLOW || c==0xC0000409 /* STACK_BUFFER_OVERRUN / fastfail */ || c==0xC0000374 /* heap corruption */){
     static volatile LONG once; if(!InterlockedExchange(&once,1)){ logf_(0,"\n*** Shutdown: exception %08lx at %p (stack/heap) ***\n",(unsigned long)c,(void*)e->ContextRecord->Rip); } }
   return EXCEPTION_CONTINUE_SEARCH; }
