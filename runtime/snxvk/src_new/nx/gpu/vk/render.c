@@ -3178,6 +3178,22 @@ retry:
     if (k->nbind)
         rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize,
                                   g_vk.has_dynamic_stride && !g_vk.has_dyn_vi ? pl->stride : NULL);
+    if (g_vk_ck_draws < 0) g_vk_ck_draws = getenv("SWR_VK_CK_DRAWS") != NULL;
+    if (g_vk_ck_draws) { /* SWR test: which draw a lost device was in, and the first draws' vertex input */
+        static u32 nd;
+        nd++;
+        vk_ck(cb, VK_CK_DRAW, nd, k->nbind, k->nattr, (u32)(uintptr_t)k->vs);
+        if (nd <= 400) {
+            LOG("ckdraw %u: binds %u attrs %u topo %u\n", nd, k->nbind, k->nattr, (u32)k->topo_class);
+            for (u32 i = 0; i < k->nbind; i++)
+                LOG("ckdraw %u:  bind %u buf %p off %llu size %llu stride %llu keystride %u divisor %u key %08x\n", nd, i,
+                    (void*)vbuf[i], (unsigned long long)voff[i], (unsigned long long)vsize[i],
+                    (unsigned long long)pl->stride[i], (u32)k->bind[i].stride, (u32)k->bind[i].divisor, pl->key[i]);
+            for (u32 i = 0; i < k->nattr; i++)
+                LOG("ckdraw %u:  attr loc %u bind %u fmt %u off %u\n", nd, (u32)k->attr[i].loc, (u32)k->attr[i].binding,
+                    (u32)k->attr[i].format, (u32)k->attr[i].offset);
+        }
+    }
     if (g_vk.has_dyn_vi) { /* SWR: the layout the key describes, set when it differs from the last draw's */
         VkVertexInputBindingDescription2EXT vib[33];
         VkVertexInputAttributeDescription2EXT via[32];

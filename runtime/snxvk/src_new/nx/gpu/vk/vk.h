@@ -123,7 +123,8 @@ void vk_note_dispatch(const char* what, u64 id, u32 gx, u32 gy, u32 gz);
    whose earlier work had all finished, written into a host buffer; after a loss the work between the two is what the
    GPU was still busy with. NVIDIA (VK_NV_device_diagnostic_checkpoints) with SWR_VK_CHECKPOINTS=1; SWR_VK_MARKERS=1
    asks for AMD's markers on another vendor that has them; SWR_VK_NO_MARKERS=1: none. vk_device_fault_log prints them */
-enum { VK_CK_DESWIZZLE, VK_CK_DISPATCH, VK_CK_PASS, VK_CK_SUBMIT, VK_CK_KINDS };
+enum { VK_CK_DESWIZZLE, VK_CK_DISPATCH, VK_CK_PASS, VK_CK_SUBMIT, VK_CK_DRAW, VK_CK_KINDS };
+extern int g_vk_ck_draws; /* SWR_VK_CK_DRAWS=1 (tests): a marker per draw, and the first draws' vertex bindings logged */
 extern int g_vk_markers; /* 0 none, 1 AMD buffer markers, 2 NVIDIA checkpoints */
 void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d);
 #define vk_ck(cb, kind, a, b, c, d)                                                                                    \

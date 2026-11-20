@@ -220,7 +220,10 @@ static const char* const g_ck_names[VK_CK_KINDS] = {
     "game compute dispatch (groups x, y, z, program)",
     "rendering pass (width, height, color targets, depth)",
     "end of a submission (number)",
+    "draw (number, vertex bindings, attributes, vertex program hash low)",
 };
+int g_vk_ck_draws = -1;
+static int g_dyn_vi_auto_off; /* SWR: dynamic vertex input left off by auto on AMD (create_device) */
 void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d) {
     if (!g_ck) return;
     u32 at = __atomic_fetch_add(&g_ck_next, 1, __ATOMIC_RELAXED);
@@ -232,6 +235,9 @@ void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d) {
     e->c = c;
     e->d = d;
     e->queue = q;
+    if (g_vk_ck_draws > 0 && at < 400)
+        LOG("ckmark %u (%s): %s: %u, %u, %u, %u\n", at + 1, q ? "compute" : "graphics",
+            kind < VK_CK_KINDS ? g_ck_names[kind] : "?", a, b, c, d);
     if (g_vk_markers == 1) { /* marker values are at + 1: 0 is "none yet" */
         rec_CmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ck_buf, q * 8, at + 1);
         rec_CmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ck_buf, q * 8 + 4, at + 1);
@@ -239,6 +245,7 @@ void vk_ck_(VkCommandBuffer cb, u32 kind, u32 a, u32 b, u32 c, u32 d) {
         rec_CmdSetCheckpointNV(cb, (const void*)(uintptr_t)((u64)at + 1));
 }
 static void ck_init(void) {
+    g_vk_ck_draws = getenv("SWR_VK_CK_DRAWS") != NULL;
     if (!g_vk_markers) return;
     g_ck = calloc(CK_RING, sizeof *g_ck);
     if (!g_ck) {
@@ -337,6 +344,10 @@ void vk_ck_report(const char* why) {
 
 void vk_device_fault_log(void) {
     static int done;
+    if (g_dyn_vi_auto_off && g_vk_present < 600) {
+        void snxvk_dyn_vi_failed(void); /* SWR: snxvk_glue.c, the next start uses dynamic vertex input */
+        snxvk_dyn_vi_failed();
+    }
     vk_ck_report("the device was lost");
     for (u32 i = 0; i < 16; i++) {
         u32 j = (g_dn_at + i) & 15;
@@ -510,10 +521,13 @@ static int create_device(void) {
            (device lost); with it on, the same dispatch runs. SWR_VK_NO_DYN_VI=1 = off (tests).
            Unset (auto): off on AMD's Windows driver. Players on an RX 6700 (RDNA2, 26.10.1) and an AMD handheld
            got a black picture with it on (every render target black before present) and a working game with it
-           off (#68, 2026-11-19/20) */
+           off (#68, 2026-11-19/20). The 9900X iGPU above still loses the device with it off (2026-11-20, current
+           main, in the first frame's present work): a loss within the first presents with auto's "off" makes the
+           next start use it on (vk_device_fault_log -> snxvk_dyn_vi_failed, snxvk_glue.c) */
         {
             const char* dv = getenv("SWR_VK_DYN_VI");
             int want = dv && (*dv == '0' || *dv == '1') ? *dv == '1' : p12.driverID != VK_DRIVER_ID_AMD_PROPRIETARY;
+            g_dyn_vi_auto_off = !want && !(dv && *dv == '0') && !getenv("SWR_VK_NO_DYN_VI");
             g_vk.has_dyn_vi = snx_vk_extensions_has(&e, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) && want &&
                               !getenv("SWR_VK_NO_DYN_VI");
         }

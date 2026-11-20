@@ -219,6 +219,13 @@ void snxvk_ini(const char* v){
 static char g_dyn_vi[8];
 void snxvk_ini_dyn_vi(const char* v){ snprintf(g_dyn_vi,sizeof g_dyn_vi,"%s",v? v : ""); }
 
+/* device.c: the device was lost early with dynamic vertex input left off by auto (AMD): the next start uses it.
+   Called on the way to fatal(): only a small file write */
+void snxvk_dyn_vi_failed(void){
+  char p[1100]; snprintf(p,sizeof p,"%sdynamic_vertex_input_on.txt",g_cachedir); FILE* f=fopen(p,"wb");
+  if(f){ fputs("Native Vulkan lost the GPU device without dynamic vertex input: it is used from the next start on.\n",f); fclose(f); }
+  LOG("vulkan_native: the device was lost without dynamic vertex input: the next start uses it (%s)\n",p); }
+
 void snxvk_gpu_init(void){ if(g_snxvk_want) snxv_gpu_init(); }
 
 /* the window is up (backend_win32): start Vulkan; 0 = it can't, the caller falls back to OpenGL */
@@ -229,6 +236,9 @@ int snxvk_start(void){
   snprintf(g_cachedir,sizeof g_cachedir,"%svulkan_native/",g_exedir); plat_mkdir(g_cachedir);
   { extern int g_opt_vsync; snxvk_opt_vsync=g_opt_vsync; }
   if((g_dyn_vi[0]=='0' || g_dyn_vi[0]=='1') && !getenv("SWR_VK_DYN_VI")) plat_setenv("SWR_VK_DYN_VI",g_dyn_vi[0]=='1'? "1" : "0");
+  else if(!getenv("SWR_VK_DYN_VI")){ /* auto: a GPU that lost the device with it off last time (snxvk_dyn_vi_failed) */
+    char p[1100]; snprintf(p,sizeof p,"%sdynamic_vertex_input_on.txt",g_cachedir); FILE* f=fopen(p,"rb");
+    if(f){ fclose(f); plat_setenv("SWR_VK_DYN_VI","1"); LOG("vulkan_native: dynamic vertex input on (this GPU lost the device without it: %s)\n",p); } }
   { /* our .ini into their g_settings (swr_settings.c). Their recording thread records the frame's commands; DLSS and
        HDR output record directly into the frame's command buffer, so with either on it stays off (both need a restart) */
     extern void snxv_swr_settings_set(float resolution, int shadows, int vsync, int anisotropy, int recording_thread);
