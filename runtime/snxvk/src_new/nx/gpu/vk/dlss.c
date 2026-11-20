@@ -550,8 +550,13 @@ static struct {
     VkImageView ckey_z, ckey_mv;
 } g_mv;
 
+/* SWR: TAA uses the camera's motion only (cam_pass): the per-draw replay paired some draws with another object's last
+   position on shot frames, so every shot made the textures jump (MEASURED 2026-11-19 on OpenGL, the same pairing).
+   DLAA keeps the per-draw motion. SWR_TAA_DRAWMV=1 (tests): TAA with the per-draw motion too */
+static int taa_draw_mv(void) { static int v = -1; if (v < 0) v = getenv("SWR_TAA_DRAWMV") ? atoi(getenv("SWR_TAA_DRAWMV")) : 0; return v; }
+static int per_draw_mv(void) { return snxvk_dlss_mode > 0 || (g_opt_taa && taa_draw_mv()); }
 int vk_dlss_xfb_wanted(void);
-int vk_dlss_xfb_wanted(void) { return g_mv.on && (snxvk_dlss_mode > 0 || g_opt_taa); }
+int vk_dlss_xfb_wanted(void) { return g_mv.on && per_draw_mv(); }
 
 static VkPhysicalDeviceTransformFeedbackFeaturesEXT g_xfb_feat;
 const void* vk_dlss_device_chain(const void* next);
@@ -641,8 +646,21 @@ int vk_dlss_capture_begin(VkCommandBuffer cb, Surf* zt, int depth_write, int pla
                           const VkViewport* vp, const VkViewport* vpj);
 int vk_dlss_capture_begin(VkCommandBuffer cb, Surf* zt, int depth_write, int plain_tris, u64 key, u32 verts,
                           const VkViewport* vp, const VkViewport* vpj) {
-    if (!g_mv.on || !depth_write || !plain_tris || !scene_draw(zt) || verts < 3) return 0;
+    if (!depth_write || !plain_tris || !scene_draw(zt) || verts < 3) return 0;
     u32 c = g_mv.cur, bytes = verts / 3 * 3 * 16;
+    if (!g_mv.camok[c] && g_mv.cb3 && g_mv.cb3_size >= 128) { /* SWR: this frame's camera, from its first depth-writing scene draw */
+        float m[32];
+        gmem_read(g_mv.cb3, m, sizeof m);
+#define AZ(x) (fabsf(x) < 1e-5f)
+        if (m[0] > 0.05f && m[5] > 0.05f && AZ(m[1]) && AZ(m[2]) && AZ(m[3]) && AZ(m[4]) && AZ(m[6]) && AZ(m[7]) && AZ(m[8]) && AZ(m[9]) &&
+            AZ(m[12]) && AZ(m[13]) && AZ(m[15]) && fabsf(m[14] + 1.f) < 1e-4f && AZ(m[28]) && AZ(m[29]) && AZ(m[30]) && fabsf(m[31] - 1.f) < 1e-4f) {
+            memcpy(g_mv.cam[c], m, sizeof m);
+            g_mv.camclip[c] = g_mv.cb3clip;
+            g_mv.camok[c] = 1;
+        }
+#undef AZ
+    }
+    if (!g_mv.on || !per_draw_mv()) return 0;
     if (g_mv.nrec[c] >= XFB_MAX || g_mv.used[c] + bytes > XFB_BYTES || !xfb_buffers()) return 0;
     XfbRec* r = &g_mv.rec[c][g_mv.nrec[c]];
     r->key = key;
@@ -658,18 +676,6 @@ int vk_dlss_capture_begin(VkCommandBuffer cb, Surf* zt, int depth_write, int pla
     vkCmdBeginTransformFeedbackEXT(cb, 0, 0, NULL, NULL);
     g_mv.nrec[c]++;
     g_mv.used[c] += bytes;
-    if (!g_mv.camok[c] && g_mv.cb3 && g_mv.cb3_size >= 128) { /* SWR: this frame's camera, from its first captured draw */
-        float m[32];
-        gmem_read(g_mv.cb3, m, sizeof m);
-#define AZ(x) (fabsf(x) < 1e-5f)
-        if (m[0] > 0.05f && m[5] > 0.05f && AZ(m[1]) && AZ(m[2]) && AZ(m[3]) && AZ(m[4]) && AZ(m[6]) && AZ(m[7]) && AZ(m[8]) && AZ(m[9]) &&
-            AZ(m[12]) && AZ(m[13]) && AZ(m[15]) && fabsf(m[14] + 1.f) < 1e-4f && AZ(m[28]) && AZ(m[29]) && AZ(m[30]) && fabsf(m[31] - 1.f) < 1e-4f) {
-            memcpy(g_mv.cam[c], m, sizeof m);
-            g_mv.camclip[c] = g_mv.cb3clip;
-            g_mv.camok[c] = 1;
-        }
-#undef AZ
-    }
     return 1;
 }
 void vk_dlss_capture_end(VkCommandBuffer cb);
@@ -862,6 +868,7 @@ static int cam_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
 /* the frame's captured draws again into the motion-vector image; 0 when there was nothing to draw */
 static u32 mv_pass(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
     u32 c = g_mv.cur, p = c ^ 1, drawn = 0;
+    if (!per_draw_mv()) return cam_pass(cb, z, w, h) ? 2 : 0; /* TAA: the camera's motion only; the image stays in GENERAL */
     if (!g_mv.on || !g_mv.nrec[c] || !mv_pipeline(z->f.vk)) return 0;
     { static int said; if (said < 3) { said++;
         LOG("dlss: motion-vector pass %ux%u, depth %llx image %ux%u scaled %ux%u layers %u format %d stencil %d samples-type %d\n", w, h,
@@ -1246,7 +1253,7 @@ static int mv_for_fragment(VkCommandBuffer cb, Surf* z, u32 w, u32 h) {
 
 static void evaluate_taa(Surf* t, Surf* z) {
     u32 w = t->sw, h = t->sh;
-    if (!g_mv.on) return taa_fail("motion vectors (no transform feedback)");
+    if (!g_mv.on && per_draw_mv()) return taa_fail("motion vectors (no transform feedback)");
     if (!ensure_images(w, h)) return taa_fail("motion-vector image");
     if (!taa_layout()) return taa_fail("layout");
     if (!taa_pipeline(t->f.vk)) return taa_fail("pipeline");
@@ -1298,16 +1305,16 @@ static void evaluate_taa(Surf* t, Surf* z) {
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_taa.layout, 0, 1, &g_taa.set[c], 0, NULL);
-    static float sw = -1, rj, vw; /* as OpenGL's TAA_FS; SWR_TAA_STATIC_W / _REJ / _VELW (tests) */
-    if (sw < 0) {
-        const char* e = getenv("SWR_TAA_STATIC_W"); sw = e ? (float)atof(e) : 0.025f;
-        e = getenv("SWR_TAA_REJ"); rj = e ? (float)atof(e) : 8.0f;
-        e = getenv("SWR_TAA_VELW"); vw = e ? (float)atof(e) : 0.3f;
+    static float ws = -1, wf; /* weight of this frame where nothing moves / for fast motion, as OpenGL's TAA_FS; SWR_TAA_W=a,b (tests) */
+    if (ws < 0) {
+        const char* e = getenv("SWR_TAA_W");
+        ws = 0.05f; wf = 0.25f;
+        if (e) sscanf(e, "%f,%f", &ws, &wf);
     }
-    float pc[12] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, 0.1f, sw, /* w: weight where nothing moves; + the jitter */
+    float pc[12] = {g_taa.valid ? 1.0f : 0.0f, have_mv ? 1.0f : 0.0f, ws, wf,
                     g_mv.jit_used ? g_mv.jx : 0.0f, g_mv.jit_used ? g_mv.jy : 0.0f,
-                    4.0f / (g_mv.jamp * g_mv.jamp > 1e-4f ? g_mv.jamp * g_mv.jamp : 1e-4f), /* kernel narrows with the jitter */
-                    0.0f, rj, vw, 0.0f, 0.0f};
+                    g_mv.jamp > 0.01f ? 4.0f / (g_mv.jamp * g_mv.jamp) : 0.0f, /* kernel narrows with the jitter; 0 = the pixel itself */
+                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     vkCmdPushConstants(cb, g_taa.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
@@ -1397,6 +1404,17 @@ extern int g_opt_ao;
 static int g_ao_failed;
 static struct { float p00, p11, a, b; int clip, ok; } g_vproj;
 static int dl_ao(void) { return g_opt_ao > 0 && !g_ao_failed; }
+/* the G-buffer's normal target (as OpenGL, gpu_gl.c g_ao_nrm): Dread's G-buffer draws write 5 targets, rt2 the normals
+   (RGBA8, n*0.5+0.5, view space) and rt4 the ambient light (R11G11B10F) that AO darkens. render.c reports each draw's
+   targets; 0 = none seen: normals from depth */
+static u64 g_ao_nrm;
+void vk_ao_gbuf(u32 n, Surf** rt);
+void vk_ao_gbuf(u32 n, Surf** rt) {
+    if (!g_opt_ao || n < 5 || !rt[0] || !rt[2] || !rt[4]) return;
+    if ((rt[2]->fkey & 0xFFFF) == 0xD5 /* A8B8G8R8 unorm */ && (rt[4]->fkey & 0xFFFF) == DL_FMT_R11G11B10F && rt[0]->w >= 640 &&
+        rt[2]->w == rt[0]->w && rt[2]->h == rt[0]->h && rt[4]->w == rt[0]->w && rt[4]->h == rt[0]->h)
+        g_ao_nrm = rt[2]->gva;
+}
 
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip);
 void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip) {
@@ -1422,18 +1440,18 @@ void vk_ao_note(Surf* zt, u64 cb3, u32 cb3_size, u32 clip) {
 }
 
 static struct {
-    VkImage vz, ao, ed, fin;
-    VmaAllocation vz_mem, ao_mem, ed_mem, fin_mem;
-    VkImageView vz_all, vz_lv[5], ao_v, ed_v, fin_v;
+    VkImage vz, ao, ed, fin, mid;
+    VmaAllocation vz_mem, ao_mem, ed_mem, fin_mem, mid_mem;
+    VkImageView vz_all, vz_lv[5], ao_v, ed_v, fin_v, mid_v;
     u32 w, h, n;
     VkSampler samp;
     VkDescriptorSetLayout dsl[4];
     VkPipelineLayout pl[4];
     VkDescriptorPool pool;
-    VkDescriptorSet set[4];
+    VkDescriptorSet set[5]; /* pre, main, denoise 1 (ao -> mid), apply, denoise 2 (mid -> fin) */
     VkPipeline pre, mainp, den, app;
     VkFormat app_fmt;
-    VkImageView key_z, key_t;
+    VkImageView key_z, key_t, key_n;
     int ready;
 } g_aov;
 
@@ -1462,8 +1480,8 @@ static VkPipeline ao_compute(const u32* words, size_t n, VkPipelineLayout pl) {
 static int ao_setup(void) {
     if (g_aov.pre) return 1;
     const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    VkDescriptorType t0[6] = {S, I, I, I, I, I}, t1[3] = {S, I, I}, t2[4] = {S, S, I, S}, t3[1] = {S};
-    g_aov.dsl[0] = ao_dsl(t0, 6); g_aov.dsl[1] = ao_dsl(t1, 3); g_aov.dsl[2] = ao_dsl(t2, 4); g_aov.dsl[3] = ao_dsl(t3, 1);
+    VkDescriptorType t0[6] = {S, I, I, I, I, I}, t1[4] = {S, I, I, S}, t2[4] = {S, S, I, S}, t3[1] = {S};
+    g_aov.dsl[0] = ao_dsl(t0, 6); g_aov.dsl[1] = ao_dsl(t1, 4); g_aov.dsl[2] = ao_dsl(t2, 4); g_aov.dsl[3] = ao_dsl(t3, 1);
     u32 pcs[4] = {16, 48, 16, 16};
     for (int i = 0; i < 4; i++) {
         if (!g_aov.dsl[i]) return 0;
@@ -1472,11 +1490,12 @@ static int ao_setup(void) {
                                          .pSetLayouts = &g_aov.dsl[i], .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
         if (vkCreatePipelineLayout(g_vk.dev, &li, NULL, &g_aov.pl[i]) != VK_SUCCESS) return 0;
     }
-    VkDescriptorPoolSize sizes[2] = {{S, 9}, {I, 10}};
-    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4, .poolSizeCount = 2, .pPoolSizes = sizes};
+    VkDescriptorPoolSize sizes[2] = {{S, 12}, {I, 12}};
+    VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 5, .poolSizeCount = 2, .pPoolSizes = sizes};
     if (vkCreateDescriptorPool(g_vk.dev, &pci, NULL, &g_aov.pool) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout lay[5] = {g_aov.dsl[0], g_aov.dsl[1], g_aov.dsl[2], g_aov.dsl[3], g_aov.dsl[2]};
     VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = g_aov.pool,
-                                      .descriptorSetCount = 4, .pSetLayouts = g_aov.dsl};
+                                      .descriptorSetCount = 5, .pSetLayouts = lay};
     if (vkAllocateDescriptorSets(g_vk.dev, &ai, g_aov.set) != VK_SUCCESS) return 0;
     VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
                                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -1529,12 +1548,14 @@ static void ao_free(void) {
     VkImageView* vs[8] = {&g_aov.vz_all, &g_aov.vz_lv[0], &g_aov.vz_lv[1], &g_aov.vz_lv[2], &g_aov.vz_lv[3], &g_aov.vz_lv[4], &g_aov.ao_v, &g_aov.ed_v};
     for (int i = 0; i < 8; i++) if (*vs[i]) { vkDestroyImageView(g_vk.dev, *vs[i], NULL); *vs[i] = VK_NULL_HANDLE; }
     if (g_aov.fin_v) { vkDestroyImageView(g_vk.dev, g_aov.fin_v, NULL); g_aov.fin_v = VK_NULL_HANDLE; }
+    if (g_aov.mid_v) { vkDestroyImageView(g_vk.dev, g_aov.mid_v, NULL); g_aov.mid_v = VK_NULL_HANDLE; }
     if (g_aov.vz) vmaDestroyImage(g_vk.vma, g_aov.vz, g_aov.vz_mem);
     if (g_aov.ao) vmaDestroyImage(g_vk.vma, g_aov.ao, g_aov.ao_mem);
     if (g_aov.ed) vmaDestroyImage(g_vk.vma, g_aov.ed, g_aov.ed_mem);
     if (g_aov.fin) vmaDestroyImage(g_vk.vma, g_aov.fin, g_aov.fin_mem);
-    g_aov.vz = g_aov.ao = g_aov.ed = g_aov.fin = VK_NULL_HANDLE;
-    g_aov.key_z = g_aov.key_t = VK_NULL_HANDLE;
+    if (g_aov.mid) vmaDestroyImage(g_vk.vma, g_aov.mid, g_aov.mid_mem);
+    g_aov.vz = g_aov.ao = g_aov.ed = g_aov.fin = g_aov.mid = VK_NULL_HANDLE;
+    g_aov.key_z = g_aov.key_t = g_aov.key_n = VK_NULL_HANDLE;
     g_aov.ready = 0;
 }
 static int ao_image(u32 w, u32 h, u32 levels, VkImage* img, VmaAllocation* mem) {
@@ -1557,32 +1578,37 @@ static int ao_images(u32 w, u32 h) {
     vk_finish();
     ao_free();
     if (!ao_image(w, h, 5, &g_aov.vz, &g_aov.vz_mem) || !ao_image(w, h, 1, &g_aov.ao, &g_aov.ao_mem) ||
-        !ao_image(w, h, 1, &g_aov.ed, &g_aov.ed_mem) || !ao_image(w, h, 1, &g_aov.fin, &g_aov.fin_mem)) { ao_free(); return 0; }
+        !ao_image(w, h, 1, &g_aov.ed, &g_aov.ed_mem) || !ao_image(w, h, 1, &g_aov.fin, &g_aov.fin_mem) ||
+        !ao_image(w, h, 1, &g_aov.mid, &g_aov.mid_mem)) { ao_free(); return 0; }
     g_aov.vz_all = ao_view(g_aov.vz, 0, 5);
     for (u32 l = 0; l < 5; l++) g_aov.vz_lv[l] = ao_view(g_aov.vz, l, 1);
     g_aov.ao_v = ao_view(g_aov.ao, 0, 1); g_aov.ed_v = ao_view(g_aov.ed, 0, 1); g_aov.fin_v = ao_view(g_aov.fin, 0, 1);
+    g_aov.mid_v = ao_view(g_aov.mid, 0, 1);
     g_aov.w = w; g_aov.h = h;
     return 1;
 }
-static void ao_sets(VkImageView zv, VkImageView tv) {
-    VkDescriptorImageInfo d[14] = {
+static void ao_sets(VkImageView zv, VkImageView tv, VkImageView nv) {
+    VkDescriptorImageInfo d[19] = {
         {g_aov.samp, zv, VK_IMAGE_LAYOUT_GENERAL},
         {VK_NULL_HANDLE, g_aov.vz_lv[0], VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.vz_lv[1], VK_IMAGE_LAYOUT_GENERAL},
         {VK_NULL_HANDLE, g_aov.vz_lv[2], VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.vz_lv[3], VK_IMAGE_LAYOUT_GENERAL},
         {VK_NULL_HANDLE, g_aov.vz_lv[4], VK_IMAGE_LAYOUT_GENERAL},
         {g_aov.samp, g_aov.vz_all, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, g_aov.ao_v, VK_IMAGE_LAYOUT_GENERAL},
-        {VK_NULL_HANDLE, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, nv ? nv : g_aov.vz_all, VK_IMAGE_LAYOUT_GENERAL},
         {g_aov.samp, g_aov.ao_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL},
-        {VK_NULL_HANDLE, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL},
-        {g_aov.samp, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, tv, VK_IMAGE_LAYOUT_GENERAL}};
-    const int setof[14] = {0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 2}, bind[14] = {0, 1, 2, 3, 4, 5, 0, 1, 2, 0, 1, 2, 0, 3};
-    VkWriteDescriptorSet wr[14];
-    for (int i = 0; i < 14; i++)
+        {VK_NULL_HANDLE, g_aov.mid_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, tv, VK_IMAGE_LAYOUT_GENERAL},
+        {g_aov.samp, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL},
+        {g_aov.samp, g_aov.mid_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, g_aov.ed_v, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_aov.fin_v, VK_IMAGE_LAYOUT_GENERAL}, {g_aov.samp, tv, VK_IMAGE_LAYOUT_GENERAL}};
+    const int setof[19] = {0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 4, 4, 4, 4};
+    const int bind[19] = {0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 1, 2, 3};
+    VkWriteDescriptorSet wr[19];
+    for (int i = 0; i < 19; i++)
         wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_aov.set[setof[i]], .dstBinding = (u32)bind[i],
                                        .descriptorCount = 1,
                                        .descriptorType = d[i].sampler ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                        .pImageInfo = &d[i]};
-    vkUpdateDescriptorSets(g_vk.dev, 14, wr, 0, NULL);
+    vkUpdateDescriptorSets(g_vk.dev, 19, wr, 0, NULL);
 }
 static void ao_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 dst) {
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1598,11 +1624,19 @@ static void evaluate_ao(Surf* t, Surf* z) {
     if (!ao_apply_pipeline(t->f.vk) || !ao_images(w, h)) { g_ao_failed = 1; LOG("ao (vulkan): images or pipeline failed: AO off\n"); return; }
     VkImageView zv = depth_view(z);
     if (!zv) return;
-    if (g_aov.key_z != zv || g_aov.key_t != t->att || !g_aov.ready) { vk_finish(); ao_sets(zv, t->att); g_aov.key_z = zv; g_aov.key_t = t->att; }
+    static int dn = -1;
+    if (dn < 0) dn = getenv("SWR_AO_DEPTH_NORMALS") != NULL; /* tests: the old normals from depth */
+    Surf* ns = g_ao_nrm && !dn ? vk_rt_find(g_ao_nrm) : NULL;
+    if (ns && (ns->sw != w || ns->sh != h)) ns = NULL;
+    VkImageView nv = ns ? ns->att : VK_NULL_HANDLE;
+    { static int said = -1; if (said != (nv != 0)) { said = nv != 0; LOG("ao (vulkan): normals from %s\n", nv ? "the G-buffer" : "the depth"); } }
+    if (g_aov.key_z != zv || g_aov.key_t != t->att || g_aov.key_n != nv || !g_aov.ready) {
+        vk_finish(); ao_sets(zv, t->att, nv); g_aov.key_z = zv; g_aov.key_t = t->att; g_aov.key_n = nv;
+    }
     VkCommandBuffer cb = vk_cmd();
     if (!g_aov.ready) { /* first use: every AO image to GENERAL */
-        VkImage im[4] = {g_aov.vz, g_aov.ao, g_aov.ed, g_aov.fin};
-        for (int i = 0; i < 4; i++) {
+        VkImage im[5] = {g_aov.vz, g_aov.ao, g_aov.ed, g_aov.fin, g_aov.mid};
+        for (int i = 0; i < 5; i++) {
             VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -1617,8 +1651,8 @@ static void evaluate_ao(Surf* t, Surf* z) {
     if (g_vproj.clip) { mul = -B; add = -A; } else { mul = -0.5f * B; add = 0.5f * (1.f - A); }
     float tx = 1.f / g_vproj.p00, ty = 1.f / g_vproj.p11, radius = 30.f; /* game units (~cm): contact shadows, not a broad haze */
     float dep[4] = {mul, add, radius, 0};
-    float mp[12] = {(float)w, (float)h, 1.f / (float)w, 1.f / (float)h, tx * 2.f, ty * -2.f, -tx, ty, radius, 3.f, 3.f, (float)(dl_aa() ? g_aov.n++ % 64 : 0)};
-    float vp[4] = {(float)w, (float)h, 1.f / (float)w, 1.f / (float)h}, ap[4] = {(float)g_opt_ao / 100.f, 0, 0, 0};
+    float mp[12] = {(float)w, (float)h, 1.f / (float)w, 1.f / (float)h, tx * 2.f, ty * -2.f, -tx, ty, radius, 3.f, 3.f, nv ? 1.f : 0.f};
+    float ap[4] = {(float)g_opt_ao / 100.f, 0, 0, 0};
     /* 1: view depth MIPs from the scene depth */
     vk_surf_use(cb, z, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
     ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT); /* last frame's AO reads before this frame's writes */
@@ -1628,18 +1662,22 @@ static void evaluate_ao(Surf* t, Surf* z) {
     vkCmdDispatch(cb, (w + 15) / 16, (h + 15) / 16, 1);
     ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     /* 2: AO term and edges */
+    if (ns) vk_surf_use(cb, ns, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.mainp);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[1], 0, 1, &g_aov.set[1], 0, NULL);
     vkCmdPushConstants(cb, g_aov.pl[1], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, mp);
     vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
     ao_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-    /* 3: denoise (reads the lit scene too) */
+    /* 3: denoise, two edge-aware passes (ao -> mid -> fin; XeGTAO's medium setting): the noise is the same every frame */
     vk_surf_use(cb, t, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.den);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[2], 0, 1, &g_aov.set[2], 0, NULL);
-    vkCmdPushConstants(cb, g_aov.pl[2], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, vp);
-    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
-    ao_barrier(cb, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    for (int pass = 0; pass < 2; pass++) {
+        float dv[4] = {(float)w, (float)h, pass ? 1.f : 0.f, 0.f}; /* z: the last pass */
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_aov.pl[2], 0, 1, &g_aov.set[pass ? 4 : 2], 0, NULL);
+        vkCmdPushConstants(cb, g_aov.pl[2], VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, dv);
+        vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+        ao_barrier(cb, pass ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    }
     /* 4: scene colour *= AO */
     vk_surf_use(cb, t, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);

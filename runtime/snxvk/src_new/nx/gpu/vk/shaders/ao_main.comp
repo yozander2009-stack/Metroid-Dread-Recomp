@@ -5,10 +5,11 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D vz;
 layout(set = 0, binding = 1, r32f) writeonly uniform image2D oAO;
 layout(set = 0, binding = 2, r32f) writeonly uniform image2D oEd;
+layout(set = 0, binding = 3) uniform sampler2D nrmT; // SWR: the game's G-buffer normals (n*0.5+0.5, view space)
 layout(push_constant) uniform PC {
     vec4 vp;  // w h 1/w 1/h
     vec4 ndc; // NDC->view mul xy, add xy
-    vec4 p;   // radius, slices, steps per slice, noise index
+    vec4 p;   // radius, slices, steps per slice, 1 = nrmT holds the G-buffer normals
 } pc;
 const float PI = 3.14159265, HPI = 1.57079633;
 vec3 vpos(vec2 sp, float z) { return vec3((pc.ndc.xy * sp + pc.ndc.zw) * z, z); }
@@ -40,7 +41,7 @@ uint hilbert(uint x, uint y) {
     return i;
 }
 vec2 noise(ivec2 p) {
-    uint i = hilbert(uint(p.x) & 63u, uint(p.y) & 63u) + 288u * (uint(pc.p.w) % 64u);
+    uint i = hilbert(uint(p.x) & 63u, uint(p.y) & 63u); // SWR: the same noise every frame (AO stays still without TAA)
     return fract(0.5 + float(i) * vec2(0.75487766624669276, 0.569840290998053266));
 }
 void main() {
@@ -62,6 +63,22 @@ void main() {
     imageStore(oEd, p, vec4(packE(e)));
     vec3 N = calcN(e, vpos(sp, z), vpos(sp - vec2(pc.vp.z, 0.0), lz), vpos(sp + vec2(pc.vp.z, 0.0), rz),
                    vpos(sp - vec2(0.0, pc.vp.w), tz), vpos(sp + vec2(0.0, pc.vp.w), bz));
+    /* SWR: the game's own normal. A surface seen edge-on (a ledge top or a ceiling at the camera's height) has no usable
+       depth slope: its depth normal was wrong and drew a dark line at eye level in every room. The G-buffer's z points at
+       the camera, here z points into the picture */
+    bool gn = false, hg = false;
+    vec3 ng = vec3(0.0);
+    if (pc.p.w > 0.5) {
+        vec3 g = texelFetch(nrmT, p, 0).xyz * 2.0 - 1.0;
+        float gl = length(g);
+        // only where the two disagree (the depth normal broken): elsewhere the depth normal, which has no normal-map bumps,
+        // so AO stays a property of the shapes. Unwritten (0,0,0: glass, effects): depth normal
+        if (abs(gl - 1.0) < 0.1) {
+            ng = vec3(g.x, g.y, -g.z) / gl;
+            hg = true;
+            if (dot(ng, N) < 0.7) { N = ng; gn = true; }
+        }
+    }
     z *= 0.99999;
     vec3 P = vpos(sp, z);
     vec3 V = normalize(-P);
@@ -94,7 +111,10 @@ void main() {
         vis += pl * ((cn + 2.0 * h0 * sin(n) - cos(2.0 * h0 - n)) / 4.0 + (cn + 2.0 * h1 * sin(n) - cos(2.0 * h1 - n)) / 4.0);
     }
     vis = max(0.03, pow(vis / pc.p.y, 2.2));
-    vis = mix(1.0, vis, smoothstep(0.05, 0.25, abs(dot(N, V)))); /* edge-on surfaces: no AO (unreliable; a line at eye level) */
+    /* SWR: a surface seen edge-on (a ledge top or a ceiling at the camera's height) squeezes all its AO into a line one
+       pixel tall that moves with the camera: the dark line at Samus's eye level. No AO there, judged by the G-buffer
+       normal (right even edge-on; the depth normal is not, which is why a fade by it missed the line) */
+    vis = mix(1.0, vis, smoothstep(hg ? 0.12 : 0.05, hg ? 0.35 : 0.25, abs(dot(hg ? ng : N, V))));
     if (isnan(vis) || isinf(vis)) vis = 1.0; /* SWR: never a NaN into the denoise and the scene */
     imageStore(oAO, p, vec4(clamp(vis / 1.5, 0.0, 1.0)));
 }

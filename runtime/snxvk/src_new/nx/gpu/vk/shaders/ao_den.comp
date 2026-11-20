@@ -27,7 +27,7 @@ void main() {
     sw += dot(eC, vec4(1.0));
     sum += a(p + ivec2(-1, -1)) * wTL + a(p + ivec2(1, -1)) * wTR + a(p + ivec2(-1, 1)) * wBL + a(p + ivec2(1, 1)) * wBR;
     sw += wTL + wTR + wBL + wBR;
-    vec3 c = max(texelFetch(col, p, 0).rgb, vec3(0.0));
-    float l = dot(c / (1.0 + max(c.r, max(c.g, c.b))), vec3(0.2126, 0.7152, 0.0722));
-    imageStore(oF, p, vec4(mix(clamp(sum / sw * 1.5, 0.0, 1.0), 1.0, smoothstep(0.25, 0.75, l))));
+    // SWR: AO is a property of the geometry: it never depends on the picture's colour (a brightness fade here imprinted
+    // the textures into the AO). Two passes; the last one (vp.z 1) goes back to 0..1
+    imageStore(oF, p, vec4(pc.vp.z > 0.5 ? clamp(sum / sw * 1.5, 0.0, 1.0) : sum / sw));
 }

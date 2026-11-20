@@ -3330,7 +3330,9 @@ retry:
     }
     vk_dlss_draw(n ? rt[0] : NULL, zt, zt && r[0x4B3]); /* SwitchRecomp */
     { void vk_ao_note(Surf * zt, u64 cb3, u32 cb3_size, u32 clip); /* SwitchRecomp: the camera projection for XeGTAO (dlss.c) */
-      vk_ao_note(zt, ch->cbind[0][3], ch->cbind_size[0][3], r[0x35F]); }
+      vk_ao_note(zt, ch->cbind[0][3], ch->cbind_size[0][3], r[0x35F]);
+      void vk_ao_gbuf(u32 n, Surf** rt); /* SwitchRecomp: the G-buffer's normal target for XeGTAO (dlss.c) */
+      vk_ao_gbuf(n, rt); }
     int stencil = zt && zt->f.stencil && r[0x4E0];
     DYN(st, (u32)stencil, rec_CmdSetStencilTestEnable(cb, stencil));
     /* GL order in the registers: fail, depth fail, pass */
