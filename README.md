@@ -1,169 +1,150 @@
-# Metroid Dread — recompiled for PC
+<!-- DRAFT for yozander2009-stack/Metroid-Dread-Recomp. Banner: docs/images/banner.png (own art only, no Nintendo assets). -->
+<p align="center"><img src="docs/images/banner.png" alt="Metroid Dread Recomp" width="640"></p>
 
-[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/793-metroid-dread/)
+<p align="center">
+  <a href="https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases/latest"><b>Download</b></a> ·
+  <a href="#get-started">Get started</a> ·
+  <a href="docs/ROADMAP.md">Road to 1.0</a> ·
+  <a href="docs/FAQ.md">FAQ</a> ·
+  <a href="https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues">Issues</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-> **Work in progress.** This project was shared on Reddit and elsewhere before it was ready: the planned first proper
-> release is 1.0.0, and current builds (0.x) are early previews. Expect crashes, setup problems and rough edges on
-> hardware it has not been tested on. If something breaks, please open an issue and attach the `.log` file from the
-> game folder, plus your CPU, GPU, RAM and Windows version. I'll do the best I can to resolve the errors and make this
-> a good experience.
+<p align="center">
+  <a href="https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases/latest"><img src="https://img.shields.io/github/v/release/yozander2009-stack/Metroid-Dread-Recomp?label=latest" alt="Latest release"></a>
+  <a href="https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases"><img src="https://img.shields.io/github/downloads/yozander2009-stack/Metroid-Dread-Recomp/total" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Steam%20Deck-informational" alt="Platforms">
+  <a href="https://playported.com/ports/793-metroid-dread/"><img src="https://playported.com/badge.svg" alt="Listed on PlayPorted"></a>
+</p>
 
-One Windows EXE that sets up, configures and runs a native PC build of **your own** copy of Metroid Dread 2.1.0.
-It is the SwitchRecomp runtime (by MZ Labs) with a Metroid Dread front end built in: first-run setup that compiles
-the game with a bundled Clang (GCC as a fallback), a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
+**Metroid Dread Recomp** is a static recompilation of *Metroid Dread* (Nintendo Switch, version 2.1.0) into a native
+application for Windows and Linux, built on your PC from your own copy of the game. No emulator: the game code is
+translated from ARM64 to C once, compiled by a bundled compiler, and runs directly on your CPU.
 
-![The Play screen](docs/images/play-screen.png)
+<p align="center"><img src="docs/images/screenshots/shot1.jpg" alt="Samus at a save station in Metroid Dread Recomp" width="80%"></p>
+<p align="center"><sub>Taken in Metroid Dread Recomp at 2.25x resolution with TAA and ambient occlusion. The game is © Nintendo; you need your own copy to run it.</sub></p>
 
-**No Nintendo files are in this repository**: no game code, no RomFS, no keys, no generated C.
+<!-- Video: replace VIDEO_ID with the YouTube video's id, then remove this comment's markers.
+<p align="center"><a href="https://www.youtube.com/watch?v=VIDEO_ID"><img src="https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg" alt="Watch the showcase on YouTube" width="70%"></a></p>
+-->
 
-- `dread/dread_v210_patches.json` holds small anchored edits that setup applies to the C it generates from the player's ExeFS.
-- `dread/romfs_v210.manifest` lists RomFS file names, sizes and SHA-1 hashes, so setup can verify the player's files.
+<p align="center"><img src="docs/images/play-screen.png" alt="The Play screen" width="70%"></p>
 
-## Layout
+> [!IMPORTANT]
+> **No game files are included.** You need your own copy of Metroid Dread, updated to **version 2.1.0** and dumped
+> from **your own** Nintendo Switch. This project provides no game files, keys, firmware, dumping or decryption tools,
+> and no instructions for obtaining them. The game code is recompiled locally, on your machine, from your files.
 
-| path | what |
+> [!NOTE]
+> **Made with AI.** Most of the runtime fixes, performance work, launcher, setup and tooling were written by Claude
+> (Anthropic, through Claude Code), directed, tested and reviewed by a human. Every change is built and measured on
+> real hardware before release. The full source is here to read and build.
+
+> [!WARNING]
+> **Pre-1.0.** The whole game can be played from start to end, but expect rough edges on hardware that hasn't been
+> tested yet. On AMD graphics cards, use **Native Vulkan** (the default there): AMD's OpenGL driver can crash.
+> Read the [FAQ](docs/FAQ.md) before opening an issue.
+
+## Features
+
+- The whole game, from your own 2.1.0 copy, on Windows and Linux (Steam Deck included)
+- Frame rates of 60, 90, 120, 144, 240 or unlimited, with cutscenes and loading screens at your frame rate
+- Resolution scaling, 16:10, 21:9 and 32:9 (experimental) with a wider view instead of a stretched one
+- Two renderers: OpenGL and Native Vulkan
+- TAA, FXAA, NVIDIA DLAA (RTX, downloaded from NVIDIA when you ask for it), sharpening, anisotropic filtering up to
+  16x, XeGTAO ambient occlusion, higher shadow resolution, HDR (experimental)
+- Any controller through SDL2, keyboard remapping, mouse aim, rumble and HD rumble (Switch Pro / Joy-Con, DualSense)
+- Xbox / PlayStation button prompts (community packs, fetched on request)
+- Skip any cutscene, built-in cheats and Atmosphere cheat files, virtual amiibo
+- Mods and texture packs (LayeredFS layout), 5.1 audio, Brazilian Portuguese fan translation
+- AUTO-SET picks settings for your PC; one-click updates with undo; Add to Steam
+- One button to make a bug report with your logs and system info
+
+## Get started
+
+**You need:** your own Metroid Dread 2.1.0 dump (ExeFS **and** RomFS), Windows 10 or later or Linux on x86-64
+(glibc 2.38+), a GPU with OpenGL 4.3 or Vulkan, and 8 GB of RAM.
+
+1. Download the latest build from [Releases](https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases/latest):
+   - **Windows:** the `.zip`. Extract it to a folder you can write to (not Program Files).
+   - **Linux and Steam Deck:** `Metroid_Dread-x86_64.AppImage`. Make it executable and run it
+     ([Linux and Steam Deck](docs/linux.md)).
+2. Start it and choose the folder with your dump (ExeFS: `main`, `main.npdm`, ...; RomFS: `system`, `packs`, ...).
+   If the 2.1.0 update is a separate dump, choose it as the update folder. Every file is checked against the 2.1.0
+   file list, then the game code is compiled once (a few minutes). Your own files aren't changed.
+3. Press **AUTO-SET** if you're not sure about settings, then **PLAY**. **F1** or the Home / Guide button opens the
+   in-game menu.
+
+**Updating:** the Play screen offers **UPDATE** when a new release is out. Only changed files are downloaded and checked
+before anything is replaced; **UNDO** goes back. Saves, settings and mods are never touched.
+
+## Saves
+
+- **Windows:** `Metroid Dread_data\save` next to `Metroid Dread.exe`
+- **Linux / Steam Deck:** `~/.local/share/MetroidDreadRecomp/Metroid Dread_data/save`
+
+Close the game and copy the whole folder to back it up.
+
+## Controls
+
+Any controller SDL2 knows works. Keyboard defaults (Switch button → key):
+
+| Button | Key | Button | Key |
+|---|---|---|---|
+| Left stick | W A S D | Right stick | I J K L |
+| A | X or Space | B | Z |
+| X | C | Y | V |
+| L / R | Q / E | ZL / ZR | 1 / 3 |
+| L3 / R3 | Left Shift / F | + / − | Enter / Backspace |
+| D-pad | Arrow keys | Menu | F1 or Esc |
+
+Every key can be rebound on the Play screen (Controls > Keyboard).
+
+## Road to 1.0
+
+0.x builds are previews. Windows and Linux get finished first; **0.9** brings Android and macOS; **1.0** is the first
+release meant to be solid everywhere: no known crash, locked frame rates, every scripted moment right above 60 FPS,
+and the experimental options finished. Left to do, by area:
+
+| Area | Left for 1.0 |
 |---|---|
-| `switchrecomp.py`, `codegen.py`, `a64.py`, `nxloader.py`, `metroid_perf.py` | SwitchRecomp: ARM64 → C translator (Apache-2.0) |
-| `runtime/` | the runtime: kernel, services, GPU → OpenGL, audio, video, input |
-| `runtime/dread_ui/` | front end: `fe.cpp` (setup, Play, settings), `ov.cpp` (in-game menu), `ui.cpp` (theme, widgets, settings table) |
-| `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main 112db409) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
-| `dread/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
-| `third_party/imgui-1.92.5/` | Dear ImGui (MIT) |
-| `linux/` | scripts for the Linux / Steam Deck build |
+| Performance | locked 120 in the heaviest effect scenes, shorter hitches on video starts and first room entries |
+| Stability | AMD OpenGL driver crash, a few crashes in specific places |
+| High frame rates | slow-motion sequences, cutscene audio sync, quick-time events |
+| Graphics | Intel / Mesa glitches, ultrawide and HDR out of experimental |
+| Controls | Switch 2 Pro Controller on Linux |
+| Steam Deck | Game Mode fully checked, TAA / AO cost |
+| 0.9 | Android and macOS ports |
 
-## Setting up the game (players)
+Every item, with its issue: [Road to 1.0](docs/ROADMAP.md).
 
-Download the release zip, not this repository. On first start the EXE asks for your game files and compiles the game.
-It needs **both** parts of your own dumped copy of Metroid Dread **2.1.0**:
+## Found a bug?
 
-- the **ExeFS** (the game code: the files `main`, `main.npdm`, ...)
-- the **RomFS** (the game data: `system`, `packs`, ...), with the 2.1.0 update merged in
+Use the latest release, check the [FAQ](docs/FAQ.md) and the [existing issues](https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues?q=is%3Aissue),
+then press **REPORT** on the Play screen: it zips your logs, settings and system info and opens a prefilled issue.
+Attach that zip.
 
-A RomFS dump on its own is not enough. Choose the folder that holds both; they can be a few folders down (a dump
-folder with one folder per title is fine). If you have the base game and the update as separate dumps, choose the
-update as "Update folder". Every RomFS file is checked against the 2.1.0 file list before anything is compiled.
+## Building from source
 
-**Updates**: the Play screen checks this repository's releases and offers **UPDATE** when there is a
-new version. Only the game's own files that changed are downloaded (a few MB), each one is checked against its
-SHA-256 before anything is replaced, and the replaced files are kept so **UNDO** can go back. If the game-code patches
-changed, the game is rebuilt from the files setup already installed, without asking for your game folder again.
-Saves, settings and mods are never touched. It can be switched off on the Play screen.
+See [Building on Windows](docs/BUILD-windows.md) and [Building on Linux](docs/linux.md). Pull requests are welcome:
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Not sure which settings to pick?** Press **AUTO-SET** on the Play screen. It reads your graphics card, screen and
-memory and picks resolution, frame rate and quality to match; a new installation gets these automatically after
-setup. Anything can still be changed afterwards.
+## Respect copyright
 
-**NVIDIA DLAA** (RTX cards, OpenGL or Native Vulkan): Play screen → Graphics → NVIDIA DLAA → **GET**. It downloads
-NVIDIA's DLSS file (59 MB) from NVIDIA's own GitHub, checks its SHA-256 and turns DLAA on. Pressing GET means
-accepting NVIDIA's licence (READ opens it). NVIDIA's file is never part of the release. See [DLSS.md](DLSS.md).
+- *Metroid Dread* is © Nintendo. This is a fan project, not affiliated with, endorsed or sponsored by Nintendo.
+- This repository contains no game files, no game code (also not the C the recompiler generates from it), no assets
+  and no keys, and release builds don't either. `dread/dread_v210_patches.json` holds only this project's own edits;
+  `dread/romfs_v210.manifest` holds file names, sizes and hashes used to check your dump.
+- The code you generate and the build made from it contain Nintendo's code: for your own use only. Don't share or
+  upload them.
+- Issues or pull requests with game files, keys, generated code or links to pirated copies are removed.
 
-Found a bug? See [CONTRIBUTING.md](CONTRIBUTING.md): please attach the `.log`.
+## Credits and licenses
 
-## Screenshots
+Built on **SwitchRecomp** by MZ Labs (Apache-2.0) with the **ScarletNX** Vulkan renderer (GPL-3.0), Dear ImGui (MIT),
+Intel XeGTAO (MIT), a Ryujinx reverb port (MIT), libvpx and OpenH264 (BSD), SDL2 and zlib. Brazilian Portuguese
+translation by JumpmanClub Brasil; button-icon packs by Krydar, Nova77 and xSeRosiSx. Full list:
+[Credits](docs/third-party.md).
 
-| Graphics settings | Controls |
-|---|---|
-| ![Graphics settings](docs/images/graphics-settings.png) | ![Controls](docs/images/controls.png) |
-
-## Build from source (Windows)
-
-The toolchain is **not** in this repository and never was: the paths below are where you put your own downloads.
-The release zip bundles the same GCC and Python so that setup can compile the game on the player's PC.
-
-- `gcc\` in the repository root: [winlibs](https://winlibs.com) GCC 14.2.0, UCRT, POSIX threads, x64
-- `python\` in the repository root: Python 3.12 for Windows (the embeddable package is enough)
-- glslang 16.6.0 (Vulkan SDK or KhronosGroup release), for the renderer's compute shaders: `GLSLANG=` or on PATH
-
-`build.bat` checks for all three and runs the steps below (`build.bat release X.Y.Z` also packs a release):
-
-```
-python\python.exe work-profiler\build_imgui.py
-set GLSLANG=<path to glslang.exe 16.6.0> && python\python.exe work-profiler\build_snxvk2.py
-set SWR_RELEASE=1 && python\python.exe switchrecomp.py --build-runtime --cc gcc
-python\python.exe dread\make_release.py release <empty folder> --version X.Y.Z --exe bin\runtime_win64_win32.exe
-```
-
-The release step also needs `redist\zlib1.dll` (zlib 1.3.1, x64) and `redist\SDL2.dll` (SDL 2.x x64 release), the two
-DLLs the game ships beside it. They are not in this repository.
-
-## Build and play on Linux
-
-Native Linux (X11 or Wayland through XWayland, OpenGL 4.3), built from this repository with the system's GCC. The
-scripts in `linux/` keep everything inside the repository: the runtime in `bin/`, the installed game in `games/`.
-You need your own Metroid Dread 2.1.0 extracted to an ExeFS and a RomFS folder, as for Windows.
-
-```
-bash linux/install_deps.sh                    # gcc, X11/OpenGL headers, static libvpx, SDL2 (asks for sudo)
-bash linux/setup_and_build_runtime.sh         # bin/runtime_linux_x11, with the in-game menu
-bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]   # checks the files, compiles games/Metroid Dread_code.so
-bash linux/run.sh                             # play; settings in games/Metroid Dread.ini, log in games/Metroid Dread.log
-```
-
-`linux/run.sh` opens the same Play / setup / settings screens as the Windows EXE (`--play` skips them, `--launcher`
-brings them back when skipped). `linux/build_game_so.sh` recompiles only what changed (after editing the patches or the
-translator), `linux/package.sh` makes the Steam Deck package in `linux/dist/` (no game data inside), and `run_test.sh`,
-`menu_test.sh` and `run_route_linux.sh` run the automated tests on a copy of the game folder (`SWR_SOFTGL=1` for
-Mesa's software OpenGL). The AppImage updates itself from the releases page (Play screen > Updates; publish
-`linux/dist/update-linux.txt` with the AppImage, made by `VERSION=x.y.z bash linux/make_appimage.sh`), and Add to Steam
-works from Desktop Mode. Native Vulkan needs Linux 6.7 or later (OpenGL otherwise). Not on Linux yet: F7 recording.
-
-### AppImage
-
-`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Dread-x86_64.AppImage`: one file for players, like the Windows
-EXE. It has the runtime with the Play / setup screens, the recompiler, a relocatable GCC 14.3
-([Bootlin](https://toolchains.bootlin.com)) and Python 3.12
-([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), so nothing needs to be installed;
-no game files are inside. The downloads are checked against their SHA-256 and kept in `linux/appimage/cache/`. The game
-is installed in `~/.local/share/MetroidDreadRecomp` (or `METROID_DREAD_HOME`). It needs glibc 2.38 or newer, SDL2 for
-controllers and an OpenGL 4.3 driver.
-
-## What is in this repository
-
-- Source code only, plus three prebuilt third-party static libraries, kept so the build does not need MSYS2:
-  `runtime/vp9/win/libvpx.a` (libvpx 1.14.1, VP9 decoder only, build options in `runtime/vp9/README.txt`) and
-  `runtime/oh264/win/*.a` (OpenH264 decoder). Rebuild them from the upstream sources if you prefer.
-- `.gitignore` keeps out toolchains, build output, EXEs, DLLs, archives and anything from a game folder.
-- `dread/dread_v210_patches.json` holds **our** edits only: for each patched file, the SHA-256 of the C that setup
-  generates from the player's ExeFS, the line range to replace, and the replacement lines we wrote (frame pacing,
-  vector growth, zlib, cutscene skip). It contains no game code, no data from the game and no decryption.
-- `dread/romfs_v210.manifest` lists RomFS file names, sizes and SHA-1 hashes, used only to check the player's files.
-
-## Contributors
-
-- **yozander2009-stack** — project lead
-- **Claude** (Anthropic) — AI pair programmer: runtime fixes and performance work, the front end and in-game menu,
-  setup, the Linux build, testing and documentation
-
-Button-icon packs (Controls > Button icons) are community mods downloaded from GameBanana when a player asks for
-them, not included here: Switch to XBOX Layout by Krydar, Switch to PS4 Layout by Nova77, Switch to PS5 Layout by
-xSeRosiSx, with PlayStation art from Xelu's FREE Controller Prompts.
-
-The program icon is the [Metroid icon created by Smashicons - Flaticon](https://www.flaticon.com/free-icons/metroid)
-(Flaticon licence, free with attribution).
-
-Third-party work this builds on is credited below and on the game's Credits page.
-
-## AI use
-
-Large parts of this project were written with Claude (Anthropic), not only boilerplate: runtime fixes, performance
-work, the front end, setup and the build scripts. Every change was built and tested on real hardware before release,
-and each fix was measured. The source is all here: read it, build it yourself, and report anything that looks wrong.
-
-## Licences
-
-**The released EXE is distributed under GPL-3.0** (`LICENSE-GPL-3.0.txt`), because it contains the ScarletNX renderer.
-Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compatible.
-
-- SwitchRecomp: Apache-2.0. The credit "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept.
-- ScarletNX renderer: GPL-3.0, which makes the combined EXE GPL-3.0.
-- Dear ImGui: MIT.
-- Intel XeGTAO (ambient occlusion, ported to GLSL in gpu_gl.c and the renderer's shaders/ao_*): MIT
-  (`runtime/xegtao/LICENSE.txt`).
-- libvpx and OpenH264: BSD.
-- SDL2 and zlib: zlib licence.
-
-NVIDIA DLAA: our code calls NVIDIA's NGX through the graphics driver; no NVIDIA SDK code or header is compiled in.
-NVIDIA's `nvngx_dlss.dll` is not in this repository or the release: the Play screen downloads it from NVIDIA's own
-GitHub only when the player presses GET and accepts NVIDIA's licence. See [DLSS.md](DLSS.md).
-
-Metroid Dread is © Nintendo. This project is not affiliated with or endorsed by Nintendo.
+The released program is under **GPL-3.0** because it contains ScarletNX; each source file keeps its own license.
+NVIDIA's DLSS file is never in this repository or the release. See [DLSS.md](DLSS.md).
