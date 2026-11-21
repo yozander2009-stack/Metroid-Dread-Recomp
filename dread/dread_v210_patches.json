@@ -198,7 +198,7 @@
   },
   "code_014.c": {
    "pristine": "c2460052f58de568e42e0965163d19bd4dd6652aabd1d4eac7c291628ee51842",
-   "result": "8d794103a44a1e6feba50f0b28356a90e1c480465ec6a9396c392e3a31a66ce2",
+   "result": "1dfc7568d394f439c66f64958450361f1b4e6923c9b818037430dd8bee9cd356",
    "hunks": [
     [
      18147,
@@ -249,6 +249,34 @@
      18637,
      [
       " swr_hpcull(M, c->x[19]);   /* SWR Hor+ culling */"
+     ]
+    ],
+    [
+     20948,
+     20948,
+     [
+      "/* SWR cheats: Free camera (swr_cheats bit 32, code_071.c). F_81BF374 builds a camera's view each frame from its eye",
+      "   (+168/+172/+176) and look-at point (+216/+220/+224). While the cheat is on, swr_cam_off (the runtime moves it with the right",
+      "   stick) is added to both. The game's own values are the base, taken again whenever the game writes new ones, so the offset",
+      "   never piles up on a camera that does not move; off, the game's values are put back */",
+      "extern volatile unsigned swr_cheats;",
+      "SWR_EXPORT volatile f32 swr_cam_off[3];",
+      "static struct { u64 o; f32 base[6], wrote[6]; } swr_fc[8]; static unsigned swr_fcn;",
+      "static void swr_freecam(u8* const M, u64 o){",
+      "  static const unsigned F[6]={168,172,176,216,220,224}; union{ u32 u; f32 f; } v; int k=-1, on=(swr_cheats&32u)!=0;",
+      "  for(int i=0;i<8;i++) if(swr_fc[i].o==o){ k=i; break; }",
+      "  if(k<0){ if(!on) return; k=(int)(swr_fcn++&7); swr_fc[k].o=o;",
+      "    for(int i=0;i<6;i++){ v.u=(u32)RD32((o+F[i])); swr_fc[k].base[i]=v.f; swr_fc[k].wrote[i]=v.f; } }",
+      "  for(int i=0;i<6;i++){ v.u=(u32)RD32((o+F[i])); if(v.f!=swr_fc[k].wrote[i]) swr_fc[k].base[i]=v.f;",
+      "    v.f=swr_fc[k].base[i]+(on? swr_cam_off[i%3] : 0.0f); WR32((o+F[i]),v.u); swr_fc[k].wrote[i]=v.f; }",
+      "  if(!on) swr_fc[k].o=0; }"
+     ]
+    ],
+    [
+     20961,
+     20961,
+     [
+      " swr_freecam(M, c->x[0]);   /* SWR cheats: Free camera */"
      ]
     ],
     [

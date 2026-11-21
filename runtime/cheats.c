@@ -21,13 +21,14 @@ static Cheat* g_ch; static int g_nch;
 static u64 g_main_base, g_main_size, g_text_lo, g_text_hi;
 volatile u64 g_cheat_keys;   /* the buttons the game gets (backends), for the keypress conditional (8kkkkkkk) */
 
-enum { CB_MISSILES=1, CB_PBOMBS=2, CB_EMMI=4, CB_HP=8, CB_AEION=16 };   /* swr_cheats bits, as the game patches read them */
+enum { CB_MISSILES=1, CB_PBOMBS=2, CB_EMMI=4, CB_HP=8, CB_AEION=16, CB_FREECAM=32 };   /* swr_cheats bits, as the game patches read them */
 /* the built-in cheats: game patches (bits), or a cheat in the usual dmnt format that the VM below runs (code) */
 static const struct { const char* name; const char* help; u32 bits; const char* code; } BUILTIN[]={
   {"Infinite HP","Samus's energy never goes down; the HUD shows an infinity sign for it.",CB_HP,NULL},
   {"Infinite ammo","Missiles and power bombs never go down; the HUD shows an infinity sign for them.",CB_MISSILES|CB_PBOMBS,NULL},
   {"E.M.M.I. counter always succeeds","An E.M.M.I. that catches Samus always lets her break free.",CB_EMMI,NULL},
   {"Infinite Aeion","Phantom Cloak, Pulse Radar and Flash Shift never drain the Aeion gauge.",CB_AEION,NULL},
+  {"Free camera","The right stick moves the camera around (hold L3 and push up or down to move it closer or farther). Samus still plays as usual. Turn it off to bring the camera back.",CB_FREECAM,NULL},
   /* while B (jump) is held: Samus's vertical speed set to 1536 up (a jump starts at ~1600). Samus as the game finds her
      (F_8DF4CD4): the game object (the pointer in GOT slot main+0x1CBA088), its +0x2998 -> +0x10 = her entity; her
      movement component at +0x1F0, vertical speed (float, up positive) at +0x1DC. Plain dmnt: works on a console too */
@@ -327,8 +328,22 @@ static void aeion_watch(u64 guest){ (void)guest; }
 #endif
 
 /* main loop, every frame: runs the VM at 12 Hz */
+/* Free camera (the game patch in code_014.c adds swr_cam_off to the camera): every frame, the right stick moves it at
+   up to 300 game units a second (a save room is about 1500 wide); with L3 held, up/down moves it closer/farther. The
+   offset goes back to 0 when the cheat is off */
+static void freecam_tick(void){
+  static volatile f32* off; static int tried; static u64 last; u64 now=plat_ns();
+  if(!tried){ tried=1; extern void* g_code_mod; if(g_code_mod) off=(volatile f32*)plat_dl_sym(g_code_mod,"swr_cam_off"); }
+  if(!off || !g_swr_cheats){ last=now; return; }
+  float dt= last? (float)((now-last)/1e9) : 0.f; last=now; if(dt>0.1f) dt=0.1f;
+  if(!(*g_swr_cheats&CB_FREECAM)){ off[0]=off[1]=off[2]=0; return; }
+  float rx=g_pad.rx/32767.f, ry=g_pad.ry/32767.f; if(rx*rx+ry*ry<0.04f) rx=ry=0;   /* small dead zone */
+  float sp=300.f*dt;
+  if(g_pad.buttons&0x10) off[2]-=ry*sp; else { off[0]+=rx*sp; off[1]+=ry*sp; } }
+
 void cheats_tick(void){
   if(!g_nch) return;
+  freecam_tick();
   static u64 next, check; u64 now=plat_ns(); if(now<next) return; next=now+83333333ull;
   if(now>=check){ check=now+1000000000ull; u64 st=file_stamp(g_enabled_path); if(st!=g_enabled_stamp){ g_enabled_stamp=st; read_enabled(); } }
   u32 bits=0; g_fbits=0;
@@ -337,5 +352,5 @@ void cheats_tick(void){
   if(g_swr_cheats && *g_swr_cheats!=bits){ *g_swr_cheats=bits;
     LOG("cheats: game patches:%s%s%s%s%s%s\n",bits&CB_HP? " infinite HP" : "",bits&CB_MISSILES? " infinite missiles" : "",
         bits&CB_PBOMBS? " infinite power bombs" : "",bits&CB_EMMI? " E.M.M.I. break-free" : "",bits&CB_AEION? " infinite Aeion" : "",
-        bits? "" : " none"); }
+        bits&CB_FREECAM? " free camera" : "",bits? "" : " none"); }
   if(g_trace) samus_trace(); }
