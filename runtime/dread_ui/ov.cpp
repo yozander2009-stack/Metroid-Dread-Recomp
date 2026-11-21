@@ -26,7 +26,7 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
-extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); int cheats_kind(int); void cheats_set(int, int); }   // runtime cheats.c
+extern "C" { int cheats_count(void); const char* cheats_name(int); int cheats_is_on(int); int cheats_is_master(int); int cheats_is_builtin(int); int cheats_kind(int); void cheats_set(int, int); }   // runtime cheats.c
 #ifdef _WIN32
 extern "C" int backend_gpu_amd(void);   // backend_win32.c
 #else
@@ -78,8 +78,8 @@ std::map<std::string, std::string> g_vals;        // the menu's copy
 struct Revert { bool active = false; double t0 = 0; std::vector<std::pair<std::string, std::string>> old; } g_rev;
 bool g_quit_confirm;
 
-const char* const TABS[] = {"DISPLAY", "GRAPHICS", "GAMEPLAY", "AUDIO", "CONTROLS", "HELP"};
-const int NTABS = 6;
+const char* const TABS[] = {"DISPLAY", "GRAPHICS", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "HELP"};
+const int NTABS = 7;
 
 std::string val(const char* k) { auto it = g_vals.find(k); if (it != g_vals.end()) return it->second; const Opt* o = find_option(k); return o ? o->def : ""; }
 void change(const char* k, const std::string& v) {
@@ -133,10 +133,6 @@ void tab_content(int t) {
                 const char* st = amiibo_status();
                 help_text(*st ? st : amiibo_count() ? "SCAN puts the figure on the reader; the game reads it when it asks for an amiibo."
                                                    : fmt("Put amiibo dumps (.bin) in %s", amiibo_dir()).c_str()); }
-            if (cheats_count() > 0) { section("CHEATS");
-                for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue;
-                    bool on = cheats_is_on(i) != 0; const char* tag = cheats_kind(i) == 2 ? "PATCHES GAME CODE: NO EFFECT" : nullptr;   // built-in ones come first
-                    if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on, tag)) cheats_set(i, on ? 1 : 0); } }
             section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
 #ifndef SWR_NO_SKIPCUT
         opt_row("skip_cutscenes");
@@ -150,6 +146,15 @@ void tab_content(int t) {
     case 4: section("MENUS"); opt_row("menu_buttons"); section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_aim_toggle"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("stick_sensitivity"); opt_row("stick_snapback"); opt_row("dpad_movement"); opt_row("rumble"); opt_row("hd_rumble"); opt_row("deck_trackpad_rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
             help_text("Controller buttons, keyboard keys and menu navigation are set on the Play screen's Controls page."); break;
+    case 5: { int nb = 0, nf = 0;   // built-in ones come first in the list
+        for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i)) continue; cheats_is_builtin(i) ? nb++ : nf++; }
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 0 && nb) section("BUILT-IN"); if (pass == 1 && nf) section("CHEAT FILES");
+            for (int i = 0; i < cheats_count(); i++) { if (cheats_is_master(i) || (cheats_is_builtin(i) != 0) != (pass == 0)) continue;
+                bool on = cheats_is_on(i) != 0; const char* tag = cheats_kind(i) == 2 ? "PATCHES GAME CODE: NO EFFECT" : nullptr;
+                if (row_bool(fmt("##ovch%d", i).c_str(), cheats_name(i), &on, tag)) cheats_set(i, on ? 1 : 0); } }
+        if (!nb && !nf) help_text("No cheats yet. Add cheat files (Atmosphere or Yuzu .txt) on the Play screen's Cheats page.");
+        else help_text("Cheats apply at once. Cheat files are added on the Play screen's Cheats page."); break; }
     default: {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},
@@ -330,6 +335,7 @@ static bool ov_begin(int w, int h, bool vk) {
     static bool was_open;
     if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; } return false; }
     if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; }
+        { static const char* t = getenv("SWR_TEST_OV_TAB"); if (t && *t) g_tab = atoi(t) % NTABS; }   // test only: open on that tab
         // #78: the key-up of the Esc that closed the menu last time never reached it (closed menus get no keys), so ImGui
         // still held Esc and its key repeat "pressed" it on the first frame: the menu closed again at once
         if (ImGui::GetCurrentContext()) ImGui::GetIO().ClearInputKeys(); }
