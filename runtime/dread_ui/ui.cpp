@@ -601,7 +601,7 @@ static std::vector<Opt> build_options() {
     B("profile", "Debug", "Advanced", "CPU profiler (profile.txt every 10 s)", LIVE_RESTART, "0", "");
     C("menu_shortcut", "Launcher", "Controls", "In-game menu button", LIVE_YES, "home", {{"home", "Home / Guide / PS"}, {"minus_plus", "- and + together"}, {"l3_r3", "L3 + R3 held 1 s"}},
       "F1 on the keyboard always opens the menu.");
-    B("skip_launcher", "Launcher", "Advanced", "Skip the Play screen at start", LIVE_YES, "0", "Hold Shift while starting to see it again.", false);
+    B("skip_launcher", "Launcher", "Advanced", "Start the game directly (skip the Play screen)", LIVE_YES, "0", "Hold Shift while starting, or turn it off in the in-game menu (Gameplay > Startup), to see the Play screen again.");
     return o;
 }
 const std::vector<Opt>& options() { static std::vector<Opt> o = build_options(); return o; }

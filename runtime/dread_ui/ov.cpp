@@ -142,7 +142,10 @@ void tab_content(int t) {
         opt_row("skip_cutscenes");
 #endif
        
-            section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
+            section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed");
+            section("STARTUP"); opt_row("skip_launcher");   // #83: on a Steam Deck there is no Shift to get back to the Play screen
+            help_text(val("skip_launcher") == "1" ? "The next start goes straight to the game. Turn this off to see the Play screen (updates, rebuilds, all settings) again."
+                                                  : "The next start opens the Play screen (updates, rebuilds, all settings)."); break;
     case 3: section("OUTPUT"); opt_row("volume"); section("SPEAKERS"); opt_row("audio_channels"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
     case 4: section("MENUS"); opt_row("menu_buttons"); section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_aim_toggle"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("stick_sensitivity"); opt_row("stick_snapback"); opt_row("dpad_movement"); opt_row("rumble"); opt_row("hd_rumble"); opt_row("deck_trackpad_rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
