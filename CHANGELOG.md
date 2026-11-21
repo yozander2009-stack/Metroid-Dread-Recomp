@@ -8,6 +8,10 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 - **Cheats page** on the Play screen: built-in cheats (infinite energy and ammo, E.M.M.I. counter always succeeds,
   moon jump), Atmosphere cheat files with what each one can do, import from a file or folder ([#70]).
 - Infinite energy and ammo show the infinity sign on the HUD.
+- **Infinite Aeion** cheat: Phantom Cloak, Pulse Radar and Flash Shift never drain the gauge.
+- **Free camera** cheat: the right stick moves the camera around (hold L3 to move it closer or farther); turning it off
+  brings the camera back.
+- In-game menu: cheats have their own CHEATS tab, and Gameplay > Startup can skip the Play screen ([#83]).
 - **D-pad movement** option ([#79]).
 - Setup names the compiler it uses.
 
@@ -17,6 +21,8 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 - Energy recharge station crash ([#73]).
 - 16:10: the camera keeps following Samus ([#83]).
 - Esc reopens the in-game menu reliably ([#78]).
+- Above 60 FPS, slow-motion moments (the E.M.M.I. counter and slide) are paced at 60 from their first frame, so they
+  no longer fail ([#85], [#80], [#21]).
 - Stick snap-back filter catches fast bounces and lets full-tilt turns through ([#54]).
 - Loading screens and cutscenes run at the frame rate however the game is started.
 - After a rebuild, the Play screen no longer asks to rebuild again.
@@ -101,3 +107,6 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 [#78]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/78
 [#79]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/79
 [#83]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/83
+[#21]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/21
+[#80]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/80
+[#85]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/85

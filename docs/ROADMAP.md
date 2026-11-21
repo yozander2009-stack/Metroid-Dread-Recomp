@@ -88,7 +88,7 @@ Legend: ✅ done · 🔧 fixed on `main`, in the next release · ⬜ left to do 
 |---|---|
 | ✅ | Skip cutscenes, FPS counter, AUTO-SET, REPORT button |
 | ✅ | Mods and texture packs, Atmosphere cheats, amiibo, 5.1 audio |
-| 🔧 | Built-in cheats that work on the recompiled code ([#70], [#37]) |
+| 🔧 | Built-in cheats that work on the recompiled code, incl. infinite Aeion and a free camera ([#70], [#37]) |
 | 🔧 | In-game menu reopening with Esc ([#78]) |
 | ⬜ | Portuguese translation together with button-icon packs ([#41]) |
 
