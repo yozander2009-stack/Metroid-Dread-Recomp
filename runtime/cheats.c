@@ -21,12 +21,13 @@ static Cheat* g_ch; static int g_nch;
 static u64 g_main_base, g_main_size, g_text_lo, g_text_hi;
 volatile u64 g_cheat_keys;   /* the buttons the game gets (backends), for the keypress conditional (8kkkkkkk) */
 
-enum { CB_MISSILES=1, CB_PBOMBS=2, CB_EMMI=4, CB_HP=8 };   /* swr_cheats bits, as the game patches read them */
+enum { CB_MISSILES=1, CB_PBOMBS=2, CB_EMMI=4, CB_HP=8, CB_AEION=16 };   /* swr_cheats bits, as the game patches read them */
 /* the built-in cheats: game patches (bits), or a cheat in the usual dmnt format that the VM below runs (code) */
 static const struct { const char* name; const char* help; u32 bits; const char* code; } BUILTIN[]={
   {"Infinite HP","Samus's energy never goes down; the HUD shows an infinity sign for it.",CB_HP,NULL},
   {"Infinite ammo","Missiles and power bombs never go down; the HUD shows an infinity sign for them.",CB_MISSILES|CB_PBOMBS,NULL},
   {"E.M.M.I. counter always succeeds","An E.M.M.I. that catches Samus always lets her break free.",CB_EMMI,NULL},
+  {"Infinite Aeion","Phantom Cloak, Pulse Radar and Flash Shift never drain the Aeion gauge.",CB_AEION,NULL},
   /* while B (jump) is held: Samus's vertical speed set to 1536 up (a jump starts at ~1600). Samus as the game finds her
      (F_8DF4CD4): the game object (the pointer in GOT slot main+0x1CBA088), its +0x2998 -> +0x10 = her entity; her
      movement component at +0x1F0, vertical speed (float, up positive) at +0x1DC. Plain dmnt: works on a console too */
@@ -282,6 +283,7 @@ void cheats_init(void){
    game finds her: the game object ([GOT 0x9CBF088]), its player (F_8DF1788), her life component at +448 (+80 maximum
    and +84 current energy, floats), her movement component at +0x1F0 (+0x1DC vertical speed). Energy is never written
    from here: the HUD only follows the game's own setter, so Infinite HP is the damage-routine patch (code_150.c) */
+static void aeion_watch(u64 guest);
 static void samus_trace(void){
   static u64 said; u64 now=plat_ns(); if(now<said) return; said=now+500000000ull;
   u64 slot,g,t,p,l,mx,cur,mv=0,vy=0;
@@ -290,7 +292,39 @@ static void samus_trace(void){
   u32 m32=(u32)mx, c32=(u32)cur, v32=0; float fm, fc, fv; memcpy(&fm,&m32,4); memcpy(&fc,&c32,4);
   if(rd(p+0x1F0,8,&mv) && mv && rd(mv+0x1DC,4,&vy)) v32=(u32)vy;
   memcpy(&fv,&v32,4);
-  LOG("cheats: Samus's energy %.1f of %.1f, vertical speed %.0f, buttons %llx\n",fc,fm,fv,(unsigned long long)g_cheat_keys); }
+  /* Aeion, as the HUD reads it (code_154.c F_91E9A28): Samus +736 -> +232 -> +16, +64 maximum, +68 current */
+  u64 a1=0,a2=0,a3=0,am=0,ac=0; float fam=0, fac=0;
+  if(rd(p+736,8,&a1) && a1 && rd(a1+232,8,&a2) && a2 && rd(a2+16,8,&a3) && a3 && rd(a3+64,4,&am) && rd(a3+68,4,&ac)){
+    u32 x=(u32)am, y=(u32)ac; memcpy(&fam,&x,4); memcpy(&fac,&y,4); if(fam>0) aeion_watch(a3+68); }
+  LOG("cheats: Samus's energy %.1f of %.1f, Aeion %.1f of %.1f, vertical speed %.0f, buttons %llx\n",fc,fm,fac,fam,fv,(unsigned long long)g_cheat_keys); }
+
+#ifdef _WIN32
+/* TEST ONLY, SWR_TEST_WATCH_AEION=1: the page holding Samus's Aeion value is made read-only; each write to the value itself
+   is logged with the writing host code address (resolve with nm on the code DLL: offset = rip - DLL base), then allowed by
+   one single step and the page made read-only again */
+#include <windows.h>
+static volatile u64 g_w_addr, g_w_page; static volatile LONG g_w_step; static volatile LONG g_w_logged;
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* e){
+  DWORD code=e->ExceptionRecord->ExceptionCode; DWORD old;
+  if(code==EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters>=2 && e->ExceptionRecord->ExceptionInformation[0]==1){
+    u64 a=(u64)e->ExceptionRecord->ExceptionInformation[1];
+    if(g_w_page && a>=g_w_page && a<g_w_page+4096){
+      if(a>=g_w_addr && a<g_w_addr+4 && g_w_logged<400){ InterlockedIncrement(&g_w_logged);
+        extern void* g_code_mod; LOG("watch: Aeion written by rip %p = code DLL + %llx\n",(void*)e->ContextRecord->Rip,
+          (unsigned long long)(e->ContextRecord->Rip-(u64)g_code_mod)); }
+      VirtualProtect((void*)g_w_page,4096,PAGE_READWRITE,&old); e->ContextRecord->EFlags|=0x100; InterlockedExchange(&g_w_step,1);
+      return EXCEPTION_CONTINUE_EXECUTION; } }
+  if(code==EXCEPTION_SINGLE_STEP && g_w_step){ InterlockedExchange(&g_w_step,0); VirtualProtect((void*)g_w_page,4096,PAGE_READONLY,&old);
+    return EXCEPTION_CONTINUE_EXECUTION; }
+  return EXCEPTION_CONTINUE_SEARCH; }
+static void aeion_watch(u64 guest){
+  static int on=-1; if(on<0) on=getenv("SWR_TEST_WATCH_AEION")!=NULL; if(!on || g_w_page) return;
+  g_w_addr=(u64)GP(guest); g_w_page=g_w_addr&~4095ull;
+  AddVectoredExceptionHandler(1,watch_veh); DWORD old; VirtualProtect((void*)g_w_page,4096,PAGE_READONLY,&old);
+  LOG("watch: Aeion at guest %llx, host %p\n",(unsigned long long)guest,(void*)g_w_addr); }
+#else
+static void aeion_watch(u64 guest){ (void)guest; }
+#endif
 
 /* main loop, every frame: runs the VM at 12 Hz */
 void cheats_tick(void){
@@ -301,6 +335,7 @@ void cheats_tick(void){
   for(int i=0;i<g_nch;i++) if(g_ch[i].on){ bits|=g_ch[i].bits; if(g_ch[i].n) run(&g_ch[i]); }
   bits|=g_fbits;
   if(g_swr_cheats && *g_swr_cheats!=bits){ *g_swr_cheats=bits;
-    LOG("cheats: game patches:%s%s%s%s%s\n",bits&CB_HP? " infinite HP" : "",bits&CB_MISSILES? " infinite missiles" : "",
-        bits&CB_PBOMBS? " infinite power bombs" : "",bits&CB_EMMI? " E.M.M.I. break-free" : "",bits? "" : " none"); }
+    LOG("cheats: game patches:%s%s%s%s%s%s\n",bits&CB_HP? " infinite HP" : "",bits&CB_MISSILES? " infinite missiles" : "",
+        bits&CB_PBOMBS? " infinite power bombs" : "",bits&CB_EMMI? " E.M.M.I. break-free" : "",bits&CB_AEION? " infinite Aeion" : "",
+        bits? "" : " none"); }
   if(g_trace) samus_trace(); }

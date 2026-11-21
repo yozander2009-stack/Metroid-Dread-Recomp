@@ -441,6 +441,30 @@
     ]
    ]
   },
+  "code_087.c": {
+   "pristine": "b15f9d88ed64d5b0d52be9eb8289fed4dfd319178f21bae3065a12cf612a5757",
+   "result": "0a11deda16673ae8f004bdcf2ece66e9b1045c38647e849e2ecda5a6b4d559f4",
+   "hunks": [
+    [
+     18922,
+     18922,
+     [
+      "/* SWR cheats (code_071.c swr_cheats bit 16, Infinite Aeion): F_8A24A98(object, value) sets a special-energy gauge. Samus's",
+      "   Aeion is the object at Samus +736 -> +232 -> +16 (the HUD reads it so, code_154.c F_91E9A28): only that one is held */",
+      "extern volatile unsigned swr_cheats;",
+      "static int swr_samus_aeion(u8* const M, u64 obj){ u64 g=RD64(RD64(164360192+136)), t= g? RD64(g+10680) : 0, p= t? RD64(t+16) : 0;",
+      "  u64 a= p? RD64(p+736) : 0; a= a? RD64(a+232) : 0; a= a? RD64(a+16) : 0; return a && a==obj; }"
+     ]
+    ],
+    [
+     18934,
+     18934,
+     [
+      " if(UNLIKELY(swr_cheats&16u) && swr_samus_aeion(M,c->x[0])){ union{ u32 u; f32 f; } cur_; cur_.u=(u32)RD32((c->x[0]+68)); if(c->v[0].f[0]<cur_.f) SETS(0,cur_.f); }   /* SWR cheats: Infinite Aeion (a drain becomes \"no change\") */"
+     ]
+    ]
+   ]
+  },
   "code_097.c": {
    "pristine": "f28dcb754fa4f22454d0c765b19674dec0970fcfe419dffa51918b7385f34ba8",
    "result": "4e8172b68d99c8a31614a11e55026362a515bd1f1c0ebccaff3083ee5aa3df44",
