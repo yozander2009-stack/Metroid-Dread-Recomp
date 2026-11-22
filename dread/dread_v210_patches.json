@@ -439,6 +439,47 @@
     ]
    ]
   },
+  "code_053.c": {
+   "pristine": "266050a8af9d1664ed810cbf83d0199985176c5b2570b629b172d5112d76450b",
+   "result": "0b4e5318357f0e24f86a7c94729c5d63d5caa80f6a9e34b28e041615dc5c6f80",
+   "hunks": [
+    [
+     1805,
+     1805,
+     [
+      "/* SWR above 60 FPS: F_862B818 is the \"onimpact\" handler. At 60 FPS an acid ball touches the ground about once and bursts; faster",
+      "   than that the balls stay on the ground and the handler ran on almost every frame, restarting the \"onimpact\" action and its",
+      "   effects (25x the effect spawns at 240, the screen full of splashes, 75-100 FPS). Above 75 FPS (the game's frame counter",
+      "   against the clock) it runs at most once per 1/60 s per object, its cadence at 60; at 60 FPS this never applies.",
+      "   SWR_NO_IMPACT_60=1: off (tests) */",
+      "__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);",
+      "typedef struct { u64 key, t; } SwrImp60;",
+      "static SwrImp60 swr_imp60[4096];",
+      "static int swr_impact60(CPU* RESTRICT c, u64 key){",
+      "  u8* const M=c->mem; static int off=-1; static u64 lf_t, lf_n; static int fast;",
+      "  if(off<0){ char b[4]; off= GetEnvironmentVariableA(\"SWR_NO_IMPACT_60\",b,sizeof b)>0 && b[0]=='1'; }",
+      "  if(off || !key) return 0;",
+      "  u64 now=c->rt->ticks();",
+      "  { u64 fa=RD64(164409344ull+2008); u64 fn= fa? RD32(fa) : 0;   /* the game's frame counter (as swr_spawn_ok, code_149.c) */",
+      "    if(fn!=lf_n && lf_t && now-lf_t<38400000ull) fast= (now-lf_t)/(fn>lf_n? fn-lf_n : 1) < 256000ull;   /* under 13.3 ms a frame */",
+      "    if(fn!=lf_n){ lf_n=fn; lf_t=now; } }",
+      "  if(!fast) return 0;",
+      "  u32 h=(u32)((key*0x9E3779B97F4A7C15ull)>>52)&4095; SwrImp60* e=0;",
+      "  for(int q=0;q<8;q++){ SwrImp60* s=&swr_imp60[(h+q)&4095]; if(s->key==key){ e=s; break; } if(!e && (!s->key || now-s->t>76800000ull)) e=s; }",
+      "  if(e && e->key==key && now-e->t<320000ull) return 1;   /* 1/60 s at 19.2 MHz */",
+      "  if(e){ e->key=key; e->t=now; }",
+      "  return 0; }"
+     ]
+    ],
+    [
+     1809,
+     1809,
+     [
+      " { u64 k_=RD64(c->x[0]+48); k_= k_? RD64(k_+744) : 0; if(swr_impact60(c,k_)){ c->x[0]=1; c->pc=c->x[30]; return; } }   /* SWR: once per 1/60 s above 60 FPS */"
+     ]
+    ]
+   ]
+  },
   "code_071.c": {
    "pristine": "46f841ae1a696795d2500e6420315b12eec6f062ec31006ffc282fd90322d895",
    "result": "8ea02c45737f383f236c249cdcc043d9c677ccd25d49c3887150a8456ba1715f",

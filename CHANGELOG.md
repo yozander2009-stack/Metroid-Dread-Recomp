@@ -28,6 +28,8 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 - After a rebuild, the Play screen no longer asks to rebuild again.
 - Videos decode on several threads on Windows: the Game Over and title videos start without a dropped frame, and the
   boot video's pictures are decoded correctly (some came out wrong before).
+- Above 60 FPS, the acid enemy's acid balls no longer stay on the ground and flood the screen with splashes: they burst as
+  at 60, and the fight holds 120 / 240 FPS (it dropped to 75-100).
 - Native Vulkan on GPUs without dynamic vertex input (AMD's driver): the game's pipeline list now builds the pipelines
   draws use at the start, so far fewer stutters the first time a scene appears.
 
