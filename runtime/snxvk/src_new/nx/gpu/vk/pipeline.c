@@ -2015,8 +2015,78 @@ static int rc_fmt_ok(VkFormat f, VkFormatFeatureFlags need) {
     vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &fp);
     return (fp.optimalTilingFeatures & need) == need;
 }
+/* SWR: without dynamic vertex input a pipeline holds the vertex layout, and the shipped and imported recipes hold none
+   (converted from a cache recorded with dynamic vertex input): as they are, their pipelines are never the ones a draw
+   asks for (AMD's driver, where dynamic vertex input is off, made every pipeline of a first run on draws). Each gets
+   the layouts its vertex shader has in recipes recorded without dynamic vertex input (pipeline_recipes_layouts.bin,
+   recorded with SWR_VK_NO_DYN_VI=1 SWR_VK_RECIPES_RECORD=1, and this PC's own pipeline_recipes.bin); one whose shader
+   has none there is left out. lay[0..nlay) are those recipes, kept as they are */
+typedef struct {
+    u64 hash;
+    u32 nattr, nbind;
+    u32 attr[32][4];
+    u32 bind[33][2];
+} RcLay;
+static int rc_lay_same(const RcLay* a, const PipeKey* k) {
+    return a->nattr == k->nattr && a->nbind == k->nbind && !memcmp(a->attr, k->attr, sizeof a->attr) &&
+           !memcmp(a->bind, k->bind, sizeof a->bind);
+}
+static Recipe* rc_add_layouts(Recipe* r, u32* pn, u32 nlay, u32* dropped, u32* made) {
+    u32 n = *pn, nl = 0, m = 0, cap = n + 64;
+    RcLay* L = malloc((size_t)(nlay ? nlay : 1) * sizeof *L);
+    Recipe* out = malloc((size_t)cap * sizeof *out);
+    if (!L || !out) {
+        free(L);
+        free(out);
+        return r;
+    }
+    for (u32 i = 0; i < nlay; i++) { /* the distinct (vertex shader, layout) pairs */
+        u32 j = 0;
+        while (j < nl && !(L[j].hash == r[i].sh[0].hash && rc_lay_same(&L[j], &r[i].k))) j++;
+        if (j < nl) continue;
+        L[nl].hash = r[i].sh[0].hash;
+        L[nl].nattr = r[i].k.nattr;
+        L[nl].nbind = r[i].k.nbind;
+        memcpy(L[nl].attr, r[i].k.attr, sizeof L[nl].attr);
+        memcpy(L[nl].bind, r[i].k.bind, sizeof L[nl].bind);
+        nl++;
+    }
+    int full = 0;
+    for (u32 i = 0; i < n && !full; i++) {
+        int any = 0;
+        if (i < nlay) {
+            out[m++] = r[i];
+            continue;
+        }
+        for (u32 j = 0; j < nl; j++) {
+            if (L[j].hash != r[i].sh[0].hash) continue;
+            if (m == cap) {
+                Recipe* g = realloc(out, (size_t)cap * 2 * sizeof *out);
+                if (!g) {
+                    full = 1; /* the recipes so far are kept */
+                    break;
+                }
+                out = g;
+                cap *= 2;
+            }
+            out[m] = r[i];
+            out[m].k.nattr = L[j].nattr;
+            out[m].k.nbind = L[j].nbind;
+            memcpy(out[m].k.attr, L[j].attr, sizeof L[j].attr);
+            memcpy(out[m].k.bind, L[j].bind, sizeof L[j].bind);
+            m++;
+            (*made)++;
+            any = 1;
+        }
+        if (!any) (*dropped)++;
+    }
+    free(L);
+    free(r);
+    *pn = m;
+    return out;
+}
 static void rc_merge(void) {
-    u32 n = 0, queued = 0, known = 0, lacked = 0;
+    u32 n = 0, queued = 0, known = 0, lacked = 0, nlay = 0, lay_dropped = 0, lay_made = 0;
     Recipe* r = NULL;
     u64 t0;
     if (g_rc_merged || !g_pf.on || !__atomic_load_n(&g_pf.ship_ready, __ATOMIC_ACQUIRE)) return;
@@ -2024,8 +2094,10 @@ static void rc_merge(void) {
     t0 = plat_ns();
     yz_import();
     {
-        const char* files[3] = {rc_path(), rc_file("pipeline_recipes_shipped.bin"), rc_file("pipeline_recipes_imported.bin")};
-        for (int fi = 0; fi < 3; fi++) {
+        /* SWR: the files with vertex layouts first (rc_add_layouts) */
+        const char* files[4] = {rc_file("pipeline_recipes_layouts.bin"), rc_path(), rc_file("pipeline_recipes_shipped.bin"),
+                                rc_file("pipeline_recipes_imported.bin")};
+        for (int fi = 0; fi < 4; fi++) {
             u32 m = 0;
             Recipe* x = rc_read_file(files[fi], &m);
             if (!x) continue;
@@ -2034,11 +2106,18 @@ static void rc_merge(void) {
                 r = g;
                 memcpy(r + n, x, (size_t)m * sizeof *x);
                 n += m;
+                if (fi < 2) nlay = n;
             }
             free(x);
         }
     }
     if (!r) return;
+    if (!g_vk.has_dyn_vi && !getenv("SWR_VK_RECIPES_NO_LAYOUTS")) {
+        r = rc_add_layouts(r, &n, nlay, &lay_dropped, &lay_made);
+        LOG("vulkan: pipeline recipes without dynamic vertex input: %u given the vertex layouts of recorded ones, %u left "
+            "out (no layout known for their vertex shader)\n",
+            lay_made, lay_dropped);
+    }
     for (u32 i = 0; i < n; i++) {
         PipeKey k = r[i].k;
         vk_pipekey_strip_vi(&k); /* SWR: a recipe recorded with a layout serves any layout then */

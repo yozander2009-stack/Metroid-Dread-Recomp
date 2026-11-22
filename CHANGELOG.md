@@ -26,6 +26,10 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 - Stick snap-back filter catches fast bounces and lets full-tilt turns through ([#54]).
 - Loading screens and cutscenes run at the frame rate however the game is started.
 - After a rebuild, the Play screen no longer asks to rebuild again.
+- Videos decode on several threads on Windows: the Game Over and title videos start without a dropped frame, and the
+  boot video's pictures are decoded correctly (some came out wrong before).
+- Native Vulkan on GPUs without dynamic vertex input (AMD's driver): the game's pipeline list now builds the pipelines
+  draws use at the start, so far fewer stutters the first time a scene appears.
 
 ## 0.5.10 (2026-11-19)
 - AMD Radeon cards start on Native Vulkan; Native Vulkan fixes for AMD ([#68], [#69]).

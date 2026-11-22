@@ -202,8 +202,9 @@ def release(out, exe, version):
     for f in ('zlib1.dll', 'SDL2.dll'):
         cp(redist(f), os.path.join(dst, f))
     # Native Vulkan's pipeline list (shader hashes and pipeline state, no game code): its pipelines built at start
-    cp(os.path.join(ROOT, 'dread', 'pipeline_recipes_shipped.bin'),
-       os.path.join(dst, 'vulkan_native', 'pipeline_recipes_shipped.bin'))
+    # (and the vertex layouts its pipelines need where the GPU has no dynamic vertex input, as on AMD's driver)
+    for f in ('pipeline_recipes_shipped.bin', 'pipeline_recipes_layouts.bin'):
+        cp(os.path.join(ROOT, 'dread', f), os.path.join(dst, 'vulkan_native', f))
     rc = os.path.join(dst, 'recompiler')
     for f in RECOMPILER_PY:
         cp(os.path.join(ROOT, f), os.path.join(rc, f))

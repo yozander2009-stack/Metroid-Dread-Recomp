@@ -33,7 +33,7 @@ void vp9_note_file(const char* path){
   int k=0; for(;k<V9_FILES-1;k++) if(g_v9_recent[k]==path || !g_v9_recent[k]) break;
   for(;k>0;k--) g_v9_recent[k]=g_v9_recent[k-1];
   g_v9_recent[0]=path; pm_unlock(&g_hlk);
-  if(getenv("SWR_TRACE_VP9")) LOG("vp9 note: game opened %s\n",path); }
+  if(getenv("SWR_TRACE_VP9")) LOG("vp9 note: game opened %s ns=%llu\n",path,(unsigned long long)plat_ns()); }
 
 /* Mod videos at another size than the game's (GitHub #31). The game's own decoder is set up for the size it ships with
    and never starts on a different one (the game then waits forever or calls through NULL). So the game keeps reading

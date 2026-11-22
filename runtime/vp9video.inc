@@ -176,13 +176,18 @@ static V9Vid* v9_load(const char* path){
 
 /* ---- libvpx */
 static u64 v9_t_reset, v9_t_dec, v9_t_keep, v9_t_store;   /* SWR_TRACE_VP9: ns per step, summed over a job */
-/* decoder threads: 2. MEASURED 2026-10-22 (3 OFF/ON pairs, owner's setup, vp9off2/vp9on2): 8 threads decoded no faster
-   (mean 1.9 ms per job, first frames 9.5-15 ms both ways; the videos give libvpx little to split) and 76 title-video
-   pictures came out different (same setting: 0 differences run to run). Row multithreading (VP9D_SET_ROW_MT) froze the
-   boot video in 4 of 4 runs. Both dead ends. SWR_VP9_THREADS=N is for tests only */
+/* decoder threads: 4 (fewer on a PC with fewer CPUs). Dread's 1280x720 videos (Game Over, title, cutscenes) have 4 tile
+   columns, which libvpx decodes side by side. The Windows libvpx.a before 2026-11-21 was built with --disable-multithread,
+   so every thread setting ran on one thread: that is why 8 threads "decoded no faster" (2026-10-22), and its 2-thread
+   setting ran the loop filter's row workers one after another without their sync, which decoded 85 pictures of the boot
+   video wrong (its 1-thread output = the new library's at 1, 2 and 4 threads: MEASURED 2026-11-21, SWR_VP9_PIC_HASH).
+   MEASURED with the threaded build (regression route, 60 FPS): Game Over start key frame 14.1 -> 5.7 ms, second picture
+   8.7 -> 2.7 ms, the game's ready wait ends 13 ms sooner and the start no longer misses a frame. Row multithreading
+   (VP9D_SET_ROW_MT) froze the boot video with the old build: not used. SWR_VP9_THREADS=N is for tests only */
 static int v9_threads(void){
   static int n; if(n) return n;
-  const char* e=getenv("SWR_VP9_THREADS"); n=e? atoi(e) : 2;
+  extern int plat_ncpu(void); int cpus=plat_ncpu();
+  const char* e=getenv("SWR_VP9_THREADS"); n=e? atoi(e) : (cpus>=4? 4 : cpus);
   if(n<1) n=1; if(n>16) n=16;
   return n; }
 /* SWR_VP9_PIC_HASH=file: a hash of every decoded picture (path, frame, hash), to compare decoder settings */

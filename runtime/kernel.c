@@ -757,6 +757,8 @@ static void swr_svc_(CPU* c, u32 imm){
     u64 wait_start=plat_ns();
     if(t->is_main&&x[30]==0x82252bcull){
       u64 parent=x[19];MemBlock block;mem_query(parent,&block);
+      { static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_READY_WAIT")!=NULL;   /* test only: every poll of the video-ready wait */
+        if(tr) LOG("wait: ready poll %llu/%llu group %llx ns=%llu\n",(unsigned long long)x[21],(unsigned long long)x[20],(unsigned long long)parent,(unsigned long long)wait_start); }
       if((block.perm&PERM_R)&&parent>=block.addr&&parent+0x70<=block.addr+block.size&&((u32)x[21]==1||(u32)x[21]%100==0)){
         u32 count=gr32(parent+104);u64 children=gr64(parent+96);
         LOG("wait: F_8225228 load group %llx, iteration %llu/%llu, %u children\n",(unsigned long long)parent,(unsigned long long)x[21],(unsigned long long)x[20],count);
