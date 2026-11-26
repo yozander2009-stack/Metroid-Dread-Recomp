@@ -525,6 +525,7 @@ static void page_display() {
         set("ultrawide", get("aspect") == "21:9" ? "1" : "0");   // the Python launcher writes both; keep them in step
         if (get("aspect") != "16:9" && !getb("docked")) { set("docked", "1"); flash("Docked mode switched on: the picture shape only applies there"); }
     }
+    if (get("aspect") != "16:9" && !get("aspect").empty()) draw_opt("videos_16x9");
     section("LANGUAGE"); draw_opt("language");
     if (get("language") == "9") {   // the fan translation, installed by the player (svc_fs.c applies it)
         std::string err;

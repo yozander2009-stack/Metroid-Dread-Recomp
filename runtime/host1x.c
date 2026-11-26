@@ -333,6 +333,24 @@ static void vic_resample(const u8* sy, const u8* suv, u32 fw, u32 fh, u32 sw, u3
       for(int c=0;c<2;c++){ u32 t=(a[2*x0+c]*(256-tx)+a[2*x1+c]*tx), u=(b[2*x0+c]*(256-tx)+b[2*x1+c]*tx); d[2*x+c]=(u8)((t*(256-ty)+u*ty+32768)>>16); } } }
   *oy=ry; *ouv=ruv; }
 
+/* #88: the game shows a video by filling the screen with it. At 21:9 / 32:9 that cuts off its top and bottom, at 16:10 its
+   sides. For the story videos ([Display] videos_16x9=1) the whole picture goes, shrunk by the same factor, into the middle of
+   the surface with black around it: the game's crop then shows it complete, with bars at the sides (or top and bottom) */
+int g_opt_videos_169=1;
+static int vic_story_video(const char* p){ return p && (strstr(p,"/video/prologue/") || strstr(p,"/video/flashback/") || strstr(p,"/video/ending/")); }
+static int vic_pillarbox(u8** py, u8** puv, u32* pw, u32* ph, u32 sw, u32 sh){
+  extern u32 g_vi_buf_w, g_vi_buf_h; if(!g_vi_buf_w || !g_vi_buf_h) return 0;
+  float a=(float)g_vi_buf_w/(float)g_vi_buf_h, b=16.0f/9.0f, k= a>b? b/a : a/b;
+  if(k>0.98f || sw<64 || sh<64) return 0;
+  u32 iw=((u32)((float)sw*k+0.5f))&~1u, ih=((u32)((float)sh*k+0.5f))&~1u, ox=((sw-iw)/2)&~1u, oy=((sh-ih)/2)&~1u;
+  u8 *ry=NULL, *ruv=NULL; vic_resample(*py,*puv,*pw,*ph,iw,ih,&ry,&ruv); if(!ry) return 0;
+  static u8 *by, *buv; static u32 cap; u32 need=sw*sh+sw; if(cap<need){ free(by); free(buv); by=malloc(need); buv=malloc(need/2+sw); cap= (by && buv)? need : 0; } if(!cap) return 0;
+  memset(by,16,(size_t)sw*sh); memset(buv,128,(size_t)sw*((sh+1)/2));   /* video black: Y 16, Cb/Cr 128 */
+  for(u32 y=0;y<ih;y++) memcpy(by+(u64)(oy+y)*sw+ox,ry+(u64)y*iw,iw);
+  for(u32 y=0;y<ih/2;y++) memcpy(buv+(u64)(oy/2+y)*sw+ox,ruv+(u64)y*iw,iw);
+  { static int said; if(!said){ said=1; LOG("video: story videos kept at 16:9 (picture %ux%u in the middle of %ux%u; videos_16x9=0 fills the screen)\n",iw,ih,sw,sh); } }
+  *py=by; *puv=buv; *pw=sw; *ph=sh; return 1; }
+
 static void vic_execute(u32* r){
   if(!g_vframes) return;
   u8*fy=g_fy,*fuv=g_fuv;u32 fw=g_fw,fh=g_fh;
@@ -350,7 +368,10 @@ static void vic_execute(u32* r){
       fprintf(csv,"%llu,%llu,%s,%d,%llu,%s,%d,%llu,%u,%u\n",(unsigned long long)plat_ns(),(unsigned long long)input,picture&&picture->owner?(const char*)(uintptr_t)picture->owner:"",picture?(int)picture->frame:-1,(unsigned long long)(picture?picture->used:0),exact&&exact->owner?(const char*)(uintptr_t)exact->owner:"",exact?(int)exact->frame:-1,(unsigned long long)(exact?exact->used:0),fw,fh);fflush(csv);}}
 
   if(getenv("SWR_VIC_FMT")) fmt=(u32)strtoul(getenv("SWR_VIC_FMT"),0,0);
-  if(cs && fw && fh && (picture? (picture->owner && v9_sub_for((const char*)(uintptr_t)picture->owner)) : g_pic_sub) && sw>=16 && sh>=16 && sw<=4096 && sh<=4096 && (fw>sw+16 || fh>sh+16 || fw+16<sw || fh+16<sh)){   /* a mod video of another size (#31) */
+  /* a story video at 16:9 (#88) is resampled from any size, so a mod video's (#31) needs no second pass */
+  int boxed= cs && fw && fh && g_opt_videos_169 && picture && picture->owner && vic_story_video((const char*)(uintptr_t)picture->owner) && sw<=4096 && sh<=4096
+             && vic_pillarbox(&fy,&fuv,&fw,&fh,sw,sh);
+  if(!boxed && cs && fw && fh && (picture? (picture->owner && v9_sub_for((const char*)(uintptr_t)picture->owner)) : g_pic_sub) && sw>=16 && sh>=16 && sw<=4096 && sh<=4096 && (fw>sw+16 || fh>sh+16 || fw+16<sw || fh+16<sh)){   /* a mod video of another size (#31) */
     u8 *ry=NULL, *ruv=NULL; vic_resample(fy,fuv,fw,fh,sw,sh,&ry,&ruv);
     if(ry){ { static int said; if(said<2){ said++; LOG("video: picture %ux%u scaled to the game's %ux%u\n",fw,fh,sw,sh); } } fy=ry; fuv=ruv; fw=sw; fh=sh; } }
   u32 w=fw<sw? fw : sw, h=fh<sh? fh : sh;

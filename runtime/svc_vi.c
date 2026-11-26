@@ -6,6 +6,7 @@
 
 typedef struct { int used; u32 afmt; u32 nvmap_id; u32 w, h, stride, fmt, layout, bhl, pitch, offset; u64 size; u8 raw[0x16C]; u32 rawsize; int queued; } Slot;
 static Slot slots[64];
+u32 g_vi_buf_w, g_vi_buf_h;   /* the game's display buffer size (host1x.c: story videos at 16:9, #88) */
 static KEvent* g_vsync_ev; static KEvent* g_bufavail_ev;
 static PMutex g_vilock; static int g_connected;
 static int g_width=1280, g_height=720;
@@ -57,7 +58,7 @@ static int binder_transact(u32 id, u32 code, PR* in, PW* out){
           memcpy(&s->nvmap_id,nb+0x10,4); memcpy(&s->stride,nb+0x30,4);
           u8* pl=nb+0x40; memcpy(&s->w,pl,4); memcpy(&s->h,pl+4,4); u64 cf; memcpy(&cf,pl+8,8); s->fmt=(u32)cf; memcpy(&s->layout,pl+0x10,4);
           memcpy(&s->pitch,pl+0x14,4); memcpy(&s->offset,pl+0x1C,4); memcpy(&s->bhl,pl+0x24,4);
-          s->used=1;
+          s->used=1; g_vi_buf_w=s->w; g_vi_buf_h=s->h;
           LOG("vi: buffer %d  %ux%u pitch=%u layout=%u bhl=%u fmt=%x nvmap=%u\n",slot,s->w,s->h,s->pitch,s->layout,s->bhl,s->fmt,s->nvmap_id); } }
       pw_u32(out,0); return 0; }
     case 1: { /* REQUEST_BUFFER */

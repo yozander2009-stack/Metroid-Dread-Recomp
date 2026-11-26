@@ -122,7 +122,7 @@ void opt_row(const char* key) {
 void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
-            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
+            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("videos_16x9"); opt_row("language"); break;
     case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("shadow_resolution"); opt_row("bloom_quality"); opt_row("anisotropy"); section("RENDERER"); { std::string was = val("renderer"); opt_row("renderer");
                 if (backend_gpu_amd()) { std::string now = val("renderer"); if (now != was) change("amd_opengl", now == "vulkan_native" ? "0" : "1");
                     if (now != "vulkan_native") warn_text("AMD graphics card: OpenGL (and Vulkan output) crashes in AMD's driver on many PCs. Native Vulkan is recommended."); } }

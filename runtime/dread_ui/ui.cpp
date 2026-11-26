@@ -515,6 +515,9 @@ static std::vector<Opt> build_options() {
       "21:9 is theboy181's patch (commissioned by Nikorasu081); 16:10 uses the same spot for 1440\xC3\x97" "900 (Steam Deck, 1920\xC3\x97" "1200). "
       "They need Docked mode and may cut off a little in videos and some menus. 21:9 and 32:9 are experimental: the game "
       "only draws the room you are in, so the extra width can show black past a room's edge.");
+    B("videos_16x9", "Display", "Display", "Story videos at 16:9", LIVE_YES, "1",
+      "With a 21:9, 32:9 or 16:10 picture the prologue, flashback and ending videos keep their 16:9 shape, with black bars. "
+      "Off: they fill the screen and lose their top and bottom (the sides at 16:10).");
     C("language", "Display", "Display", "Language", LIVE_RESTART, "1", {{"0", "Japanese"}, {"1", "English (US)"}, {"2", "French"}, {"3", "German"},
       {"4", "Italian"}, {"5", "Spanish"}, {"6", "Chinese"}, {"7", "Korean"}, {"8", "Dutch"}, {"9", "Portuguese (Brazil): fan translation"}, {"10", "Russian"},
       {"11", "Taiwanese"}, {"12", "English (UK)"}, {"13", "French (Canada)"}, {"14", "Spanish (Latin America)"}}, "");
