@@ -3175,9 +3175,18 @@ retry:
             g_dyn.sets[2 + b] = bset[b];
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, (u32)b + 2, 1, &bset[b], 0, NULL);
         }
-    if (k->nbind)
-        rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize,
-                                  g_vk.has_dynamic_stride && !g_vk.has_dyn_vi ? pl->stride : NULL);
+    /* SWR: with dynamic vertex input the layout is set first and the binding gets its strides too, as upstream orders
+       them (render.c vertex_input_set before vkCmdBindVertexBuffers2). AMD's Windows driver (26.10.1, Radeon iGPU)
+       drew nothing with the extension enabled and the strides set by vkCmdBindVertexBuffers2 as dynamic state (MEASURED
+       2026-11-25), and an RX 6700 drew nothing with dynamic vertex input (#68): the strides are given to both calls,
+       equal. SWR_VK_VI_OLD_ORDER=1 = the binding first, without strides (tests) */
+    static int vi_old = -1;
+    if (vi_old < 0) vi_old = getenv("SWR_VK_VI_OLD_ORDER") != NULL;
+    if (!g_vk.has_dyn_vi || vi_old) {
+        if (k->nbind)
+            rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize,
+                                      g_vk.has_dynamic_stride && !g_vk.has_dyn_vi ? pl->stride : NULL);
+    }
     if (g_vk_ck_draws < 0) g_vk_ck_draws = getenv("SWR_VK_CK_DRAWS") != NULL;
     if (g_vk_ck_draws) { /* SWR test: which draw a lost device was in, and the first draws' vertex input */
         static u32 nd;
@@ -3223,6 +3232,7 @@ retry:
         }
     }
 
+    if (g_vk.has_dyn_vi && !vi_old && k->nbind) rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, vsize, pl->stride);
     VkViewport vp = vk_render_viewport(r);
     u32 viewports = last->si.writes_viewport ? GUEST_VIEWPORTS : 1;
     if (viewports == 1 && (!(vp.width > 0 && vp.height != 0) || !vp_sane(&vp))) {
