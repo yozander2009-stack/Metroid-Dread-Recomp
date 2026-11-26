@@ -415,7 +415,7 @@ bool mod_import_folder(const std::string& src, const std::string& name, std::str
         }
         if (!copy_tree(rf, join(target, "romfs"), err, true)) return false;
     }
-    auto m = mods_list(); mods_write(m); return true;
+    auto m = mods_list(); if (!patch.empty()) randovania_only(m, name); mods_write(m); return true;
 }
 bool mod_import_zip(const std::string& zip, std::string* err) {
     const char* t = getenv("TMPDIR"); std::string dir = join(t && *t ? t : "/tmp", "dreadmod_" + now_stamp()); make_dirs(dir);

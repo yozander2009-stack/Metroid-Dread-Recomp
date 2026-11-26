@@ -34,6 +34,13 @@ static bool randovania_import_info(const std::string& root, const std::string& r
     return true;
 }
 
+// The game starts only with one seed on: a newly imported seed is switched on and the other seeds off.
+static void randovania_only(std::vector<Mod>& mods, const std::string& keep) {
+    for (auto& m : mods)
+        if (m.name == keep) m.enabled = true;
+        else if (file_exists(join(join(mods_dir(), m.name), SWR_RANDOVANIA_MARKER))) m.enabled = false;
+}
+
 static bool import_randovania(const std::string& romfs, const std::string& patch,
                               const std::string& target, std::string* err) {
     if (dir_exists(target) || file_exists(target)) {
