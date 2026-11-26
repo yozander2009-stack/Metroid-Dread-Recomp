@@ -442,7 +442,7 @@ static const IniOpt INI_GRAPHICS[]={
 static const IniOpt INI_PERF[]={
   {"audio_channels","stereo","stereo, or 5.1: the game's six-channel mix (front, centre, LFE, rear) to a 5.1 speaker set\n;   (Windows; a stereo device gets Windows' own downmix)"},
   {"audio_surround_downmix","0","1 = include all six audio channels in stereo output (experimental)"},
-  {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
+  {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited, or a cap: 30 and 40 save battery (#39), 90..240 for fast screens.\n;   The game measures real elapsed time, so it keeps its speed at any cap; slow-motion moments run at 60. F4 changes it in game"},
   {"video_async_retire","0","1 = retire obsolete video pictures on a bounded worker (experimental; restart required)"},
   {"video_avx2","0","1 = exact AVX2 video color conversion when supported (experimental; restart required)"},
   {"video_block_copy","0","1 = grouped video tiled-row copies (experimental; restart required)"},
@@ -632,7 +632,8 @@ static const volatile int* g_particle_pool;   /* swr_particle_pool in a patched 
 static void pace_update(void){
   static int off=-1; if(off<0) off=getenv("SWR_NO_SLOWMO_60")!=NULL;
   int f=g_opt_fps;
-  if((f>60 || f==0) && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
+  /* below 60 too (30 and 40 FPS caps, #39): slow motion is paced at 60 there as well, the console's rate for those moments */
+  if(f!=1 && f!=60 && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
     if(o && o<(1ull<<40)){ float s; u32 v=*(volatile u32*)GP(o+1700); memcpy(&s,&v,4);
       /* From its first frame, and with no cap too. A 0.4 s delay (so brief hit pauses, scale 0.01 for ~0.2 s, stayed at
          the cap) broke the E.M.M.I. counter and slide again: its first 0.4 s ran at the cap with tiny steps, so the
@@ -719,7 +720,7 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   /* no cap (fps_limit=0): g_pace_fps is 0 unless pace_update asks for 60 or 120 (slow motion, the particle pool): the
      presentation pacers stay off then, so this limiter does it */
   if(g_opt_fps || g_rec_active || g_pace_fps){ int pf=g_pace_fps; u64 per= pace_period_ns(pf);
-    if(g_opt_fps>=10 && g_opt_fps<60){ static int said; if(!said){ said=1; WARN("fps_limit=%d would run the game at %d%% speed (one game step per image): using 60\n",g_opt_fps,g_opt_fps*100/60); } }
+    if(g_opt_fps>=2 && g_opt_fps<30){ static int said; if(!said){ said=1; WARN("fps_limit=%d is below 30: using 60\n",g_opt_fps); } }
     u64 now=plat_ns(); u64 next=g_last_present+per;
     if(limiter_trace){trace_begin=now;trace_deadline=next;}
     if(g_last_present && now<next){if(limiter_trace)trace_sleep=next-now;plat_sleep_ns((i64)(next-now));}

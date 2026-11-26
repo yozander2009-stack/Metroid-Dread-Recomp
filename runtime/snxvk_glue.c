@@ -319,7 +319,7 @@ int backend_hdr_peak_nits(void){
 #endif
   return cached; }
 #endif
-int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=60 && g_opt_fps<=240)); }
+int snxvk_pacing(void){ extern int g_opt_fps; return g_snxvk_on && !getenv("SWR_SNXVK_NO_PACING") && (g_opt_fps==1 || (g_opt_fps>=30 && g_opt_fps<=240)); }   /* 30 and 40: battery caps (#39) */
 void snxvk_present(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
   /* the game's crop from QueueBuffer (svc_vi.c): handheld Dread draws 1280x720 into a 1600x900 buffer. Passing none
      showed the whole buffer, the picture in the top-left 80% of the screen (2026-10-29) */

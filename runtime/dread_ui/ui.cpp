@@ -551,8 +551,9 @@ static std::vector<Opt> build_options() {
     I("hdr_paper_white", "Graphics", "Graphics", "HDR paper white (nits)", LIVE_RESTART, "200", 80, 500, 10, "");
     B("dlss", "Graphics", "Graphics", "NVIDIA DLAA", LIVE_RESTART, "0", "OpenGL or Native Vulkan, RTX cards. The Play screen's Graphics page downloads NVIDIA's DLSS.", false);
     // Gameplay
-    C("fps_limit", "Performance", "Gameplay", "Frame rate", LIVE_YES, "1", {{"1", "60 FPS (console)"}, {"90", "90 FPS"}, {"120", "120 FPS"}, {"144", "144 FPS"}, {"240", "240 FPS"}, {"0", "Unlimited"}},
-      "Dread's engine uses real elapsed time, so the game keeps its speed above 60 when your PC holds the cap steadily. Slow-motion moments run at 60.");
+    C("fps_limit", "Performance", "Gameplay", "Frame rate", LIVE_YES, "1", {{"30", "30 FPS (saves battery)"}, {"40", "40 FPS (saves battery; even on a 40 or 120 Hz screen)"}, {"1", "60 FPS (console)"}, {"90", "90 FPS"}, {"120", "120 FPS"}, {"144", "144 FPS"}, {"240", "240 FPS"}, {"0", "Unlimited"}},
+      "Dread's engine uses real elapsed time, so the game keeps its speed at any cap your PC holds steadily. Slow-motion moments run at 60. "
+      "30 and 40 save battery on handhelds; 40 looks even only on a screen running at 40 or 120 Hz.");
     B("forced_vsync", "Performance", "Gameplay", "Force VSync", LIVE_YES, "0", "Can lower FPS a lot on slow PCs.");
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
     B("loading_60fps", "Launcher", "Gameplay", "60 FPS elevators and loading screens", LIVE_YES, "1", "The game draws them at 30.");
