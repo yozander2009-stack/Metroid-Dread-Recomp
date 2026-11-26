@@ -272,7 +272,14 @@ static int vp9_job(u32* r, u32 codec){
   for(int oi=0;oi<2 && N<0;oi++){
     u32 o=offs[(oi+(g_v9_slen_off==offs[1]))&1]; u32 L=rd32(ps,o); if(L<V9_TAIL || L>(16u<<20)) continue;
     u8* bs=iova_ptr(bs_iova,L); if(!bs) continue; u64 h=v9_tailhash(bs,L);
-    { V9Vid* B=v9_bound(job_luma); if(B && B->path){ int k=v9_find(B,h,B->cur+1); if(k>=0){ V=B; N=k; } } }
+    /* #74: Dread decodes several videos through one decoder and one output surface (the hologram screens), so the surface
+       does not say whose frame a job is. A bitstream that is exactly the next frame of a video that is playing goes to it;
+       when it is the next frame of more than one (small identical frames), to the one that advanced longest ago. Before,
+       the video bound to the surface took it and the other screen showed a frame of the wrong video (flicker) */
+    if(!getenv("SWR_VP9_OLD_MATCH")) for(int i=0;i<V9N;i++){ V9Vid* C=&g_v9[i]; if(!C->path || !C->nfr || C->cur<0 || g_v9clk-C->used>8) continue;   /* playing: advanced in the last 8 jobs */
+      u32 nx= C->cur+1<(int)C->nfr? (u32)(C->cur+1) : 0; if(C->fr[nx].h!=h) continue;
+      if(!V || C->used<V->used){ V=C; N=(int)nx; } }
+    if(N<0){ V9Vid* B=v9_bound(job_luma); if(B && B->path){ int k=v9_find(B,h,B->cur+1); if(k>=0){ V=B; N=k; } } }
     for(int i=0;i<V9N && N<0;i++) if(g_v9[i].path){ int want=g_v9[i].cur+1; int k=v9_find(&g_v9[i],h,want); if(k>=0){ V=&g_v9[i]; N=k; } }
     /* not in a loaded video: index known .webm files that are not loaded, most recent first, until one matches.
        host1x_ioctl already holds g_hlk throughout vp9_job. */
@@ -282,6 +289,12 @@ static int vp9_job(u32* r, u32 codec){
       if(N<0 && !known_miss) miss[nmiss++&255]=h; }   /* a bitstream no known file contains: search once, not on every job */
     if(N>=0){ slen=L; g_v9_slen_off=o; matched=1; } }
   if(N<0 && codec==9){ V9Vid* B=v9_bound(job_luma);   /* no match (tiny frame): the next frame of the video that owns this surface */
+    if(!getenv("SWR_VP9_OLD_MATCH")){ V9Vid* T=NULL; u32 tl=rd32(ps,g_v9_slen_off? g_v9_slen_off : 0x30); u8* tb= tl && tl<V9_TAIL? iova_ptr(bs_iova,tl) : NULL;   /* #74: or, of the videos playing whose
+         next frame is that small and ends in the same bytes, the one that advanced longest ago (the surface is shared) */
+      for(int i=0;i<V9N;i++){ V9Vid* C=&g_v9[i]; if(!C->path || !C->nfr || C->cur<0 || g_v9clk-C->used>8) continue;
+        u32 nx= C->cur+1<(int)C->nfr? (u32)(C->cur+1) : 0; V9F* f=&C->fr[nx]; if(f->size>V9_TAIL+64 || (tb && (f->size<tl || memcmp(C->data+f->off+f->size-tl,tb,tl)))) continue;
+        if(!T || C->used<T->used) T=C; }
+      if(T) B=T; }
     if(B && B->path && B->nfr){ matched=1; V=B; N=(V->cur+1<(int)V->nfr)? V->cur+1 : 0; }
     else { matched=1; V=NULL; N=-1; } }   /* unknown stream: consume the job, show nothing rather than another video's frame */
   { static int said; if(said<6){ said++; LOG("video: NVDEC job %u codec %u: bitstream %u bytes -> %s frame %d\n",njobs,codec,slen,V? V->path : "(no video)",N); 
