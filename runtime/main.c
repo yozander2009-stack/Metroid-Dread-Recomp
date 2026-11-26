@@ -914,7 +914,7 @@ u64 swr_menu_buttons(u64 b){
   return b; }
 
 /* a save has been loaded at least once this run (game object +0x220, the scenario, is 0 at boot, the title and file
-   select). Linux fast loading waits for it: with it on from boot the intro video stalled on the Steam Deck */
+   select). Fast loading waits for it: with it on from boot the title stalled after its first video */
 int swr_scenario_seen(void){
   static volatile int seen;
   if(!seen){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;

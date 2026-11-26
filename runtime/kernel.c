@@ -774,12 +774,11 @@ static void swr_svc_(CPU* c, u32 imm){
        Matched by return address (F_80860B0 tail-calls, so the caller's return address is in x30 or the first frames). */
     { extern int g_opt_fast_load; static int env=-1; if(env<0){ const char* e=getenv("SWR_FAST_LOADING"); env= e&&e[0]? e[0]=='1' : -2; }
       int on= env==-2? g_opt_fast_load : env;
-#if !defined(_WIN32)   /* Steam Deck: on from boot, the intro video stalled 8 of 8 times (2026-11-05, cause not found). It
-                          only shortens loads once a save has been loaded (room loads, death and reload) */
+      /* on from boot, the title stalled after its first video (Steam Deck 8 of 8, 2026-11-05; Windows 6 of 7, 2026-11-26;
+         cause not found): it only shortens loads once a save has been loaded (room loads, death and reload) */
       if(on && env!=1 && ns==60000000){ extern int swr_scenario_seen(void);
         if(!swr_scenario_seen()) on=0;
-        else { static int said; if(!said){ said=1; LOG("fast loading: on from here (on Linux it waits until a save is loaded)\n"); } } }
-#endif
+        else { static int said; if(!said){ said=1; LOG("fast loading: on from here (it waits until a save is loaded)\n"); } } }
       if(on && ns==60000000){ static const u64 sites[3]={0x821E1F4ull,0x81D6F04ull,0x821E908ull}; int hit=0;
         u64 ra=x[30], fp=x[29];
         for(int k=0;k<4 && !hit;k++){ for(int s=0;s<3;s++) if(ra==sites[s]) hit=1;
