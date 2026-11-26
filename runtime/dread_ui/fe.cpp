@@ -994,6 +994,7 @@ static void page_about() {
         {"Xelu's FREE Controller Prompts", "The PlayStation button art in those icon mods."},
         {"Smashicons - Flaticon", "The program icon: Metroid icon created by Smashicons, flaticon.com/free-icons/metroid (Flaticon licence)."},
         {"JumpmanClub Brasil", "Brazilian Portuguese fan translation (jumpmanclubbrasil.com.br), which you add under Display > Language: MrVtR (Vitor Ribeiro), translator, romhacker and proofreader; CaninosVermelhos (Philipe Rodrigues), Davi Prado and hhgo cb, translators; EsaanAlencar, proofreader."},
+        {"Open Dread Rando (Randovania)", "The 2.1.0 executable patch definitions Randovania seeds need, recompiled for this build (GPL-3.0; github.com/randovania/open-dread-rando)."},
         {"theboy181", "60 FPS cutscenes, 21:9 ultrawide and other Dread patches (github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081."},
         {"Dear ImGui by Omar Cornut", "This interface (MIT)."},
         {"SDL2 (Sam Lantinga and contributors)", "Controller support (zlib licence)."},
