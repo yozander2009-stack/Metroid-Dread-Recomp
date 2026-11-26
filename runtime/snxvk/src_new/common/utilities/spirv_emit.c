@@ -133,6 +133,8 @@ void spv_emit_clip_distance_capability(SpvEmitter* e) { spv_emit_capability(e, S
 
 void spv_emit_image_query_capability(SpvEmitter* e) { spv_emit_capability(e, SPV_CAPABILITY_IMAGE_QUERY); }
 
+void spv_emit_subgroup_quad_capability(SpvEmitter* e) { spv_emit_capability(e, SPV_CAPABILITY_GROUP_NON_UNIFORM_QUAD); }
+
 void spv_emit_subgroup_capabilities(SpvEmitter* e) {
     spv_emit_capability(e, SPV_CAPABILITY_GROUP_NON_UNIFORM);
     spv_emit_capability(e, SPV_CAPABILITY_GROUP_NON_UNIFORM_BALLOT);
@@ -1414,6 +1416,18 @@ uint32_t spv_emit_subgroup_umin_u32(SpvEmitter* e, uint32_t u32_type, uint32_t v
 
 void spv_emit_subgroup_arithmetic_capability(SpvEmitter* e) {
     spv_emit_capability(e, SPV_CAPABILITY_GROUP_NON_UNIFORM_ARITHMETIC);
+}
+
+/* SWR: backport of upstream 3963d78b */
+uint32_t spv_emit_subgroup_quad_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, int swap, uint32_t operand) {
+    uint32_t id = spv_emit_id(e);
+    instruction(&e->functions, swap ? SPV_OP_GROUP_NON_UNIFORM_QUAD_SWAP : SPV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST, 6);
+    put(&e->functions, u32_type);
+    put(&e->functions, id);
+    put(&e->functions, spv_emit_constant_u32(e, u32_type, 3)); /* Subgroup scope */
+    put(&e->functions, value);
+    put(&e->functions, operand);
+    return id;
 }
 
 uint32_t spv_emit_subgroup_shuffle_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, uint32_t lane) {
