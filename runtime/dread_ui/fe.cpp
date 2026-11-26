@@ -1161,7 +1161,12 @@ static void test_tick() {
     if (!g_test) return;
     static int autostarted; static const char* as = getenv("SWR_FE_AUTOSETUP");
     if (as && !autostarted && g_page == PG_SETUP && g_ss == SS_WELCOME) { autostarted = 1;
-        std::string v = as; size_t bar = v.find('|'); g_base = v.substr(0, bar); g_update = bar == std::string::npos ? "" : v.substr(bar + 1);
+#ifdef _WIN32
+        const wchar_t* wv = _wgetenv(L"SWR_FE_AUTOSETUP"); std::string v = wv ? utf8(wv) : as; size_t bar = v.find('|');   // UTF-8 like the folder picker
+#else
+        std::string v = as; size_t bar = v.find('|');
+#endif
+ g_base = v.substr(0, bar); g_update = bar == std::string::npos ? "" : v.substr(bar + 1);
         g_job = SetupJob(); g_job.base = g_base; g_job.update = g_update; g_job.t0 = ImGui::GetTime(); g_ss = setup_start(g_job) ? SS_RUNNING : SS_FAILED; }
     static const char* pf = getenv("SWR_FE_PLAY_FRAME"); static const char* ef = getenv("SWR_FE_EXIT_FRAME");
     if (pf && g_frame_no >= atoi(pf) && g_page != PG_SETUP) g_play = true;

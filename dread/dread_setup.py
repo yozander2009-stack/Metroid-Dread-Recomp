@@ -301,7 +301,13 @@ def apply_patches(build):
 
 
 def main():
+    # #89: the Play screen reads this output as UTF-8; Windows' default console code page also stopped setup with an
+    # exception on a folder name it can't spell
+    for st in (sys.stdout, sys.stderr):
+        try: st.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError): pass
     ap = argparse.ArgumentParser()
+
     ap.add_argument('--out', required=True); ap.add_argument('--name', default='Metroid Dread')
     ap.add_argument('--base', required=True); ap.add_argument('--update', default='')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)

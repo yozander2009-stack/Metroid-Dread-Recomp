@@ -64,8 +64,17 @@ bool write_text(const std::string& p, const std::string& s) {
 }
 std::string now_stamp() { time_t t = time(nullptr); tm l; localtime_s(&l, &t); char b[32]; strftime(b, sizeof b, "%Y%m%d-%H%M%S", &l); return b; }
 
+// argv[0] (main.c) is in the ANSI code page, but every path here is UTF-8: a folder name with an accented letter (#89) read
+// as broken UTF-8 and setup reported the recompiler missing. The folder comes from the EXE's own wide path instead.
+static std::string acp_to_utf8(const char* s) {
+    int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0); if (n <= 1) return s;
+    std::wstring w(n - 1, 0); MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], n); return utf8(w);
+}
 void Paths::init(const char* dir, const char* name) {
-    exedir = dir; exename = name;
+    exedir = acp_to_utf8(dir); exename = acp_to_utf8(name);
+    { std::vector<wchar_t> m(32768); DWORD n = GetModuleFileNameW(nullptr, m.data(), (DWORD)m.size());
+      if (n && n < m.size()) { std::wstring w(m.data(), n); size_t s = w.find_last_of(L"\/"); if (s != std::wstring::npos) exedir = utf8(w.substr(0, s + 1)); } }
+
     for (auto& c : exedir) if (c == '/') c = '\\';
     exe = join(exedir, exename + ".exe"); ini = join(exedir, exename + ".ini"); data = join(exedir, exename + "_data");
     code = join(exedir, exename + "_code.dll"); build = join(exedir, exename + "_build"); recompiler = join(exedir, "recompiler");
