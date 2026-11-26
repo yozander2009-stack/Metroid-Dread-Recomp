@@ -92,7 +92,9 @@ recompiled implementation.
 **Randovania randomizers?**
 Use a **Metroid Dread 2.1.0, single-player PKG** export and import the complete export folder or zip, including its
 ExeFS IPS patches, through **Mods & Texture Packs**. Rebuild the game code once after updating to a build with
-Randovania support. Enable only one randomizer seed at a time and start a new save for that seed.
+Randovania support. Pick the seed under **Mods & Texture Packs > Randovania** before starting, or in the in-game menu
+(**Gameplay > Randovania**), which restarts the game to switch. One seed runs at a time, and each seed has its own save
+files (`save/randovania/<seed>`), apart from the normal game's.
 
 The importer checks the supported executable patches and keeps them with the mod. The runtime enables the Corpius,
 Aeion-message, controller-input and door-capacity changes together with the version marker. Disabling the mod
@@ -100,8 +102,8 @@ restores the normal behavior on the next launch. Remove an older RomFS-only impo
 importing that seed again.
 
 Loose-file exports (`replacements.json`), unique save slots (`RDVHASH`), multiworld/Remote Lua and other Exlaunch
-features are not supported. Export with PKG output and unique save slots disabled. Keep a backup of saves before
-switching seeds; the randomizer's own seed check remains active. An unrecognized or incomplete executable patch is
+features are not supported. Export with PKG output and unique save slots disabled. Keep a backup of saves;
+the randomizer's own seed check remains active. An unrecognized or incomplete executable patch is
 rejected instead of being partly applied.
 
 **Cheats?**

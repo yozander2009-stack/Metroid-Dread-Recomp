@@ -592,6 +592,17 @@ static void settings_test_hook(void){
     if(eq && eq<kv+n){ char k[128],v[256]; size_t kl=(size_t)(eq-kv); if(kl>127) kl=127; memcpy(k,kv,kl); k[kl]=0; size_t vl=n-kl-1; if(vl>255) vl=255; memcpy(v,eq+1,vl); v[vl]=0;
       LOG("test setting: frame %d %s=%s\n",g_frames,k,v); settings_queue(k,v); }
     s= end? end+1 : NULL; } }
+static void rando_test_hook(void){   /* test only: SWR_TEST_RANDO=FRAME:SEED ("-" = none) = the in-game menu's seed choice + RESTART */
+  static const char* s; static int init; if(!init){ init=1; s=getenv("SWR_TEST_RANDO"); }
+  if(!s || !*s) return; char* e; long f=strtol(s,&e,10); if(e==s || *e!=':'){ s=NULL; return; } if(g_frames<f) return;
+  extern int rando_choose(const char*); extern void rando_restart(void);
+  LOG("test: Randovania seed %s, restart\n",e+1); rando_choose(strcmp(e+1,"-")? e+1 : ""); s=NULL;
+#ifdef _WIN32
+  _putenv("SWR_TEST_RANDO=");   /* the restarted copy must not do it again */
+#else
+  unsetenv("SWR_TEST_RANDO");
+#endif
+  rando_restart(); }
 
 /* ============================================================ present */
 static u32* g_frame; static int g_fw, g_fh; static PMutex g_flock;
@@ -1063,7 +1074,7 @@ int swr_main(int argc, char** argv){
   /* 60Hz frontend loop */
   u64 next=plat_ns(); int tick=0;
   while(!g_quit){
-    video_poll(); hid_update(); vsync_tick_vt(); frametimer_poll(); ff_poll(); settings_test_hook(); settings_drain();
+    video_poll(); hid_update(); vsync_tick_vt(); frametimer_poll(); ff_poll(); settings_test_hook(); rando_test_hook(); settings_drain();
     if(tick%60==0) ini_poll();
     { extern void kernel_heal_mutexes(void); kernel_heal_mutexes(); }
     /* bail out of the slow clock if nothing was presented for 3s */
@@ -1091,6 +1102,7 @@ int swr_main(int argc, char** argv){
   }
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } { extern void snxvk_exit(void); snxvk_exit(); } LOG("Exit.\n"); log_flush(); fflush(NULL);
   amd_test_report();
+  { extern void game_restart_on_exit(void); game_restart_on_exit(); }   /* the in-game menu's Randovania RESTART */
   { extern void launcher_on_exit(void); launcher_on_exit(); }
 #if defined(_WIN32)
   TerminateProcess(GetCurrentProcess(),0);   /* don't join the guest threads */

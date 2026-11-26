@@ -107,6 +107,7 @@ static void overlay_scan(const char* host, int di){
         else { free(fn[f].host); fn[f].host=strdup(p); fn[f].size=d.size; g_mod_replaced++; } }
       else { f=add_file(d.name,di,d.size,p); fn[f].next_sib=dn[di].first_file; dn[di].first_file=f; g_mod_added++; } } }
   plat_dir_close(&d); }
+static char g_rando_running[256];   /* the seed this start applied ("" = none) */
 /* The importer retains the complete supported IPS as proof of the requested
    compatibility mode. Recheck it at launch because mods can be edited manually. */
 static void randovania_mod(const char* root, const char* name){
@@ -130,9 +131,69 @@ static void randovania_mod(const char* root, const char* name){
     if(extra){ fclose(extra); fatal("Randovania requires a PKG export with unique save slots disabled (%s).",name); }
   }
   extern void loader_enable_randovania(void);
-  loader_enable_randovania(); active=1;
+  loader_enable_randovania(); active=1; snprintf(g_rando_running,sizeof g_rando_running,"%s",name);
   LOG("mods: %s selected for Randovania compatibility\n",name);
 }
+
+/* Seed choice for the Play screen's Mods page and the in-game menu: a mod folder with randovania.ips is a seed and
+   load_order.txt switches at most one on. The game applies it when it starts, so a change made while playing takes a
+   restart (rando_restart in svc_launcher.c starts the game again). */
+static char g_rando_names[32][256]; static int g_rando_n;
+static int rando_seed_at(const char* root, const char* name){
+  char p[1600]; if(snprintf(p,sizeof p,"%s/%s/%s",root,name,SWR_RANDOVANIA_MARKER)>=(int)sizeof p) return 0;
+  FILE* f=fopen(p,"rb"); if(!f) return 0; fclose(f); return 1; }
+static int rando_cmp(const void* a, const void* b){ return strcmp((const char*)a,(const char*)b); }
+static int rando_find(const char* name){ for(int i=0;i<g_rando_n;i++) if(!strcmp(g_rando_names[i],name)) return i; return -1; }
+static void rando_root(char* root, size_t n){ extern char g_datadir[]; snprintf(root,n,"%smods",g_datadir); }
+int rando_scan(void){
+  char root[1200]; rando_root(root,sizeof root); g_rando_n=0;
+  PDir d; if(plat_dir_open(&d,root)) return 0;
+  while(plat_dir_next(&d)) if(d.is_dir && strcmp(d.name,".") && strcmp(d.name,"..") && g_rando_n<32 && strlen(d.name)<256 && rando_seed_at(root,d.name))
+    snprintf(g_rando_names[g_rando_n++],256,"%s",d.name);
+  plat_dir_close(&d); qsort(g_rando_names,g_rando_n,256,rando_cmp); return g_rando_n; }
+const char* rando_name(int i){ return i>=0 && i<g_rando_n? g_rando_names[i] : ""; }
+const char* rando_running(void){ return g_rando_running; }
+static void rando_trim(char* s){ size_t n=strlen(s); while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0; }
+/* the seed load_order.txt switches on ("" = none); without load_order.txt every mod folder is on */
+const char* rando_chosen(void){
+  static char r[256]; char root[1200], lo[1300], line[600]; rando_root(root,sizeof root); snprintf(lo,sizeof lo,"%s/load_order.txt",root); r[0]=0;
+  FILE* f=fopen(lo,"r"); if(!f){ if(g_rando_n) snprintf(r,sizeof r,"%s",g_rando_names[0]); return r; }
+  while(fgets(line,sizeof line,f)){ char* s=line; while(*s==' '||*s=='\t') s++; rando_trim(s);
+    if(*s && *s!='#' && *s!='-' && rando_find(s)>=0){ snprintf(r,sizeof r,"%s",s); break; } }
+  fclose(f); return r; }
+static void rando_put(char** b, size_t* n, size_t* cap, const char* s){
+  size_t l=strlen(s); if(*n+l+3>*cap){ *cap=(*n+l+3)*2; *b=realloc(*b,*cap); } memcpy(*b+*n,s,l); *n+=l;
+#ifdef _WIN32
+  (*b)[(*n)++]='\r';
+#endif
+  (*b)[(*n)++]='\n'; (*b)[*n]=0; }
+/* switches the named seed on ("" = none) and every other seed off; other mods' lines stay as they are */
+int rando_choose(const char* want){
+  char root[1200], lo[1300], tmp[1320], line[600], buf[600]; rando_root(root,sizeof root); rando_scan();
+  snprintf(lo,sizeof lo,"%s/load_order.txt",root); snprintf(tmp,sizeof tmp,"%s.tmp",lo);
+  char* out=NULL; size_t n=0, cap=0; int seen[32]={0};
+  FILE* f=fopen(lo,"r");
+  if(f){ while(fgets(line,sizeof line,f)){ char* s=line; while(*s==' '||*s=='\t') s++; rando_trim(s);
+      const char* name= *s=='-'? s+1 : s; int i= *s && *s!='#'? rando_find(name) : -1;
+      if(i>=0){ seen[i]=1; snprintf(buf,sizeof buf,"%s%s",strcmp(name,want)? "-" : "",name); rando_put(&out,&n,&cap,buf); }
+      else rando_put(&out,&n,&cap,s); }
+    fclose(f); }
+  else {   /* no list yet: every folder was on; list them, seeds as chosen */
+    rando_put(&out,&n,&cap,"# Mod load order: first line = lowest priority. '-' disables a mod.");
+    PDir d; char (*names)[256]=NULL; int k=0;
+    if(!plat_dir_open(&d,root)){ while(plat_dir_next(&d)) if(d.is_dir && strcmp(d.name,".") && strcmp(d.name,"..") && strlen(d.name)<256){ names=realloc(names,(size_t)(k+1)*256); snprintf(names[k++],256,"%s",d.name); }
+      plat_dir_close(&d); }
+    if(k) qsort(names,k,256,rando_cmp);
+    for(int j=0;j<k;j++){ int i=rando_find(names[j]); if(i>=0){ seen[i]=1; snprintf(buf,sizeof buf,"%s%s",strcmp(names[j],want)? "-" : "",names[j]); rando_put(&out,&n,&cap,buf); } else rando_put(&out,&n,&cap,names[j]); }
+    free(names); }
+  for(int i=0;i<g_rando_n;i++) if(!seen[i]){ snprintf(buf,sizeof buf,"%s%s",strcmp(g_rando_names[i],want)? "-" : "",g_rando_names[i]); rando_put(&out,&n,&cap,buf); }
+  FILE* w=fopen(tmp,"wb"); int ok= w!=NULL;
+  if(w){ ok= fwrite(out? out : "",1,n,w)==n; ok= fclose(w)==0 && ok; }
+  free(out);
+  if(ok){ remove(lo); ok= rename(tmp,lo)==0; }
+  if(!ok){ remove(tmp); WARN("mods: could not write %s\n",lo); return -1; }
+  LOG("mods: Randovania seed for the next start: %s\n",*want? want : "none");
+  return 0; }
 
 static void romfs_apply_mod(const char* root, const char* name){
   char p[1400]; snprintf(p,sizeof p,"%s/%s/romfs",root,name);
@@ -484,6 +545,10 @@ static int fsp_disp(SvcObj* o, IpcCtx* c){
       /* System 0, Account 1, Bcat 2, Device 3, Temporary 4, Cache 5, SystemBcat 6 */
       const char* kind= type==1? "user" : (type==2||type==6)? "bcat" : type==3? "device" : type==5? "cache" : type==0? "system" : "temp";
       snprintf(p,sizeof p,"%ssave/%s",g_datadir,kind);
+      /* a Randovania seed plays on its own saves (save/randovania/<seed>/user), so the normal game's files and other seeds'
+         are never loaded into it or overwritten by it */
+      if(type==1 && g_rando_running[0]){ snprintf(p,sizeof p,"%ssave/randovania/%s/%s",g_datadir,g_rando_running,kind);
+        static int said; if(!said){ said=1; LOG("fs: Randovania seed %s: saves in save/randovania/%s\n",g_rando_running,g_rando_running); } }
       /* older builds read the type from the wrong offset and kept every save in save/system:
          the first time an account or device save is opened, start it from a copy of that folder */
       if((type==1 || type==3) && !plat_is_dir(p)){ char old[1200]; snprintf(old,sizeof old,"%ssave/system",g_datadir);

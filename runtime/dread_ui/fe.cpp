@@ -880,6 +880,17 @@ static void page_mods() {
     page_title("MODS & TEXTURE PACKS", "Mods replace game files (RomFS): texture packs, models, text, sounds. Mods lower in the list win when two change the same file. "
                "Changes apply on the next game start.");
     if (g_focus_first) g_mods = mods_list();   // the page just opened
+    {   // Randovania: one seed at a time, applied when the game starts; each seed plays on its own saves (svc_fs.c)
+        std::vector<std::string> items{"Off"}; std::vector<int> at{-1}; int idx = 0;
+        for (int i = 0; i < (int)g_mods.size(); i++) if (mod_is_seed(g_mods[i].name)) {
+            items.push_back(g_mods[i].name); at.push_back(i); if (g_mods[i].enabled && !idx) idx = (int)at.size() - 1; }
+        if (items.size() > 1) {
+            section("RANDOVANIA");
+            if (row_choice("##rando", "Seed", &idx, items)) { for (int k = 1; k < (int)at.size(); k++) g_mods[at[k]].enabled = k == idx; mods_write(g_mods); }
+            help_text("One seed at a time, applied when the game starts; the in-game menu (Gameplay) can switch and restart. "
+                      "Each seed keeps its own save files, apart from the normal game's.");
+        }
+    }
     section("INSTALLED");
     if (g_mods.empty()) row_text("Mods", "None installed yet.", C_DIM);
     bool ch = false;
@@ -889,7 +900,8 @@ static void page_mods() {
         if (icons) { row_text(m.name.c_str(), "Button icons: chosen under Controls", C_DIM); continue; }
         if (m.name == PT_PACK_NAME) { row_text(m.name.c_str(), "Portuguese text: applies with Display > Language > Portuguese", C_DIM); continue; }
         std::string label = fmt("%s   (%d files, %.1f MB)", m.name.c_str(), m.files, m.bytes / 1048576.0);
-        if (row_bool(fmt("##mod%d", i).c_str(), label.c_str(), &en)) { m.enabled = en; ch = true; }
+        if (row_bool(fmt("##mod%d", i).c_str(), label.c_str(), &en)) { m.enabled = en; ch = true;
+            if (en && mod_is_seed(m.name)) for (int k = 0; k < (int)g_mods.size(); k++) if (k != i && mod_is_seed(g_mods[k].name)) g_mods[k].enabled = false; }
         if (ImGui::IsItemFocused()) g_mod_sel = i;
     }
     if (g_mod_sel >= 0 && g_mod_sel < (int)g_mods.size()) {
