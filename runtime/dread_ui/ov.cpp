@@ -119,9 +119,18 @@ void opt_row(const char* key) {
     } }
 }
 
+// one-click picture heights next to the resolution slider (the slider stays for custom values)
+void res_preset_row() {
+    bool d = val("docked") == "1"; std::string a = val("aspect"); float v = (float)atof(val("resolution").c_str());
+    std::vector<ResPreset> pre = res_presets(d, a.c_str()); std::vector<std::string> items; for (auto& p : pre) items.push_back(p.name);
+    const Opt* o = find_option("resolution");
+    int pick = row_chips("##o_respre", "Preset", items, res_preset_index(pre, v), o ? live_tag(*o) : nullptr);
+    if (pick >= 0) change_display("resolution", fmt("%g", pre[pick].scale));
+}
+
 void tab_content(int t) {
     switch (t) {
-    case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
+    case 0: section("PICTURE"); opt_row("resolution"); res_preset_row(); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("videos_16x9"); opt_row("language"); break;
     case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("taa"); opt_row("ambient_occlusion"); opt_row("sharpening"); opt_row("shadows"); opt_row("shadow_resolution"); opt_row("bloom_quality"); opt_row("anisotropy"); section("RENDERER"); { std::string was = val("renderer"); opt_row("renderer");
                 if (backend_gpu_amd()) { std::string now = val("renderer"); if (now != was) change("amd_opengl", now == "vulkan_native" ? "0" : "1");

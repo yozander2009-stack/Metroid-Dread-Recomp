@@ -175,12 +175,12 @@ static void resolution_rows(bool live_tag) {
     float v = (float)atof(get("resolution").c_str()); if (v <= 0) v = 1;
     std::string t = res_text(v, docked, asp.c_str());
     if (row_slider("##res", "Internal resolution", &v, 0.25f, 4.0f, 0.05f, t.c_str(), live_tag ? "LIVE" : nullptr)) set("resolution", fmt("%g", roundf(v * 100) / 100));
-    static const float pre[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 3, 4};
-    std::vector<std::string> items = {"Native for this screen"}; for (int i = 1; i < 8; i++) items.push_back(res_text(pre[i], docked, asp.c_str()));
-    int idx = -1; for (int i = 1; i < 8; i++) if (fabsf(pre[i] - v) < 0.001f) idx = i;
-    int shown = idx < 0 ? 0 : idx;
-    if (row_choice("##respre", "Quick pick", &shown, items)) set("resolution", fmt("%g", shown == 0 ? native_scale() : pre[shown]));
-    help_text(fmt("Native for this screen is %s. Above your screen it is averaged down (smoother edges, no shimmer).", res_text(native_scale(), docked, asp.c_str()).c_str()).c_str());
+    std::vector<ResPreset> pre = res_presets(docked, asp.c_str()); float nat = native_scale();
+    std::vector<std::string> items; for (auto& p : pre) items.push_back(p.name); items.push_back("SCREEN");
+    int idx = res_preset_index(pre, v); if (idx < 0 && fabsf(v - nat) < 0.001f) idx = (int)pre.size();
+    int pick = row_chips("##respre", "Preset", items, idx);
+    if (pick >= 0) set("resolution", fmt("%g", pick < (int)pre.size() ? pre[pick].scale : nat));
+    help_text(fmt("Presets set the picture height (4K = 2160 lines). SCREEN = your screen's height, %s. Above your screen it is averaged down (smoother edges, no shimmer).", res_text(native_scale(), docked, asp.c_str()).c_str()).c_str());
 }
 
 static void controller_status_card() {

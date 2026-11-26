@@ -447,6 +447,39 @@ bool row_button(const char* id, const char* label, const char* value, bool prima
     return c || (f && g_row.confirm);
 }
 
+int row_chips(const char* id, const char* label, const std::vector<std::string>& items, int active, const char* tag) {
+    ImRect r; bool f, c; row_begin(id, label, tag, r, f, c);
+    int n = (int)items.size(); if (n == 0) return -1;
+    int pick = -1;
+    if (f && g_row.pad_left) pick = active < 0 ? n - 1 : (active - 1 + n) % n;
+    if (f && (g_row.pad_right || g_row.confirm)) pick = active < 0 ? 0 : (active + 1) % n;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float gap = S(6), x1 = r.Max.x - S(16), x0 = r.Min.x + S(30) + ImGui::CalcTextSize(label).x + (tag && *tag ? S(90) : 0);
+    float cw = std::min(S(82), (x1 - x0 - gap * (n - 1)) / n); if (cw < S(40)) cw = S(40);
+    float h = r.GetHeight(), ch = S(30), y0 = r.Min.y + (h - ch) / 2, sx = x1 - n * cw - (n - 1) * gap;
+    float mx = ImGui::GetIO().MousePos.x;
+    for (int i = 0; i < n; i++) {
+        ImVec2 a(sx + i * (cw + gap), y0), b(a.x + cw, y0 + ch);
+        if (c && mx >= a.x && mx < b.x + gap) pick = i;
+        bool on = i == active;
+        chamfer_rect(dl, a, b, S(5), on ? IM_COL32(226, 30, 44, f ? 255 : 210) : IM_COL32(20, 36, 58, 255), on ? C_RED_HI : (f ? C_CYAN_DIM : C_LINE), 1);
+        ImVec2 ts = ImGui::CalcTextSize(items[i].c_str());
+        dl->AddText({(a.x + b.x) / 2 - ts.x / 2, (a.y + b.y) / 2 - ts.y / 2}, on ? IM_COL32(255, 255, 255, 255) : C_TEXT, items[i].c_str());
+    }
+    return pick;
+}
+
+std::vector<ResPreset> res_presets(bool docked, const char* aspect) {
+    static const struct { int h; const char* name; } P[] = {{720, "720p"}, {900, "900p"}, {1080, "1080p"}, {1440, "1440p"}, {1800, "1800p"}, {2160, "4K"}, {2880, "5K"}};
+    std::vector<ResPreset> v; float base = game_base_h(docked, aspect);
+    for (auto& p : P) { float s = roundf(p.h / base * 100) / 100; if (s >= 0.25f && s <= 4.0f) v.push_back({p.name, s}); }
+    return v;
+}
+int res_preset_index(const std::vector<ResPreset>& v, float scale) {
+    for (int i = 0; i < (int)v.size(); i++) if (fabsf(v[i].scale - scale) < 0.001f) return i;
+    return -1;
+}
+
 void row_text(const char* label, const char* value, ImU32 col) {
     float w = ImGui::GetContentRegionAvail().x, h = S(40); ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::Dummy({w, h});

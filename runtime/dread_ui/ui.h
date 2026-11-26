@@ -88,6 +88,8 @@ bool row_slider(const char* id, const char* label, float* v, float lo, float hi,
                 const char* tag = nullptr);
 bool row_button(const char* id, const char* label, const char* value = nullptr, bool primary = false);
 void row_text(const char* label, const char* value, ImU32 col = 0);
+// a row of small buttons (presets); returns the index picked this frame or -1. active = the one drawn as selected (-1 none)
+int row_chips(const char* id, const char* label, const std::vector<std::string>& items, int active, const char* tag = nullptr);
 void help_text(const char* s);
 void warn_text(const char* s);   // help_text in red
 void section(const char* title);
@@ -103,5 +105,8 @@ std::string fmt(const char* f, ...);
 float game_base_w(bool docked, const char* aspect);
 float game_base_h(bool docked, const char* aspect);
 std::string res_text(float scale, bool docked, const char* aspect);   // "2.00× (3200 × 1800)"
+struct ResPreset { const char* name; float scale; };   // "1080p" -> 1.2 at docked 16:9 (game height 900)
+std::vector<ResPreset> res_presets(bool docked, const char* aspect);   // 720p..5K that fit 0.25x-4x
+int res_preset_index(const std::vector<ResPreset>& v, float scale);    // -1 = custom
 
 } // namespace ui
