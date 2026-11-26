@@ -167,14 +167,14 @@ static float native_scale() {
 #else
     int sw = 1920, shi = 1080, hz = 60; fe_x11_screen(&sw, &shi, &hz); float sh = (float)shi;
 #endif
-    float s = sh / game_base_h(docked, asp.c_str()); s = roundf(s * 20) / 20; return std::max(0.25f, std::min(6.0f, s));
+    float s = sh / game_base_h(docked, asp.c_str()); s = roundf(s * 20) / 20; return std::max(0.25f, std::min(9.6f, s));
 }
 
 static void resolution_rows(bool live_tag) {
     bool docked = getb("docked"); std::string asp = get("aspect");
     float v = (float)atof(get("resolution").c_str()); if (v <= 0) v = 1;
     std::string t = res_text(v, docked, asp.c_str());
-    if (row_slider("##res", "Internal resolution", &v, 0.25f, 6.0f, 0.05f, t.c_str(), live_tag ? "LIVE" : nullptr)) set("resolution", fmt("%g", roundf(v * 100) / 100));
+    if (row_slider("##res", "Internal resolution", &v, 0.25f, 9.6f, 0.05f, t.c_str(), live_tag ? "LIVE" : nullptr)) set("resolution", fmt("%g", roundf(v * 100) / 100));
     std::vector<ResPreset> pre = res_presets(docked, asp.c_str()); float nat = native_scale();
     std::vector<std::string> items; for (auto& p : pre) items.push_back(p.name); items.push_back("SCREEN");
     int idx = res_preset_index(pre, v); if (idx < 0 && fabsf(v - nat) < 0.001f) idx = (int)pre.size();

@@ -106,7 +106,7 @@ float game_base_w(bool docked, const char* aspect);
 float game_base_h(bool docked, const char* aspect);
 std::string res_text(float scale, bool docked, const char* aspect);   // "2.00× (3200 × 1800)"
 struct ResPreset { const char* name; float scale; };   // "1080p" -> 1.2 at docked 16:9 (game height 900)
-std::vector<ResPreset> res_presets(bool docked, const char* aspect);   // 720p..8K that fit 0.25x-6x
+std::vector<ResPreset> res_presets(bool docked, const char* aspect);   // 720p..8K that fit 0.25x-9.6x
 int res_preset_index(const std::vector<ResPreset>& v, float scale);    // -1 = custom
 
 } // namespace ui

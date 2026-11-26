@@ -91,13 +91,17 @@ static void vkr_mapping_end(void) {
 /* 0 when Vulkan can't run here */
 static int vkr_start(void) {
     if (!vk_init()) return 0;
-    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 6 (main.c) */
+    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 9.6 (main.c) */
     {   /* SWR: and the widest game picture at that scale must fit this GPU's image / framebuffer / viewport size */
-        extern float swr_res_cap(float s, int max_dim, const char* who);
+        extern float swr_res_cap(float s, int max_dim, int vram_mb, const char* who);
         const VkPhysicalDeviceLimits* L = &g_vk.props.limits; uint32_t m = L->maxImageDimension2D;
         if (L->maxFramebufferWidth < m) m = L->maxFramebufferWidth;
         if (L->maxViewportDimensions[0] < m) m = L->maxViewportDimensions[0];
-        g_vk_scale = swr_res_cap(g_vk_scale, (int)m, "vulkan");
+        VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        VkDeviceSize big = 0;   /* the largest device-local heap = the card's own memory */
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+            if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > big) big = mp.memoryHeaps[i].size;
+        g_vk_scale = swr_res_cap(g_vk_scale, (int)m, (int)(big >> 20), "vulkan");
     }
     g_vk_anisotropy = g_settings.anisotropic_filtering; /* the sampler table keeps what it makes: anisotropy applies at start */
     if (g_vk_anisotropy > 1 && !g_vk.feat.samplerAnisotropy)

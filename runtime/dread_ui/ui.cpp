@@ -472,7 +472,7 @@ int row_chips(const char* id, const char* label, const std::vector<std::string>&
 std::vector<ResPreset> res_presets(bool docked, const char* aspect) {
     static const struct { int h; const char* name; } P[] = {{720, "720p"}, {900, "900p"}, {1080, "1080p"}, {1440, "1440p"}, {1800, "1800p"}, {2160, "4K"}, {2880, "5K"}, {4320, "8K"}};
     std::vector<ResPreset> v; float base = game_base_h(docked, aspect);
-    for (auto& p : P) { float s = roundf(p.h / base * 100) / 100; if (s >= 0.25f && s <= 6.0f) v.push_back({p.name, s}); }
+    for (auto& p : P) { float s = roundf(p.h / base * 100) / 100; if (s >= 0.25f && s <= 9.6f) v.push_back({p.name, s}); }
     return v;
 }
 int res_preset_index(const std::vector<ResPreset>& v, float scale) {
@@ -555,7 +555,7 @@ static std::vector<Opt> build_options() {
       {"4", "Italian"}, {"5", "Spanish"}, {"6", "Chinese"}, {"7", "Korean"}, {"8", "Dutch"}, {"9", "Portuguese (Brazil): fan translation"}, {"10", "Russian"},
       {"11", "Taiwanese"}, {"12", "English (UK)"}, {"13", "French (Canada)"}, {"14", "Spanish (Latin America)"}}, "");
     // Graphics
-    F("resolution", "Graphics", "Graphics", "Internal resolution", LIVE_GL, "1", 0.25f, 6.0f, 0.05f,
+    F("resolution", "Graphics", "Graphics", "Internal resolution", LIVE_GL, "1", 0.25f, 9.6f, 0.05f,
       "The game's 3D resolution. Above your screen's size it is averaged down (smoother edges, no shimmer).");
     C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"},
 #ifdef _WIN32

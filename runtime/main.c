@@ -353,7 +353,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"audio_eos_sample_count")) {}   /* always on since v0.3.1: old .ini values (often 0) are ignored */
     else if(!strcmp(k,"audio_surround_downmix")) g_opt_audio_surround_downmix=atoi(v)!=0;
     else if(!strcmp(k,"audio_channels")){ extern int g_opt_audio_51; g_opt_audio_51= !strcmp(v,"5.1"); }
-    else if(!strcmp(k,"resolution")){ g_opt_resf=(float)atof(v); if(g_opt_resf<0.25f) g_opt_resf=0.25f; if(g_opt_resf>6) g_opt_resf=6; }   /* 6x = 8K at 16:9; the renderers lower it to what the GPU can hold */
+    else if(!strcmp(k,"resolution")){ g_opt_resf=(float)atof(v); if(g_opt_resf<0.25f) g_opt_resf=0.25f; if(g_opt_resf>9.6f) g_opt_resf=9.6f; }   /* 9.6x = 16K at 16:9; the renderers lower it to what the GPU can hold */
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
     else if(!strcmp(k,"shadow_resolution")){ int s=atoi(v); g_opt_shadow_res= s>=4? 4 : s>=2? 2 : 1; }
     else if(!strcmp(k,"bloom_quality")){ g_opt_bloom_hq= atoi(v); if(g_opt_bloom_hq<0||g_opt_bloom_hq>2) g_opt_bloom_hq=0; }

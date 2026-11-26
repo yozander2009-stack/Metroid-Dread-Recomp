@@ -3946,17 +3946,25 @@ static void rs_update(void){ extern int g_rs_binding;
   if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,16,NULL,GL_DYNAMIC_DRAW); }
   float v[4]={1.0f/g_ds,1.0f/g_ds,g_ds,0}; glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,16,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
 
-/* the widest game picture (docked; 32:9 = 2560) times the scale must fit the driver's texture and framebuffer size */
-float swr_res_cap(float s, int max_dim, const char* who){
-  extern int g_opt_ultrawide; int w= g_opt_ultrawide==4? 2560 : g_opt_ultrawide==1? 1680 : 1600;
-  if(max_dim<=0) return s; float cap=floorf((float)max_dim/w*100.f)/100.f; if(s<=cap) return s;
-  static int said; if(!said++) LOG("%s: resolution x%.2f needs %d pixels across, this GPU allows %d: using x%.2f\n",who,s,(int)(w*s+0.5f),max_dim,cap);
+/* the widest game picture (docked; 32:9 = 2560) times the scale must fit the driver's texture and framebuffer size.
+   Above 4x also the video memory: render targets, filter copies, TAA / AO images take ~140 bytes per pixel of the game picture
+   (MEASURED: 4.8 GB at 8K, Native Vulkan + TAA + AO); use more than 60% of the card's memory (Windows and the driver need the rest) and it pages to system RAM (16K on a 12 GB
+   card: OpenGL 0.2 FPS, Native Vulkan stuck at the boot logo). Up to 4x nothing changes. */
+float swr_res_cap(float s, int max_dim, int vram_mb, const char* who){
+  extern int g_opt_ultrawide; int w= g_opt_ultrawide==4? 2560 : g_opt_ultrawide==1? 1680 : g_opt_ultrawide==2? 1440 : 1600, h= g_opt_ultrawide==1 || g_opt_ultrawide==4? 720 : 900;
+  float cap=s; const char* why=NULL;
+  if(max_dim>0){ float c=floorf((float)max_dim/w*100.f)/100.f; if(c<cap){ cap=c; why="pixels across"; } }
+  if(vram_mb>0 && cap>4.f){ float c=floorf(sqrtf(0.6f*vram_mb*1048576.f/140.f/((float)w*h))*100.f)/100.f; if(c<4.f) c=4.f; if(c<cap){ cap=c; why="video memory"; } }
+  if(cap<s){ static int said; if(!said++) LOG("%s: resolution x%.2f is more than this GPU holds (%s: %d across allowed, %d MB): using x%.2f\n",who,s,why,max_dim,vram_mb,cap); }
   return cap; }
 static float gl_res_cap(float s){
-  static GLint m=-1; if(m<0){ GLint a=0,b=0,c=0,v[2]={0,0}; glGetIntegerv(GL_MAX_TEXTURE_SIZE,&a); glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE,&b);
+  static GLint m=-1, vram=0; if(m<0){ GLint a=0,b=0,c=0,v[2]={0,0}; glGetIntegerv(GL_MAX_TEXTURE_SIZE,&a); glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE,&b);
     glGetIntegerv(0x9315 /* GL_MAX_FRAMEBUFFER_WIDTH */,&c); glGetIntegerv(GL_MAX_VIEWPORT_DIMS,v); m=a;
-    if(b>0 && b<m) m=b; if(c>0 && c<m) m=c; if(v[0]>0 && v[0]<m) m=v[0]; while(glGetError()!=GL_NO_ERROR){} }
-  return swr_res_cap(s,m,"opengl"); }
+    if(b>0 && b<m) m=b; if(c>0 && c<m) m=c; if(v[0]>0 && v[0]<m) m=v[0];
+    GLint kb[4]={0,0,0,0}; glGetIntegerv(0x9047 /* GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX (NVIDIA, Mesa) */,kb); vram=kb[0]/1024;
+    if(vram<=0){ kb[0]=0; glGetIntegerv(0x87FC /* TEXTURE_FREE_MEMORY_ATI: free, not total */,kb); vram=kb[0]/1024; }
+    while(glGetError()!=GL_NO_ERROR){} }
+  return swr_res_cap(s,m,vram,"opengl"); }
 static void rt_rescale(float ns){
   float old=g_scale; if(ns==old) return;
   glDisable(GL_SCISSOR_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glColorMaski(0,1,1,1,1); glDepthMask(GL_TRUE); glStencilMaskSeparate(GL_FRONT_AND_BACK,0xFF);
