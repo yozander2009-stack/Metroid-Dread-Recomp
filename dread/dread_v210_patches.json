@@ -1,5 +1,6 @@
 {
  "format": 2,
+ "randovania_compatibility": 1,
  "files": {
   "code_006.c": {
    "pristine": "8e58e3ecb5aa0d2005a7a918f1d0eef25ced955f820d2d837abf8f7cc7b3ab60",

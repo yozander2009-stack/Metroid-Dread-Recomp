@@ -209,7 +209,7 @@ def release(out, exe, version):
     for f in RECOMPILER_PY:
         cp(os.path.join(ROOT, f), os.path.join(rc, f))
     cp(os.path.join(ROOT, 'dread', 'dread_setup.py'), os.path.join(rc, 'dread_setup.py'))
-    for f in ('dread_v210_patches.json', 'romfs_v210.manifest'):
+    for f in ('dread_v210_patches.json', 'romfs_v210.manifest', 'randovania.py'):
         cp(os.path.join(ROOT, 'dread', f), os.path.join(rc, 'dread', f))
     for f in ('cpu.h', 'cpu_helpers.c'):
         cp(os.path.join(ROOT, 'runtime', f), os.path.join(rc, 'runtime', f))
@@ -314,7 +314,7 @@ def source(out):
     for rel in ('runtime/vp9/win/libvpx.a', 'runtime/oh264/win/libdecoder.a', 'runtime/oh264/win/libcommon.a'):
         if os.path.isfile(os.path.join(ROOT, rel)):
             cp(os.path.join(ROOT, rel), os.path.join(out, rel))
-    for f in ('dread_setup.py', 'make_release.py', 'make_patches.py', 'make_manifest.py', 'dread_v210_patches.json', 'romfs_v210.manifest', 'DESIGN.md'):
+    for f in ('dread_setup.py', 'make_release.py', 'make_patches.py', 'make_manifest.py', 'randovania.py', 'dread_v210_patches.json', 'romfs_v210.manifest', 'DESIGN.md'):
         cp(os.path.join(ROOT, 'dread', f), os.path.join(out, 'dread', f))
     im = os.path.join(ROOT, 'third_party', 'imgui-1.92.5')
     for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui.h', 'imconfig.h', 'imgui_internal.h',
@@ -324,7 +324,7 @@ def source(out):
         for ext in ('.cpp', '.h'):
             cp(os.path.join(im, 'backends', f + ext), os.path.join(out, 'third_party', 'imgui-1.92.5', 'backends', f + ext))
     cp(os.path.join(im, 'backends', 'imgui_impl_opengl3_loader.h'), os.path.join(out, 'third_party', 'imgui-1.92.5', 'backends', 'imgui_impl_opengl3_loader.h'))
-    for f in ('build_imgui.py', 'build_snxvk2.py', 'gen_spv_headers.py', 'update_test.py'):
+    for f in ('build_imgui.py', 'build_snxvk2.py', 'gen_spv_headers.py', 'update_test.py', 'test_randovania_loader.py'):
         cp(os.path.join(ROOT, 'work-profiler', f), os.path.join(out, 'work-profiler', f))
     for f in os.listdir(os.path.join(ROOT, 'linux')):
         p = os.path.join(ROOT, 'linux', f)

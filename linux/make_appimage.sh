@@ -48,7 +48,7 @@ cp "$RUNTIME" "$A/usr/bin/metroid-dread"
 cp "$W/dread/pipeline_recipes_shipped.bin" "$W/dread/pipeline_recipes_layouts.bin" "$A/usr/share/metroid-dread/"   # Native Vulkan's pipeline list (AppRun)
 # the recompiler, laid out as dread_setup.py expects it (as in the Windows release's recompiler folder)
 cp "$W"/{switchrecomp,codegen,a64,nxloader,metroid_perf}.py "$W/dread/dread_setup.py" "$R/"
-cp "$W/dread/dread_v210_patches.json" "$W/dread/romfs_v210.manifest" "$R/dread/"
+cp "$W/dread/dread_v210_patches.json" "$W/dread/romfs_v210.manifest" "$W/dread/randovania.py" "$R/dread/"
 cp "$W/runtime/cpu.h" "$W/runtime/cpu_helpers.c" "$R/runtime/"
 cp "$W/linux/lx_compat.h" "$R/linux/"
 LIC="$A/usr/share/metroid-dread/licenses"

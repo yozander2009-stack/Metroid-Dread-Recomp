@@ -5,6 +5,8 @@
    and SD card mapped to normal folders. */
 #include "rt.h"
 #include <ctype.h>
+#include <errno.h>
+#include "randovania_patch.h"
 
 #define FS_NOTFOUND RC(2,1)
 #define FS_EXISTS   RC(2,2)
@@ -105,9 +107,37 @@ static void overlay_scan(const char* host, int di){
         else { free(fn[f].host); fn[f].host=strdup(p); fn[f].size=d.size; g_mod_replaced++; } }
       else { f=add_file(d.name,di,d.size,p); fn[f].next_sib=dn[di].first_file; dn[di].first_file=f; g_mod_added++; } } }
   plat_dir_close(&d); }
+/* The importer retains the complete supported IPS as proof of the requested
+   compatibility mode. Recheck it at launch because mods can be edited manually. */
+static void randovania_mod(const char* root, const char* name){
+  static int active;
+  char path[1600];
+  if(snprintf(path,sizeof path,"%s/%s/%s",root,name,SWR_RANDOVANIA_MARKER)>=(int)sizeof path)
+    fatal("The Randovania mod path is too long.");
+  errno=0; FILE* f=fopen(path,"rb");
+  if(!f){ if(errno!=ENOENT) fatal("Cannot read mod metadata: %s",path); return; }
+  unsigned char bytes[SWR_RANDOVANIA_IPS_SIZE+1];
+  size_t size=fread(bytes,1,sizeof bytes,f); int failed=ferror(f); fclose(f);
+  if(failed || !swr_randovania_validate_ips(bytes,size))
+    fatal("Randovania mod '%s' has an unsupported or incomplete executable patch. Reimport a complete 2.1.0 PKG export.",name);
+  if(active) fatal("Enable only one Randovania seed at a time in Mods & Texture Packs.");
+  /* These require Exlaunch, which this compatibility implementation does not load. */
+  const char* unsupported[]={"romfs/replacements.json","romfs/RDVHASH","RDVHASH"};
+  for(unsigned i=0;i<sizeof unsupported/sizeof *unsupported;i++){
+    if(snprintf(path,sizeof path,"%s/%s/%s",root,name,unsupported[i])>=(int)sizeof path)
+      fatal("The Randovania mod path is too long.");
+    FILE* extra=fopen(path,"rb");
+    if(extra){ fclose(extra); fatal("Randovania requires a PKG export with unique save slots disabled (%s).",name); }
+  }
+  extern void loader_enable_randovania(void);
+  loader_enable_randovania(); active=1;
+  LOG("mods: %s selected for Randovania compatibility\n",name);
+}
+
 static void romfs_apply_mod(const char* root, const char* name){
   char p[1400]; snprintf(p,sizeof p,"%s/%s/romfs",root,name);
   if(!plat_is_dir(p)) return;
+  randovania_mod(root,name);
   int r0=g_mod_replaced, a0=g_mod_added; overlay_scan(p,0);
   LOG("mods: %s (%d files replaced, %d added)\n",name,g_mod_replaced-r0,g_mod_added-a0); }
 /* Button-icon packs (Controls > Button icons): mod folders with these names are applied by [Input] button_icons, not

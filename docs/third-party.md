@@ -20,6 +20,7 @@
 |---|---|---|
 | SwitchRecomp by MZ Labs | the recompiler and runtime | Apache-2.0 (credit and NOTICE.txt kept) |
 | ScarletNX | Native Vulkan renderer, Maxwell to SPIR-V shader translation | GPL-3.0 |
+| [Open Dread Rando](https://github.com/randovania/open-dread-rando) | Randovania 2.1.0 executable patch definitions and controller-input replacement | GPL-3.0 |
 | Dear ImGui | launcher and in-game menu | MIT |
 | Intel XeGTAO | ambient occlusion, ported to GLSL | MIT |
 | Ryujinx | reverb port (audio) | MIT |
