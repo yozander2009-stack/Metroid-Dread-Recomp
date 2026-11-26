@@ -3946,6 +3946,17 @@ static void rs_update(void){ extern int g_rs_binding;
   if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,16,NULL,GL_DYNAMIC_DRAW); }
   float v[4]={1.0f/g_ds,1.0f/g_ds,g_ds,0}; glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,16,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
 
+/* the widest game picture (docked; 32:9 = 2560) times the scale must fit the driver's texture and framebuffer size */
+float swr_res_cap(float s, int max_dim, const char* who){
+  extern int g_opt_ultrawide; int w= g_opt_ultrawide==4? 2560 : g_opt_ultrawide==1? 1680 : 1600;
+  if(max_dim<=0) return s; float cap=floorf((float)max_dim/w*100.f)/100.f; if(s<=cap) return s;
+  static int said; if(!said++) LOG("%s: resolution x%.2f needs %d pixels across, this GPU allows %d: using x%.2f\n",who,s,(int)(w*s+0.5f),max_dim,cap);
+  return cap; }
+static float gl_res_cap(float s){
+  static GLint m=-1; if(m<0){ GLint a=0,b=0,c=0,v[2]={0,0}; glGetIntegerv(GL_MAX_TEXTURE_SIZE,&a); glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE,&b);
+    glGetIntegerv(0x9315 /* GL_MAX_FRAMEBUFFER_WIDTH */,&c); glGetIntegerv(GL_MAX_VIEWPORT_DIMS,v); m=a;
+    if(b>0 && b<m) m=b; if(c>0 && c<m) m=c; if(v[0]>0 && v[0]<m) m=v[0]; while(glGetError()!=GL_NO_ERROR){} }
+  return swr_res_cap(s,m,"opengl"); }
 static void rt_rescale(float ns){
   float old=g_scale; if(ns==old) return;
   glDisable(GL_SCISSOR_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glColorMaski(0,1,1,1,1); glDepthMask(GL_TRUE); glStencilMaskSeparate(GL_FRONT_AND_BACK,0xFF);
@@ -3993,7 +4004,7 @@ static void res_dyn_step(void){
     static u64 last_new; u32 pend=__atomic_load_n(&wq_hi.t,__ATOMIC_RELAXED)-__atomic_load_n(&wq_hi.h,__ATOMIC_RELAXED);
     if(pend>0 || st_sh_new!=last_new){ last_new=st_sh_new; rd_hold=2; return; } }
   if(rd_hold>0){ rd_hold--; return; }
-  float mx=g_opt_resf, mn=g_opt_resmin; if(mn>mx) mn=mx;
+  float mx=gl_res_cap(g_opt_resf), mn=g_opt_resmin; if(mn>mx) mn=mx;
   /* GPU-bound if the GPU thread spends its time in swap or busy without using CPU */
   int gpu_bound= swapw>0.20 || (busy>0.90 && cpu<0.55*busy);
   int headroom= swapw<0.04 && busy<0.65;
@@ -4011,7 +4022,7 @@ static void frame_stats(void){
   rd_swap+=g_tm[TM_SWAP];
   for(int k=0;k<TM_N;k++){ g_tmp[k]+=g_tm[k]; g_tm[k]=0; } g_fr_shnew=st_sh_new;
   { /* resolution edited in the ini while running: apply now */
-    extern int g_opt_resdyn; extern float g_opt_resf; if(!g_opt_resdyn && !g_gles && p_cis && (g_scale>g_opt_resf+0.01f || g_scale<g_opt_resf-0.01f)) rt_rescale(g_opt_resf); }
+    extern int g_opt_resdyn; extern float g_opt_resf; float want=gl_res_cap(g_opt_resf); if(!g_opt_resdyn && !g_gles && p_cis && (g_scale>want+0.01f || g_scale<want-0.01f)) rt_rescale(want); }
   res_dyn_step(); }
 
 static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1; if(getenv("SWR_PROFILE_RING_HOST")){ extern void plat_prof_mark_gpu(void); plat_prof_mark_gpu(); }   /* ring samples this thread too */
@@ -4057,7 +4068,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
   if(!g_gles){ GLuint a=compile(GL_VERTEX_SHADER,BLIT_VS,NULL,0), b=compile(GL_FRAGMENT_SHADER,DOWN_FS,NULL,0); g_down_prog=link2(a,b,0);
     if(g_down_prog){ g_down_xf=glGetUniformLocation(g_down_prog,"xf"); g_down_px=glGetUniformLocation(g_down_prog,"px"); } }
   if(!g_gles){ glEnable(GL_FRAMEBUFFER_SRGB); glDisable(GL_FRAMEBUFFER_SRGB); glEnable(0x8642); }   /* GL_PROGRAM_POINT_SIZE, gl_PointSize comes from the shader */
-  { extern float g_opt_resf; g_scale=g_opt_resf; g_ds=g_scale; if(g_scale!=1.0f) LOG("internal resolution x%.2f\n",g_scale); }
+  { extern float g_opt_resf; g_scale=gl_res_cap(g_opt_resf); g_ds=g_scale; if(g_scale!=1.0f) LOG("internal resolution x%.2f\n",g_scale); }
   rs_update();
   worker_start();
   sep_init();

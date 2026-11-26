@@ -91,7 +91,14 @@ static void vkr_mapping_end(void) {
 /* 0 when Vulkan can't run here */
 static int vkr_start(void) {
     if (!vk_init()) return 0;
-    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 16 (options.c) */
+    g_vk_scale = g_settings.resolution_scale;       /* the .ini keeps resolution within 0.25 to 6 (main.c) */
+    {   /* SWR: and the widest game picture at that scale must fit this GPU's image / framebuffer / viewport size */
+        extern float swr_res_cap(float s, int max_dim, const char* who);
+        const VkPhysicalDeviceLimits* L = &g_vk.props.limits; uint32_t m = L->maxImageDimension2D;
+        if (L->maxFramebufferWidth < m) m = L->maxFramebufferWidth;
+        if (L->maxViewportDimensions[0] < m) m = L->maxViewportDimensions[0];
+        g_vk_scale = swr_res_cap(g_vk_scale, (int)m, "vulkan");
+    }
     g_vk_anisotropy = g_settings.anisotropic_filtering; /* the sampler table keeps what it makes: anisotropy applies at start */
     if (g_vk_anisotropy > 1 && !g_vk.feat.samplerAnisotropy)
         LOG("vulkan: this GPU has no anisotropic filtering, so anisotropy=%d does nothing\n", g_vk_anisotropy);
