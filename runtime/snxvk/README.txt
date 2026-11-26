@@ -47,3 +47,8 @@ Every global symbol of the ScarletNX objects is renamed with the prefix snxv_ so
 
 Re-vendoring: a git clone of upstream, a branch at the old commit with this folder's files copied over it (the SWR
 changes as one commit), then a merge of upstream main; dread\make_release.py's snx_keep lists what the build reads.
+  gpu/shader/spirv_translate.c  backport of upstream 3963d78b (2026-10-29): SHFL within a fragment program's quad
+                        (IDX or BFLY 1-3 over segments of 4) is a quad operation, so helper lanes take part as on
+                        the console; translator revision 0x53570003; SWR_VK_NO_SHFL_QUAD=1 = off (tests)
+  gpu/vk/render.c       with dynamic vertex input the layout is set before the vertex buffers are bound, and the
+                        binding gets the same strides (upstream's order); SWR_VK_VI_OLD_ORDER=1 = old (tests)

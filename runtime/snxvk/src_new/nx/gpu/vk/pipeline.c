@@ -1506,9 +1506,10 @@ static void pf_key(char* out, size_t n, size_t* guest) {
                   g_vk_buffer_image_slots,
                   d->limits.maxPerStageDescriptorStorageImages,
                   d->limits.maxDescriptorSetStorageImages,
-                  0x53570002u /* SWR translator revision: 1 = FragCoord scale from SNX_RS.y (per-target scales),
-                                 2 = helper lanes leave fragment loops (upstream d48364cc) */,
-                  (u32)g_shader_helper_loop_cap};
+                  0x53570003u /* SWR translator revision: 1 = FragCoord scale from SNX_RS.y (per-target scales),
+                                 2 = helper lanes leave fragment loops (upstream d48364cc),
+                                 3 = SHFL within a fragment quad as a quad operation (upstream 3963d78b) */,
+                  (u32)g_shader_helper_loop_cap, (u32)g_shader_quad};
     /* a tree with changes builds under one commit name: the runtime's own bytes tell those builds apart. Not its
        modification time, which a copy of the same runtime (each game has one) changes */
     if (len >= 6 && !strcmp(commit + len - 6, "-dirty")) {

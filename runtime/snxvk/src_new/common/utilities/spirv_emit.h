@@ -221,6 +221,8 @@ enum {
     SPV_OP_UNREACHABLE = 255,
     SPV_OP_GROUP_NON_UNIFORM_BALLOT = 339,
     SPV_OP_GROUP_NON_UNIFORM_SHUFFLE = 345,
+    SPV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST = 365,
+    SPV_OP_GROUP_NON_UNIFORM_QUAD_SWAP = 366,
     SPV_OP_GROUP_NON_UNIFORM_U_MIN = 354,
     SPV_OP_READ_CLOCK_KHR = 5056,
     SPV_OP_DEMOTE_TO_HELPER_INVOCATION = 5380,
@@ -291,6 +293,7 @@ enum {
     SPV_CAPABILITY_GROUP_NON_UNIFORM_ARITHMETIC = 63,
     SPV_CAPABILITY_GROUP_NON_UNIFORM_BALLOT = 64,
     SPV_CAPABILITY_GROUP_NON_UNIFORM_SHUFFLE = 65,
+    SPV_CAPABILITY_GROUP_NON_UNIFORM_QUAD = 68,
     SPV_CAPABILITY_SHADER_LAYER = 69,
     SPV_CAPABILITY_DRAW_PARAMETERS = 4427,
     SPV_CAPABILITY_DENORM_FLUSH_TO_ZERO = 4465,
@@ -365,6 +368,7 @@ uint32_t spv_emit_clip_distance_output(SpvEmitter* e, uint32_t f32_type, uint32_
 uint32_t spv_emit_output_element_pointer(SpvEmitter* e, uint32_t f32_type, uint32_t array, uint32_t index);
 void spv_emit_image_query_capability(SpvEmitter* e);
 void spv_emit_subgroup_capabilities(SpvEmitter* e);
+void spv_emit_subgroup_quad_capability(SpvEmitter* e);
 void spv_emit_image_gather_extended_capability(SpvEmitter* e);
 void spv_emit_entry_str(SpvEmitter* e, SpvShaderStage stage, uint32_t function, const char* name,
                         const uint32_t* interfaces, size_t interface_count);
@@ -539,6 +543,9 @@ uint32_t spv_emit_subgroup_ballot(SpvEmitter* e, uint32_t vec4_type, uint32_t u3
 uint32_t spv_emit_subgroup_umin_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value);
 void spv_emit_subgroup_arithmetic_capability(SpvEmitter* e);
 uint32_t spv_emit_subgroup_shuffle_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, uint32_t lane);
+/* value from a lane of the invocation's quad: the lane (0-3) when swap is 0, else the neighbour across direction (0
+   horizontal, 1 vertical, 2 diagonal); lane and direction are constants. Helper invocations take part */
+uint32_t spv_emit_subgroup_quad_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, int swap, uint32_t operand);
 uint32_t spv_emit_vec4_insert(SpvEmitter* e, uint32_t vec4_type, uint32_t vector, uint32_t component_value,
                               uint32_t component);
 uint32_t spv_emit_vec4_construct(SpvEmitter* e, uint32_t vec4_type, const uint32_t components[4]);

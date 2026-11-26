@@ -55,6 +55,7 @@ typedef struct {
     u32 swapped; /* 1 + the slot whose sampler is an array element for this instruction */
     u32 image[8], image_type[8];
     u32 gbuf[16], gbuf_pointer, smap, subgroup_lane_input;
+    int quad; /* quad operations are declared: shfl_quad's SHFL are ones (SWR: upstream 3963d78b) */
     /* A fragment program with flow discards nothing inside its loop: a KIL or a failed alpha test sets this bool,
        an EXIT ends the loop for the lane, and the lane is discarded after it. A demote or a kill in the loop lets a
        driver drop a quad's remaining helpers from execution while they still hold the loop open: AMD's Windows
@@ -73,6 +74,8 @@ int g_shader_output_layer = 1;
 int g_shader_viewport_index = 3;
 int g_shader_geometry = 1;
 int g_shader_float16 = 1;
+int g_shader_quad = 1;
+u32 g_shader_quad_programs; /* SWR: fragment programs translated with quad SHFL (logged) */
 int g_shader_tessellation = 1;
 int g_shader_clock_scopes;
 int g_shader_maximal_reconvergence;
@@ -2209,6 +2212,20 @@ static void dynamic_pop(DirectCtx* c, u32 stack_ptr, const u32 stack[32], u32 ki
     }
 }
 
+/* SHFL within a fragment program's 2x2 quad (the immediate mask 0x1c03: segments of 4 lanes, clamped to the last)
+   from a lane known when translated (an immediate, or RZ): 1 for IDX, which reads lane index & 3, 2 for BFLY 1-3, the
+   neighbour across (*lane its direction, 0 horizontal). The lanes a triangle's edge leaves out of a quad still run
+   the program on the console, and SHFL reads them; a subgroup shuffle needn't (on RADV such a helper lane never
+   computed the value, and the pixels reading it drew a line along the edge). A quad operation reads them.
+   SWR: backport of upstream 3963d78b */
+static int shfl_quad(u64 w, u32* lane) {
+    if ((!B(w, 28, 1) && B(w, 20, 8) != 255) || !B(w, 29, 1) || B(w, 34, 13) != 0x1c03) return 0;
+    u32 index = B(w, 28, 1) ? B(w, 20, 5) : 0;
+    if (lane) *lane = B(w, 30, 2) == 0 ? index & 3 : index - 1;
+    if (B(w, 30, 2) == 0) return 1;
+    return B(w, 30, 2) == 3 && index >= 1 && index <= 3 ? 2 : 0;
+}
+
 static int texture_sample_supported(u64 w, int bindless) {
     u32 type = B(w, 28, 3);
     u32 offset = B(w, bindless ? 36 : 54, 1);
@@ -3452,7 +3469,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
     u32 wait_label = 0;
     int first_indexed[SH_INDEXED_TABLES] = {0}, indexed_count = 0, indexed_table[SH_MAXTEX] = {0}, k_indexed;
     int has_stack = 0, has_pexit = 0, has_conditional_exit = 0;
-    int needs_local = 0, needs_shared = 0, needs_subgroup = 0, needs_atomic_cas = 0, lane_used = 0;
+    int needs_local = 0, needs_shared = 0, needs_subgroup = 0, needs_atomic_cas = 0, lane_used = 0, needs_quad = 0;
     int needs_gather_extended = 0;
     int fp32_flush = 0, fp32_preserve = 0;
     u32 out_reg = 0;
@@ -4446,6 +4463,7 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             needs_derivatives = 1;
         if (stage == ST_FS && helper_side_effect(op->id)) needs_demote = 1;
         if (op->id == O_VOTE || op->id == O_SHFL) needs_subgroup = 1;
+        if (op->id == O_SHFL && stage == ST_FS && g_shader_quad && shfl_quad(insn[i], NULL)) needs_quad = 1;
         /* FSWZADD's lanes in a quad are the subgroup's, as SHFL's are, when they don't all do the same */
         if (op->id == O_FSWZADD && fswzadd_lanes(insn[i], B(insn[i], 28, 2)) != 15) needs_subgroup = 1;
         if (op->id == O_S2R && (B(insn[i], 20, 8) == 0 || (B(insn[i], 20, 8) >= 0x38 && B(insn[i], 20, 8) <= 0x3c)))
@@ -4689,6 +4707,9 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
     if (needs_clock) spv_emit_shader_clock_extension(&c->emit);
     if (needs_i64) spv_emit_capability(&c->emit, 11); /* Int64 */
     if (needs_subgroup || converge) spv_emit_subgroup_capabilities(&c->emit);
+    if (needs_quad) spv_emit_subgroup_quad_capability(&c->emit);
+    if (needs_quad) __atomic_fetch_add(&g_shader_quad_programs, 1, __ATOMIC_RELAXED);
+    c->quad = needs_quad;
     if (converge) spv_emit_subgroup_arithmetic_capability(&c->emit);
     if (needs_gather_extended) spv_emit_image_gather_extended_capability(&c->emit);
     if (needs_image_query) spv_emit_image_query_capability(&c->emit);
@@ -5806,6 +5827,13 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
             u32 value = integer_right(c, w, op - O_POPC_R);
             if (B(w, 40, 1)) value = spv_emit_not_u32(&c->emit, c->u32_type, value);
             reg_write(c, d, spv_emit_bit_count(&c->emit, c->u32_type, value));
+        } else if (op == O_SHFL && c->quad && shfl_quad(w, NULL)) {
+            u32 lane;
+            int swap = shfl_quad(w, &lane) == 2;
+            lane = spv_emit_constant_u32(&c->emit, c->u32_type, lane);
+            u32 value = spv_emit_subgroup_quad_u32(&c->emit, c->u32_type, reg_read(c, a), swap, lane);
+            pred_write(c, B(w, 48, 3), c->true_value);
+            reg_write(c, d, value);
         } else if (op == O_SHFL) {
             u32 index = B(w, 28, 1) ? spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 20, 5)) : reg_read(c, b);
             u32 mask =

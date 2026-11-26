@@ -474,6 +474,7 @@ int ship_walk(const ShipSink* sink, ShipProgress* progress, int count) {
              stopped(&w) ? ". The rest couldn't be saved and are made as the game draws them" : "");
         detail(&w, "%u programs: %u translated, %u already translated, %u left out, %u failed", w.found, w.made,
                w.known, w.skipped + w.lone, w.failed);
+        detail(&w, "fragment programs with SHFL in a quad as quad operations: %u", g_shader_quad_programs); /* SWR */
     }
     if (w.unread)
         note(&w, "%u file%s skipped this time, checked again next launch", w.unread, w.unread == 1 ? "" : "s");
