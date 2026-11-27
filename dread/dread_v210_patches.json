@@ -333,7 +333,7 @@
   },
   "code_017.c": {
    "pristine": "edff8041521b19ebad7c077414343c68aa513e72abf1f1bf65f73746e895270c",
-   "result": "53b7022c75e2b2e359f69b5afe012a5ad7345614980ecacf9206d544e754ffa0",
+   "result": "f0a6b12000394e51792e82ae12e6445a2c84684862cc147fb8a2d72fa59349de",
    "hunks": [
     [
      30139,
@@ -394,6 +394,13 @@
      32362,
      [
       " if(c->x[0] && swr_spawn_cpu==(void*)c) c->x[0]=(u64)(u32)swr_spawn_view(RD32((c->x[31]+40)),swr_w,swr_h);   /* SWR spawn view */"
+     ]
+    ],
+    [
+     42046,
+     42047,
+     [
+      " c->x[10]=(u64)((u32)(672));   /* SWR: Resume leaves a finished (13) or finishing (10) movie alone; the title intro never ended when A was released just as it finished */"
      ]
     ]
    ]
