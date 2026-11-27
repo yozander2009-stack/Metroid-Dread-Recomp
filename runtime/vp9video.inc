@@ -229,9 +229,24 @@ static void v9_keep(const vpx_image_t* im){
     for(u32 x=0;x<cw && 2*x+1<w+1;x++){ d[2*x]=u[x]; if(2*x+1<w) d[2*x+1]=v[x]; } }
   g_fw=w; g_fh=h; g_vframes++; }
 
+/* Holding a button makes the game fast-forward a playing video (title screen, story videos): MEASURED on the title loop
+   (scratchpad title93.py, Y held): 2.0x at 30 and 60 FPS caps, the console's rate, but 2.7x at 120 and 4.1x at 144,
+   because the game then asks for pictures faster the more often it runs (#93). A video asked for more than 45 new
+   pictures a second (Dread's videos play ~33) sets g_v9_fast_until; main.c pace_update paces at 60 while it lasts. */
+volatile u64 g_v9_fast_until;
+static void v9_rate_note(V9Vid* V, u32 n){
+  static V9Vid* rv; static u64 t0; static u32 cnt; static int high; u64 now=plat_ns();
+  if((int)n==V->cur) return;
+  if(V!=rv){ rv=V; t0=now; cnt=0; high=0; }
+  cnt++;
+  if(now-t0>=500000000ull){ u64 rate=(u64)cnt*1000000000ull/(now-t0); t0=now; cnt=0;
+    high= rate>45? high+1 : 0;   /* two half seconds in a row: a video's opening burst is not a fast-forward */
+    if(high>=2) g_v9_fast_until=now+1000000000ull; } }
+
 /* decode frame n of the video (decoding from the previous key frame if we are not simply going forward) */
 static int v9_show(V9Vid* V, u32 n){
   if(n>=V->nfr) return 0;
+  v9_rate_note(V,n);
   if(V->sub){ V9Vid* S=(V9Vid*)V->sub; u32 m=(u32)(((u64)n*S->nfr+V->nfr/2)/V->nfr); if(m>=S->nfr) m=S->nfr-1;   /* the same position in the mod's video */
     int r=v9_show(S,m); V->cur=V->dec_cur=(int)n; V->used=++g_v9clk; g_v9act=V; return r; }
   /* A partial cache may replay backward requests; forward playback still advances codec references so a later cache hole cannot accumulate decode work. */

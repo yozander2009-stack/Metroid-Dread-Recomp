@@ -667,6 +667,13 @@ static void pace_update(void){
       static int was; int slow= s>0.0f && s<0.95f;
       if(slow!=was){ was=slow; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",slow?"on":"ended",s,slow?60:f); }
       if(slow) f=60; } }
+  /* A video the game fast-forwards (a button held on the title screen or in a story video): 2x on the console, but the
+     game asks for its pictures faster the more often it runs, so 4x at 144 FPS (#93). Paced at 60 while it lasts
+     (host1x.c vp9video.inc v9_rate_note). SWR_NO_VIDEO_FF_60=1 = old behaviour (tests) */
+  { static int offv=-1; if(offv<0) offv=getenv("SWR_NO_VIDEO_FF_60")!=NULL;
+    extern volatile u64 g_v9_fast_until; static int was; int ff= !offv && (f>60 || f==0) && plat_ns()<g_v9_fast_until;
+    if(ff!=was){ was=ff; LOG("video fast-forward %s: pacing at %s\n",ff? "on" : "ended",ff? "60 FPS" : "the frame cap"); }
+    if(ff) f=60; }
   /* Particle vertex-buffer pool. The game keeps 1024 of them (F_8173910; [GOT+2000] -> the count in use; F_8174D48 takes
      array[count] and count++ with no check). Effects take them every frame and give them back about 0.5 s later, so at
      high frame rates more are in use at once, and an acid splash takes ~125 in one or two frames. At 1025 the game read
