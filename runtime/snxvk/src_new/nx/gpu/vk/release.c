@@ -167,7 +167,9 @@ static void release_through(u64 gate, u64 cgate) {
     }
     vk_unlock();
 }
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void release_thread(void* p) {
+    plat_diag_role("vk-release");
     (void)p;
     SNX_THREAD_NAME("Vulkan release");
     for (;;) {

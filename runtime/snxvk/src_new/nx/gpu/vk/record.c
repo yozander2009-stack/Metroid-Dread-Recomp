@@ -45,7 +45,9 @@ static int g_sleep; /* the consumer waits on g_cv for more */
 static PMutex g_m;
 static PCond g_cv;
 
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void rec_thread(void* arg) {
+    plat_diag_role("vk-record");
     u64 tail = 0;
     (void)arg;
     SNX_THREAD_NAME("Vulkan recorder");
