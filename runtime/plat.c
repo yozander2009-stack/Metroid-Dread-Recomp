@@ -662,7 +662,11 @@ void plat_message(const char* text, int error, int wait){
 void plat_install_crash_handler(void){
   struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=sighandler; sa.sa_flags=SA_SIGINFO|SA_ONSTACK;
   static char altstack[65536]; stack_t ss; ss.ss_sp=altstack; ss.ss_size=sizeof altstack; ss.ss_flags=0; sigaltstack(&ss,NULL);
-  sigaction(SIGSEGV,&sa,NULL); sigaction(SIGBUS,&sa,NULL); sigaction(SIGILL,&sa,NULL); sigaction(SIGFPE,&sa,NULL); }
+  sigaction(SIGSEGV,&sa,NULL); sigaction(SIGBUS,&sa,NULL); sigaction(SIGILL,&sa,NULL); sigaction(SIGFPE,&sa,NULL);
+#if defined(__linux__) && !defined(__ANDROID__)
+  { extern int backtrace(void**,int); void* w[2]; backtrace(w,2); }   /* crash_report's call list: libgcc_s loaded now */
+#endif
+}
 #endif
 #ifndef _WIN32
 void plat_prof_start(int boot){ (void)boot; }

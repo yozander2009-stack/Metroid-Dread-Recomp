@@ -944,7 +944,9 @@ static PCond g_pj_work, g_pj_done;
 static Pipe *g_pj_head, *g_pj_tail; /* a draw's */
 static Pipe *g_pw_head, *g_pw_tail; /* the file's */
 static int g_pj_started, g_pj_threads;
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void pipe_worker(void* arg) {
+    plat_diag_role("vk-pipeline");
     (void)arg;
     SNX_THREAD_NAME("Vulkan pipelines");
     for (;;) {
@@ -2443,7 +2445,9 @@ static void pf_load(void* arg) {
     ship_release();
     __atomic_store_n(&g_pf.ship_ready, 1, __ATOMIC_RELEASE); /* the index and the view no longer change */
 }
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void pf_load_thread(void* arg) {
+    plat_diag_role("vk-cache-load");
     SNX_THREAD_NAME("pipeline load");
     pf_load(arg);
 }

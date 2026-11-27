@@ -1284,7 +1284,9 @@ static int ww_wanted(u64 l, u32 seen, u32 from) {
 }
 /* Scans the leaves the checks of the last epochs needed each time an epoch starts, up through memory, and starts over
    for a newer epoch. A check that comes before the scanner got to its leaf scans it itself */
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void ww_scanner(void* arg) {
+    plat_diag_role("vk-writewatch");
     u32 last = 0;
     (void)arg;
     SNX_THREAD_NAME("Vulkan write scans");

@@ -998,7 +998,9 @@ void gpu_report_stall(void) {
     }
     if (g_renderer && g_renderer->report_stall) g_renderer->report_stall();
 }
+void plat_diag_role(const char*); /* SWR: thread names for crash reports */
 static void gpu_thread(void* arg) {
+    plat_diag_role("vk-gpu");
     (void)arg;
     t_gpu = 1;
     SNX_THREAD_NAME("GPU");
