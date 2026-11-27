@@ -32,6 +32,7 @@ extern "C" int backend_gpu_amd(void);   // backend_win32.c
 #else
 static int backend_gpu_amd(void) { return 0; }
 #endif
+extern "C" { int rando_scan(void); const char* rando_name(int); const char* rando_running(void); const char* rando_chosen(void); int rando_choose(const char*); void rando_restart(void); }   // runtime svc_fs.c / svc_launcher.c
 extern "C" { int amiibo_count(void); const char* amiibo_name(int); const char* amiibo_status(void); int amiibo_place(int); const char* amiibo_dir(void); void amiibo_rescan(void); }   // runtime amiibo.c
 
 extern "C" {
@@ -136,7 +137,17 @@ void tab_content(int t) {
                 if (backend_gpu_amd()) { std::string now = val("renderer"); if (now != was) change("amd_opengl", now == "vulkan_native" ? "0" : "1");
                     if (now != "vulkan_native") warn_text("AMD graphics card: OpenGL (and Vulkan output) crashes in AMD's driver on many PCs. Native Vulkan is recommended."); } }
                 opt_row("hdr"); break;
-    case 2: { static int seen = -100; if (g_frames - seen > 30) amiibo_rescan(); seen = g_frames;   // re-read the folder each time the menu opens
+    case 2: { static int seen = -100, nseeds; if (g_frames - seen > 30) { amiibo_rescan(); nseeds = rando_scan(); } seen = g_frames;   // re-read the folders each time the menu opens
+                if (nseeds > 0) {   // Randovania: the seed is applied when the game starts, so a change here takes a restart
+                    section("RANDOVANIA");
+                    std::vector<std::string> items{"Off"}; std::string ch = rando_chosen(), run = rando_running(); int idx = 0;
+                    for (int i = 0; i < nseeds; i++) { items.push_back(rando_name(i)); if (ch == rando_name(i)) idx = i + 1; }
+                    if (row_choice("##ovrando", "Seed", &idx, items, ch != run ? "NEXT START" : nullptr)) { rando_choose(idx ? rando_name(idx - 1) : ""); ch = rando_chosen(); }
+                    if (ch != run) {
+                        if (row_button("##ovrrs", "Restart the game now to use it", "RESTART", true)) rando_restart();
+                        warn_text("Progress since the last save is lost. Each seed plays on its own save files.");
+                    } else help_text(run.empty() ? "Playing without a Randovania seed (normal save files)." : fmt("Playing seed %s on its own save files.", run.c_str()).c_str());
+                }
                 section("AMIIBO");
                 for (int i = 0; i < amiibo_count(); i++) if (row_button(fmt("##ovam%d", i).c_str(), amiibo_name(i), "SCAN")) amiibo_place(i);
                 const char* st = amiibo_status();

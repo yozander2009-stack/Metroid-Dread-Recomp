@@ -80,6 +80,28 @@ static int load_one(const SwrModInfo* mi){
   LOG("module %-8s at %010llx (%.1f MB)\n",mi->name,(unsigned long long)mi->base,(double)size/1048576.0);
   return 0; }
 
+/* The functions are recompiled during setup. Only enable them after a mod's
+   complete, supported Randovania IPS has been checked by the filesystem layer.
+   Patching guest instructions alone would not change native compiled calls. */
+void loader_enable_randovania(void){
+  static const u8 id[20]={0x64,0x67,0x61,0xF6,0x43,0xAF,0xEB,0xB3,0x79,0xED,0xD5,0xE6,0xA5,0x15,0x1A,0xF2,0xCE,0xF9,0x3D,0xC1};
+  const SwrModInfo* main=NULL;
+  for(u32 i=0;i<g_mod->nmods;i++) if(!strcmp(g_mod->mods[i].name,"main")) main=&g_mod->mods[i];
+  if(!main || memcmp(main->build_id,id,sizeof id))
+    fatal("Randovania requires the supported Metroid Dread 2.1.0 executable.");
+  extern void* g_code_mod;
+  unsigned* enabled=(unsigned*)plat_dl_sym(g_code_mod,"swr_randovania_enabled");
+  if(!enabled) fatal("Randovania needs rebuilt game code. Use Check game files and rebuild, then import the complete 2.1.0 PKG export.");
+  const u64 off=0x15D9780;
+  const char original[]="IsInSTEAM_PC_FINAL_RETAIL";
+  const char sentinel[]="HasRandomizerPatches";
+  if(off+sizeof original>main->size || memcmp(GP(main->base+off),original,sizeof original))
+    fatal("Randovania: the version sentinel does not match the verified 2.1.0 executable.");
+  memcpy(GP(main->base+off),sentinel,sizeof sentinel);
+  *enabled=1;
+  LOG("Randovania: enabled 2.1.0 PKG compatibility (Corpius, Aeion, controller input, door capacity, version sentinel)\n");
+}
+
 int loader_load(void){
   for(u32 i=0;i<g_mod->nmods;i++) if(load_one(&g_mod->mods[i])) return -1;
   return 0; }

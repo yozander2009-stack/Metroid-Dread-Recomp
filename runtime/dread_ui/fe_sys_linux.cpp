@@ -23,6 +23,8 @@
 
 extern char** environ;
 
+#include "../randovania_patch.h"
+
 namespace fe {
 
 Paths P;
@@ -393,12 +395,27 @@ static std::string find_romfs(const std::string& root) {
     for (const char* d : {"packs", "textures", "system", "gui", "sounds", "actors"}) if (dir_exists(join(root, d))) return root;
     return {};
 }
+static bool create_randovania_stage(const std::string& path) { return mkdir(path.c_str(), 0755) == 0; }
+static bool publish_randovania_stage(const std::string& from, const std::string& to) { return rename(from.c_str(), to.c_str()) == 0; }
+static void clean_randovania_stage(const std::string& path) { remove_tree(path); }
+#include "fe_randovania.inc"
+
 bool mod_import_folder(const std::string& src, const std::string& name, std::string* err) {
     std::string rf = find_romfs(src);
-    if (rf.empty()) { if (err) *err = "No 'romfs' folder in this mod. Only RomFS (file replacement) mods and texture packs work with the recompiled game; exefs/code patches can't apply."; return false; }
-    std::string dst = join(join(mods_dir(), name), "romfs");
-    if (!copy_tree(rf, dst, err, true)) return false;
-    auto m = mods_list(); mods_write(m); return true;
+    std::string patch;
+    if (!randovania_import_info(src, rf, patch, err)) return false;
+    if (rf.empty()) { if (err) *err = "No 'romfs' folder in this mod. Import a RomFS mod or a supported Randovania PKG export."; return false; }
+    const std::string target = join(mods_dir(), name);
+    if (!patch.empty()) {
+        if (!import_randovania(rf, patch, target, err)) return false;
+    } else {
+        if (file_exists(join(target, SWR_RANDOVANIA_MARKER))) {
+            if (err) *err = "A Randovania seed already uses this mod name. Remove it or use a different name.";
+            return false;
+        }
+        if (!copy_tree(rf, join(target, "romfs"), err, true)) return false;
+    }
+    auto m = mods_list(); if (!patch.empty()) randovania_only(m, name); mods_write(m); return true;
 }
 bool mod_import_zip(const std::string& zip, std::string* err) {
     const char* t = getenv("TMPDIR"); std::string dir = join(t && *t ? t : "/tmp", "dreadmod_" + now_stamp()); make_dirs(dir);

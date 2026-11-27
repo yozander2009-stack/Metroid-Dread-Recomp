@@ -304,6 +304,12 @@ cv_registered:
   else r=t->wait_result;
   pm_unlock(&g_klock); return r; }
 
+/* test only: SWR_TRACE_CV_MS=FROM-TO logs every condition-variable wait, wake and signal in that window (ms since start) */
+static int g_cv_woke;
+static int cvtr_on(void){
+  static int on=-1; static u64 a, z;
+  if(on<0){ const char* e=getenv("SWR_TRACE_CV_MS"); on= e!=NULL; if(e){ char* q; a=strtoull(e,&q,10)*1000000ull; z= *q=='-'? strtoull(q+1,NULL,10)*1000000ull : ~0ull; } }
+  if(!on) return 0; extern u64 g_t0_ns(void); u64 t=plat_ns()-g_t0_ns(); return t>=a && t<=z; }
 static u32 svc_signal_cv(u64 key, i32 count){
   pm_lock(&g_klock);
   int n=0;
@@ -318,7 +324,7 @@ static u32 svc_signal_cv(u64 key, i32 count){
     }
   }
   if(!wl_count(3,key)) __atomic_store_n(U32(key),0,__ATOMIC_SEQ_CST);
-  pm_unlock(&g_klock); return 0; }
+  g_cv_woke=n; pm_unlock(&g_klock); return 0; }
 
 /* per-frame sweep for mutex waiters stuck behind a bogus owner, or whose waiters bit got cleared
    (the owner then unlocks without calling us) */
@@ -837,8 +843,14 @@ static void swr_svc_(CPU* c, u32 imm){
     if(capture&&plat_ns()-wait_begin>1000000ull){logged++;LOG("target mutex: address=%llx waited=%.3f ms\n",(unsigned long long)addr,(plat_ns()-wait_begin)/1e6);mutex_snapshot_log("waiter",&waiter);mutex_snapshot_log("owner",&owner);}
     trace_main_call(t,c,imm,caller,start,addr);return;}
   case 0x1B: x[0]=svc_arbitrate_unlock(x[0]); return;
-  case 0x1C: {u64 start=trace_service_start(t),caller=x[30],addr=x[1];x[0]=svc_wait_cv(t,x[0],x[1],(u32)x[2],(i64)x[3]);trace_main_call(t,c,imm,caller,start,addr);return;}
-  case 0x1D: x[0]=svc_signal_cv(x[0],(i32)(u32)x[1]); return;
+  case 0x1C: {u64 start=trace_service_start(t),caller=x[30],addr=x[1];int tr=cvtr_on(); u64 key=x[1], mu=x[0];
+    if(tr) LOG("cv: t%llu wait key %llx mutex %llx from %llx timeout %lld\n",(unsigned long long)t->id,(unsigned long long)key,(unsigned long long)mu,(unsigned long long)caller,(long long)x[3]);
+    x[0]=svc_wait_cv(t,x[0],x[1],(u32)x[2],(i64)x[3]);
+    if(tr || cvtr_on()) LOG("cv: t%llu woke key %llx r=%x\n",(unsigned long long)t->id,(unsigned long long)key,(unsigned)x[0]);
+    trace_main_call(t,c,imm,caller,start,addr);return;}
+  case 0x1D: { int tr=cvtr_on(); u64 key=x[0]; i32 cnt=(i32)(u32)x[1]; x[0]=svc_signal_cv(x[0],cnt);
+    if(tr) LOG("cv: t%llu signal key %llx count %d woke %d from %llx\n",(unsigned long long)t->id,(unsigned long long)key,cnt,g_cv_woke,(unsigned long long)x[30]);
+    return; }
   case 0x1E: x[0]=c->rt->ticks(); return;
   case 0x1F: { char name[16]={0}; memcpy(name,GP(x[1]),12);
     if(!strcmp(name,"sm:")){ SvcObj* o=svc_open("sm:"); x[0]=0; x[1]=session_new(o); return; }

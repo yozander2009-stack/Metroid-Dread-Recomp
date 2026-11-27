@@ -142,6 +142,29 @@ static int launch(const Game* g){
   LOG("launcher: started %s\n",exe);
   played_set(g->name); g_launched=1; return 0; }
 
+/* The in-game menu's Randovania RESTART: the game quits and starts again at once, past the Play screen (RECOMPLAUNCHER=1:
+   PLAY was already pressed; game code that needs a rebuild is rebuilt first). Started at the very end of the exit, so the
+   new copy finds the one-copy lock free within its 3 s of retries. */
+static int g_restart;
+void rando_restart(void){ extern void backend_request_quit(void); g_restart=1; LOG("restart: the game starts again to apply the Randovania choice\n"); backend_request_quit(); }
+void game_restart_on_exit(void){
+  if(!g_restart) return; g_restart=0;
+  char exe[1300], dir[1100]; snprintf(exe,sizeof exe,"%s%s" EXE_SUFFIX,g_exedir,g_exename); snprintf(dir,sizeof dir,"%s",g_exedir);
+#if defined(_WIN32)
+  _putenv("RECOMPLAUNCHER=1");
+#else
+  const char* ai=getenv("APPIMAGE"); if(ai && *ai){ snprintf(exe,sizeof exe,"%s",ai); }   /* the AppImage, not its mount (gone after this exit) */
+  setenv("RECOMPLAUNCHER","1",1);
+#endif
+  if(spawn(exe,dir)) WARN("restart: could not start %s\n",exe); else LOG("restart: started %s\n",exe);
+  log_flush();
+#if defined(_WIN32)
+  _putenv("SWR_LAUNCHER=");   /* the new copy brings the launcher back when it quits, not this one */
+#else
+  unsetenv("SWR_LAUNCHER");
+#endif
+}
+
 /* a game started from the launcher brings it back when it quits */
 void launcher_on_exit(void){
   static int done; if(done || g_is_launcher) return; done=1;
