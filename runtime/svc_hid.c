@@ -132,6 +132,9 @@ static u64 g_hold_type=0, g_comm_mode=0, g_handheld_mode=0;
 int g_opt_rumble=100;   /* ini [Input] rumble: strength in percent, 0 = off */
 #define VIB_PADS 9      /* npads 0..7, then handheld */
 static volatile float g_vib[VIB_PADS][2][4]; static volatile u64 g_vib_ns[VIB_PADS][2]; static u64 g_vib_n;
+volatile int g_rumble_mute;   /* backend: the window is in the background, or the game is closing (#93) */
+#define VIB_FLOOR 0.01f      /* below this the game's value counts as silence: a leftover 0.001 the game keeps sending was
+                                raised to the 0.1 minimum below and buzzed forever (#93) */
 static volatile float g_vib_peak[2];   /* player 1's strongest low / high since the backend last read: a pulse shorter
                                           than the backend's refresh still reaches the motors */
 static void vib_set(u32 handle, const float* v){
@@ -139,6 +142,7 @@ static void vib_set(u32 handle, const float* v){
   u32 p= npad==0x20? 8 : npad;
   if(p>=VIB_PADS) return;
   for(int i=0;i<4;i++) g_vib[p][dev][i]= v[i]==v[i] && v[i]>0? v[i] : 0;   /* NaN or negative: silent */
+  if(g_vib[p][dev][0]<VIB_FLOOR) g_vib[p][dev][0]=0; if(g_vib[p][dev][2]<VIB_FLOOR) g_vib[p][dev][2]=0;
   g_vib_ns[p][dev]=plat_ns();
   if(p==0 || p==8){ if(g_vib[p][dev][0]>g_vib_peak[0]) g_vib_peak[0]=g_vib[p][dev][0]; if(g_vib[p][dev][2]>g_vib_peak[1]) g_vib_peak[1]=g_vib[p][dev][2]; }
   if(!g_vib_n++) LOG("input: the game sent its first rumble (npad %u, amplitudes %.2f low / %.2f high)\n",npad,v[0],v[2]); }
@@ -151,16 +155,23 @@ void hid_rumble_get(float* lo, float* hi){
   g_vib_peak[0]=g_vib_peak[1]=0;
   for(int p=0;p<VIB_PADS;p+=8) for(int d=0;d<2;d++){ if(!g_vib_ns[p][d] || now-g_vib_ns[p][d]>200000000ull) continue;
     if(g_vib[p][d][0]>l) l=g_vib[p][d][0]; if(g_vib[p][d][2]>h) h=g_vib[p][d][2]; }
+  float rl=l, rh=h;   /* as the game sent them, for the log below */
   if(l>0 && l<0.1f) l=0.1f;
   if(h>0 && h<0.1f) h=0.1f;
-  float s= g_opt_rumble>0? g_opt_rumble/100.0f : 0; l*=s; h*=s;
+  float s= g_opt_rumble>0 && !g_rumble_mute? g_opt_rumble/100.0f : 0;
+  { /* rumble that never pauses: say once per stretch what the game keeps sending (#93) */
+    static u64 on_since; static int said;
+    if(s>0 && (rl>0 || rh>0)){ if(!on_since) on_since=now; else if(!said && now-on_since>10000000000ull){ said=1;
+        LOG("input: rumble on for 10 s without a pause (the game keeps sending %.3f low / %.3f high)\n",rl,rh); } }
+    else { on_since=0; said=0; } }
+  l*=s; h*=s;
   *lo= l>1? 1 : l; *hi= h>1? 1 : h;
   { static int said; if(!said && (*lo>0 || *hi>0)){ said=1; LOG("input: first rumble to the pad (%.2f low / %.2f high)\n",*lo,*hi); } } }
 
 /* HD rumble (rumble_hd.c): player 1's left and right {low amp, low Hz, high amp, high Hz} as the game sent them, the
    strength setting applied, a side not refreshed for 200 ms silent. 1 = something plays */
 int hid_rumble_hd(float v[2][4]){
-  u64 now=plat_ns(); float s= g_opt_rumble>0? g_opt_rumble/100.0f : 0; int on=0;
+  u64 now=plat_ns(); float s= g_opt_rumble>0 && !g_rumble_mute? g_opt_rumble/100.0f : 0; int on=0;
   for(int d=0;d<2;d++){ int p= g_vib_ns[8][d]>g_vib_ns[0][d]? 8 : 0;
     if(!g_vib_ns[p][d] || now-g_vib_ns[p][d]>200000000ull){ v[d][0]=v[d][2]=0; v[d][1]=160; v[d][3]=320; continue; }
     for(int i=0;i<4;i++) v[d][i]=g_vib[p][d][i];

@@ -80,7 +80,7 @@ static void xinput_load(void){
   static int done; if(done) return; done=1;   /* also called early by backend_pad_family */
   const char* dl[]={"xinput1_4.dll","xinput1_3.dll","xinput9_1_0.dll"};
   for(int i=0;i<3 && !xget;i++){ HMODULE h=LoadLibraryA(dl[i]); if(h){ xget=(XGetState)GetProcAddress(h,"XInputGetState"); xset=(XSetState)GetProcAddress(h,"XInputSetState"); if(i<2) xget_ex=(XGetState)GetProcAddress(h,(LPCSTR)(size_t)100); } }
-  if(xset){ extern void xinput_rumble_off(void); atexit(xinput_rumble_off); }
+  if(xset){ extern void rumble_stop_all(void); atexit(rumble_stop_all); }
 }
 void xinput_rumble_off(void){ if(xset){ XVIB v={0,0}; for(DWORD i=0;i<4;i++) xset(i,&v); } }   /* a motor left on would keep going after exit */
 
@@ -321,6 +321,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
       SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d (not saved)\n",g_opt_fps); return 0; }
     keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
   case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
+  case WM_ACTIVATEAPP: { extern volatile int g_rumble_mute;   /* in the background the pad stays still (#93) */
+      if(w) InterlockedAnd((volatile LONG*)&g_rumble_mute,~1); else InterlockedOr((volatile LONG*)&g_rumble_mute,1); }
+    return DefWindowProcA(h,m,w,l);
   case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); InterlockedExchange(&g_mtap,0); InterlockedExchange(&g_aim_on,0); ClipCursor(NULL); ReleaseCapture(); return 0;
   case WM_APP+8: { char t[300]; if(w) snprintf(t,sizeof t,"%s  |  RECORDING (F7 to stop)",g_title); else snprintf(t,sizeof t,"%s  |  Video saved in the recordings folder",g_title); SetWindowTextA(h,t); return 0; }
   case WM_APP+10: { char t[400]; char* s=(char*)l; if(s){ snprintf(t,sizeof t,"%s  |  %s",g_title,s); free(s); } else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }   /* backend_status_win */
@@ -652,9 +655,20 @@ void video_poll(void){
           if(hd_rumble_covers(t,NULL)) continue;   /* a Nintendo pad / DualSense: HD rumble (rumble_hd.c) plays it */
           sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); } }
       if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); } } }
+  { static int reg; if(!reg && sdl_ok){ reg=1; extern void rumble_stop_all(void); atexit(rumble_stop_all); } }
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
+
+/* Every pad's motors off, now and for good: the game is closing (normal exit, a fatal error, a crash, atexit). A pad
+   keeps its last rumble state until told otherwise, so without this a rumble playing at exit kept going after the game
+   was gone (#93). HD rumble pads get their stop from their own thread, which sees the mute within a millisecond. */
+void rumble_stop_all(void){
+  extern volatile int g_rumble_mute; static volatile LONG once; if(InterlockedExchange(&once,1)) return;
+  InterlockedOr((volatile LONG*)&g_rumble_mute,2);
+  if(sdl_ok && sdl_gcrumble) for(int i=0;i<sdl_npad;i++) sdl_gcrumble(sdl_pad[i],0,0,0);
+  xinput_rumble_off();
+  Sleep(60); }
 
 void backend_test_guest_start(void){if(g_script[0]&&getenv("SWR_SCRIPT_GUEST_CLOCK"))g_start=plat_ns();
   if(getenv("SWR_TEST_SCRIPT_MS") || getenv("SWR_TEST_RECORD_MS")){ test_ms=getenv("SWR_TEST_SCRIPT_MS")!=NULL; test_clock_start=plat_ns(); LOG("test input clock: start_ns=%llu\n",(unsigned long long)test_clock_start); } }
