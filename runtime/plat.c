@@ -72,6 +72,7 @@ void logf_(int lvl, const char* fmt, ...){
 void fatal(const char* fmt, ...){
   char buf[4096]; va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof buf,fmt,ap); va_end(ap);
   logf_(0,"FATAL: %s\n",buf);
+  { extern void rumble_stop_all(void); rumble_stop_all(); }   /* before the message box: the pad keeps its last rumble (#93) */
 #if defined(_WIN32)
   { extern void win_fatal_box(const char*); win_fatal_box(buf); }
 #elif !defined(__ANDROID__)

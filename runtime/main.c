@@ -281,6 +281,7 @@ void crash_report(void* host_pc, void* fault, int sig){
   KThread* t=kthread_cur();
   u64 ga=(u64)((u8*)fault-g_mem);
   logf_(0,"\n*** Crash (signal %d) at host pc=%p, access to %p (game address %llx) ***\n",sig,host_pc,fault,(unsigned long long)ga);
+  { extern void rumble_stop_all(void); rumble_stop_all(); }   /* a crash during a rumble left the pad shaking (#93) */
   { extern void mem_report(char*,int); char mr[200]; mem_report(mr,sizeof mr); logf_(0,"  memory: %s\n",mr);
 #ifdef _WIN32
     { extern char __ImageBase; u64 b=(u64)(size_t)&__ImageBase, p=(u64)(size_t)host_pc; if(p>=b && p<b+0x10000000ull) logf_(0,"  in the runtime itself (exe offset +%llx), thread %s\n",(unsigned long long)(p-b), kthread_cur()? "of the game" : "of the runtime (GPU, audio or window)");
@@ -1122,6 +1123,7 @@ int swr_main(int argc, char** argv){
       if(!in60 && (g_opt_fps==0 || g_opt_fps>60)) while(next>now+4500000ull){ plat_sleep_ns(4000000); video_poll(); hid_update(); now=plat_ns(); } }
     if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
   }
+  { extern void rumble_stop_all(void); rumble_stop_all(); }   /* the pad keeps its last rumble otherwise (#93) */
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } { extern void snxvk_exit(void); snxvk_exit(); } LOG("Exit.\n"); log_flush(); fflush(NULL);
   amd_test_report();
   { extern void launcher_on_exit(void); launcher_on_exit(); }

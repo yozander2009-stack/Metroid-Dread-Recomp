@@ -52,3 +52,6 @@ void win_fatal_box(const char* msg){ MessageBoxA(NULL,msg,"SwitchRecomp",MB_OK|M
 #endif
 
 int backend_pad_family(void){ return 0; }   /* no controller probe here: the game's own button icons */
+
+/* no controller rumble of its own here: nothing to stop at exit (main.c / plat.c call it on every exit path, #93) */
+void rumble_stop_all(void){}

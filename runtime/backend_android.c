@@ -286,3 +286,6 @@ int backend_gl_worker_current(void){ return 0; }
 int backend_glq_ok(void){ return 0; }   /* GL calls go through glq */
 
 int backend_pad_family(void){ return 0; }   /* no controller probe here: the game's own button icons */
+
+/* no controller rumble of its own here: nothing to stop at exit (main.c / plat.c call it on every exit path, #93) */
+void rumble_stop_all(void){}

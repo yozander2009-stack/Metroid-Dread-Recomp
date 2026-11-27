@@ -112,6 +112,7 @@ static struct {
 } sdl;
 static SDLGC* g_pad_gc; static u64 g_pad_scan;
 static int (*sdl_rumble)(SDLGC*, u16, u16, u32);
+static SDLGC* g_rumble_pad;   /* the pad rumble last went to: stopped at exit (rumble_stop_all) */
 
 static int (*sdl_gctype)(int);   /* SDL_GameControllerTypeForIndex, SDL 2.0.12+ (optional) */
 static int (*sdl_gcgettype)(SDLGC*);   /* SDL_GameControllerGetType (optional): HD rumble skips SDL rumble on Nintendo pads */
@@ -156,7 +157,7 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   if(!sdl.Init) return;
   sdl.Update();
   { extern int hd_rumble_open(void* (*)(const char*)); hd_rumble_open(sdl_sym); }   /* HD rumble (rumble_hd.c, its own thread) */
-  if(g_pad_gc && !sdl.Attached(g_pad_gc)){ sdl.Close(g_pad_gc); g_pad_gc=NULL; LOG("controllers: disconnected\n"); }
+  if(g_pad_gc && !sdl.Attached(g_pad_gc)){ if(g_rumble_pad==g_pad_gc) g_rumble_pad=NULL; sdl.Close(g_pad_gc); g_pad_gc=NULL; LOG("controllers: disconnected\n"); }
   if(!g_pad_gc){ u64 now=plat_ns(); if(now-g_pad_scan<1000000000ull) return; g_pad_scan=now;
     for(int i=0;i<sdl.NumJoysticks() && !g_pad_gc;i++) if(sdl.IsGameController(i)) g_pad_gc=sdl.Open(i);
     if(!g_pad_gc) return;
@@ -178,8 +179,14 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
     static u16 plo=1, phi=1; static u64 last; u64 now=plat_ns(); u16 ulo=(u16)(lo*65535.0f), uhi=(u16)(hi*65535.0f);
     { extern int hd_rumble_covers(int,const char*);   /* Nintendo pads, DualSense: HD rumble plays it */
       int t= sdl_gcgettype? sdl_gcgettype(g) : 0; if(hd_rumble_covers(t,sdl.Name(g))) return; }
-    if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now; sdl_rumble(g,ulo,uhi,ulo||uhi? 250 : 0); } }
+    if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now; sdl_rumble(g,ulo,uhi,ulo||uhi? 250 : 0);
+      if(!g_rumble_pad){ extern void rumble_stop_all(void); atexit(rumble_stop_all); } g_rumble_pad=g; } }
 }
+/* the pad's motors off when the game closes (normal exit, fatal error, crash): a pad keeps its last rumble (#93) */
+void rumble_stop_all(void){
+  extern volatile int g_rumble_mute; static int once; if(once) return; once=1; g_rumble_mute|=2;
+  if(g_rumble_pad && sdl_rumble) sdl_rumble(g_rumble_pad,0,0,0);
+  plat_sleep_ns(60000000); }
 
 /* ---------------------------------------------------------------- window */
 static void set_fullscreen(int on){
