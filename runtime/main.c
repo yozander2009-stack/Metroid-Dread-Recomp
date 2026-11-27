@@ -11,6 +11,10 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <execinfo.h>
+#include <sys/prctl.h>
+#endif
 #else
 #include <windows.h>
 #endif
@@ -287,6 +291,15 @@ void crash_report(void* host_pc, void* fault, int sig){
 #else
     { Dl_info di; if(dladdr(host_pc,&di) && di.dli_fname)   /* which shared object: a graphics driver's, a system one, the game code's */
         logf_(0,"  in %s (+%llx), a thread %s\n",di.dli_fname,(unsigned long long)((u8*)host_pc-(u8*)di.dli_fbase), kthread_cur()? "of the game" : "of the runtime (GPU, audio, video or window)"); }
+#if defined(__linux__) && !defined(__ANDROID__)
+    if(!kthread_cur()){ char tn[17]={0}; prctl(PR_GET_NAME,tn,0,0,0); logf_(0,"  runtime thread: %s\n",tn[0]? tn : "unnamed"); }
+    { /* the calls that led here (through the signal frame): a driver crash shows which of our calls into it, and from where.
+         The first lines are this handler. Offsets resolve with the same build's symbols */
+      void* bt[32]; int n=backtrace(bt,32);
+      for(int i=0;i<n;i++){ Dl_info d; if(dladdr(bt[i],&d) && d.dli_fname){ const char* b=strrchr(d.dli_fname,'/');
+          logf_(0,"  call %2d: %s +%llx%s%s\n",i,b? b+1 : d.dli_fname,(unsigned long long)((u8*)bt[i]-(u8*)d.dli_fbase),d.dli_sname? " " : "",d.dli_sname? d.dli_sname : ""); }
+        else logf_(0,"  call %2d: %p\n",i,bt[i]); } }
+#endif
 #endif
     if(ga && ga<0x1000000ull) logf_(0,"  the address is a null pointer plus an offset: the game probably got NULL from its allocator (out of memory?). Try memory_gb=6 in the .ini\n"); }
   if(g_mod){ /* closest recompiled fn below host pc */
@@ -956,6 +969,7 @@ static void amd_env(const char* k, const char* v){
 #endif
 }
 
+static char g_renamed_from[256];   /* split_path: this program's own name when it uses the game's files */
 static void split_path(const char* argv0){
   char p[1024]; strncpy(p,argv0?argv0:"",1023); p[1023]=0;
   char* s1=strrchr(p,'/'), *s2=strrchr(p,'\\'), *s=s1>s2? s1 : s2;
@@ -967,6 +981,21 @@ static void split_path(const char* argv0){
     if(strstr(low,"amdtest")){ g_amd_test=1; strcpy(g_exename,"Metroid Dread"); } }
 #endif
   if(s){ s[1]=0; strncpy(g_exedir,p,1023); } else g_exedir[0]=0;
+#if defined(SWR_HAVE_FRONTEND)
+  /* a renamed copy next to the game ("Metroid-Dread-dynvi-test.exe", a test build): with no data folder of its own and the
+     game set up there, it uses the game's ini, saves and game code. Before, it set up a second copy with no saves (#68) */
+  if(!g_amd_test && strcmp(g_exename,"Metroid Dread")){
+    char own[1400], game[1400];
+    snprintf(own,sizeof own,"%s%s_data",g_exedir,g_exename);
+#ifdef _WIN32
+    snprintf(game,sizeof game,"%sMetroid Dread_data\\setup.ok",g_exedir);
+    int has_own= GetFileAttributesA(own)!=INVALID_FILE_ATTRIBUTES, has_game= GetFileAttributesA(game)!=INVALID_FILE_ATTRIBUTES;
+#else
+    snprintf(game,sizeof game,"%sMetroid Dread_data/setup.ok",g_exedir);
+    int has_own= access(own,F_OK)==0, has_game= access(game,F_OK)==0;
+#endif
+    if(!has_own && has_game){ strncpy(g_renamed_from,g_exename,255); strcpy(g_exename,"Metroid Dread"); } }
+#endif
 }
 
 int swr_main(int argc, char** argv){
@@ -997,6 +1026,7 @@ int swr_main(int argc, char** argv){
       LOG("AMD test build: this run tests %s\n",gl? "OpenGL with every OpenGL call on the GPU thread (SWR_NO_GLQ=1)" : "Native Vulkan"); }
   }
 #endif
+  if(g_renamed_from[0]) LOG("files: this program (%s) uses Metroid Dread's settings, saves and game code\n",g_renamed_from);
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   { /* one copy per install: two would share the saves (a double click on a Linux desktop icon starts two). An update's
