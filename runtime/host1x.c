@@ -183,16 +183,17 @@ static int g_dec_fail;
 static u8* g_fy; static u8* g_fuv; static u32 g_fw, g_fh, g_fcap, g_fuv_cap; static u32 g_vframes;
 /* NVDEC current-picture surfaces are addressed by VIC's input plane offsets.
    Keep independent pictures instead of converting whichever stream decoded last. */
-typedef struct {u64 luma,display,used,owner;u8*y,*uv;u32 w,h,cap,frame;} DecodedSurface;
+typedef struct {u64 luma,display,used,owner;u8*y,*uv;u32 w,h,cap,frame;u64 cid_owner;u32 cid_frame;} DecodedSurface;  /* cid: whose picture the pixels are (VIC skip) */
 static DecodedSurface decoded_surfaces[32];static u64 decoded_clock;
 static void decoded_surface_save(u32*r,u64 owner,u32 frame,int cached){
   u64 luma=(u64)r[0x43c/4]<<8,display=(u64)r[0x428/4]<<8;
   if(!luma)luma=display;if(!luma||!g_fw||!g_fh||!g_fy||!g_fuv)return;
   u8*sy=g_fy,*suv=g_fuv;u32 w=g_fw,h=g_fh;if(cached){DecodedSurface*prior=NULL;for(int i=0;i<32;i++)if(decoded_surfaces[i].used&&decoded_surfaces[i].owner==owner){if(decoded_surfaces[i].frame==frame){prior=&decoded_surfaces[i];break;}if(!prior||decoded_surfaces[i].used>prior->used)prior=&decoded_surfaces[i];}if(!prior)return;sy=prior->y;suv=prior->uv;w=prior->w;h=prior->h;}
+  u64 cid_o=owner; u32 cid_f=frame; if(cached){ for(int i=0;i<32;i++) if(decoded_surfaces[i].used&&decoded_surfaces[i].y==sy){ cid_o=decoded_surfaces[i].cid_owner; cid_f=decoded_surfaces[i].cid_frame; break; } }
   int k=-1;for(int i=0;i<32;i++)if(decoded_surfaces[i].luma==luma){k=i;break;}
   if(k<0){k=0;for(int i=1;i<32;i++)if(decoded_surfaces[i].used<decoded_surfaces[k].used)k=i;}
   DecodedSurface*d=&decoded_surfaces[k];u32 need=w*h;if(d->cap<need){u8*y=malloc(need),*uv=malloc(need/2+w+16);if(!y||!uv){free(y);free(uv);return;}free(d->y);free(d->uv);d->y=y;d->uv=uv;d->cap=need;}
-  d->luma=luma;d->display=display;d->w=w;d->h=h;d->owner=owner;d->frame=frame;d->used=++decoded_clock;if(d->y!=sy)memcpy(d->y,sy,need);if(d->uv!=suv)memcpy(d->uv,suv,(size_t)w*((h+1)/2));
+  d->luma=luma;d->display=display;d->w=w;d->h=h;d->owner=owner;d->frame=frame;d->used=++decoded_clock;d->cid_owner=cid_o;d->cid_frame=cid_f;if(d->y!=sy)memcpy(d->y,sy,need);if(d->uv!=suv)memcpy(d->uv,suv,(size_t)w*((h+1)/2));
   if(getenv("SWR_TRACE_VIC")){static u64 seen[64];static u32 ns;u64 key=luma^((u64)g_fw<<32)^g_fh;int i;for(i=0;i<ns;i++)if(seen[i]==key)break;if(i==ns&&ns<64){seen[ns++]=key;LOG("nvdec surface: current=%llx display=%llx picture=%ux%u planes=%x,%x,%x,%x,%x,%x,%x,%x current16=%x picindex=%x\n",(unsigned long long)luma,(unsigned long long)display,g_fw,g_fh,r[0x430/4],r[0x434/4],r[0x438/4],r[0x43c/4],r[0x440/4],r[0x444/4],r[0x448/4],r[0x44c/4],r[0x470/4],r[0x40c/4]);}}
 }
 static DecodedSurface*decoded_surface_find(u64 luma){if(!luma)return NULL;for(int i=0;i<32;i++)if(decoded_surfaces[i].used&&(decoded_surfaces[i].luma==luma||decoded_surfaces[i].display==luma))return &decoded_surfaces[i];return NULL;}
@@ -381,20 +382,42 @@ static void vic_execute(u32* r){
       LOG("vic trace: output guest=%llx iova=%llx fmt=%x %ux%u movie=%ux%u enabled=%u source_bound=%u%s\n",(unsigned long long)(dst?(u64)(dst-GP(0)):0),(unsigned long long)ly,fmt,sw,sh,fw,fh,enabled,picture!=NULL,slots);
     }}
 
+  /* SWR: the same decoded picture to the same output again: at 240 FPS Dread asks for a VIC job about twice a frame
+     for a 30 FPS video, each one a full colour conversion here (1280x720: 3.6 MB written) that the renderer then
+     re-uploads. Skipped when the output still starts with the bytes the last job wrote. SWR_VIC_NO_SKIP=1 = old */
+  static struct { u8 *out, *cout; u64 cfg, cid_o; u32 cid_f, dims, fmt, boxed, n; u8 head[64]; } vlast[8]; static u32 vnext;
+  static int vskip_off=-1; if(vskip_off<0) vskip_off=getenv("SWR_VIC_NO_SKIP")!=NULL;
+  int vslot=-1; u8* vhead=NULL; int vverify=0;
+  if(picture && picture->cid_owner && !vskip_off){
+    u32 dims=fw*7919u ^ fh*104729u ^ sw*31u ^ sh; u8* cout= lc? iova_ptr(lc,1) : NULL;
+    vhead=iova_ptr(ly,64);   /* the guest buffer: the game maps it at another iova from job to job */
+    if(vhead) for(int i=0;i<8;i++) if(vlast[i].out==vhead){ vslot=i; break; }
+    if(vslot>=0 && vlast[vslot].n && vlast[vslot].cout==cout && vlast[vslot].cfg==cfg && vlast[vslot].cid_o==picture->cid_owner &&
+       vlast[vslot].cid_f==picture->cid_frame && vlast[vslot].dims==dims && vlast[vslot].fmt==fmt && vlast[vslot].boxed==(u32)boxed &&
+       !memcmp(vlast[vslot].head,vhead,64)){
+      static int verify=-1; if(verify<0) verify=getenv("SWR_VIC_SKIP_VERIFY")!=NULL;   /* test: write anyway and compare */
+      static u32 skipped; if(++skipped%1200==0) LOG("video: %u VIC jobs skipped (same picture again)\n",skipped);
+      if(!verify) return;
+      vverify=1; }
+    if(vhead){ if(vslot<0) vslot=(int)(vnext++%8);
+      vlast[vslot].n=0; vlast[vslot].out=vhead; vlast[vslot].cout=cout; vlast[vslot].cfg=cfg; vlast[vslot].cid_o=picture->cid_owner;
+      vlast[vslot].cid_f=picture->cid_frame; vlast[vslot].dims=dims; vlast[vslot].fmt=fmt; vlast[vslot].boxed=(u32)boxed; } }
+#define VIC_NOTE_WRITTEN() do{ if(vslot>=0 && vhead){ memcpy(vlast[vslot].head,vhead,64); vlast[vslot].n=1; } }while(0)
   { static int said; if(said<3){ said++; LOG("video: VIC config %016llx: format %x, %s (block height %u), surface %ux%u, picture %ux%u\n",(unsigned long long)cfg,fmt,blk? "block linear" : "pitch linear",1u<<bh,sw,sh,fw,fh); } }
   if(fmt==0x1F || fmt==0x20 || fmt==0x23 || fmt==0x24){
     u32 pitch=sw*4; u64 lim= blk? (u64)pitch*(((sh+(8u<<bh)-1)/(8u<<bh))*(8u<<bh)) : (u64)pitch*sh;
     u8* py=iova_ptr(ly,lim); if(!py){ py=iova_ptr(ly,(u64)pitch*h); lim=(u64)pitch*h; }
     if(!py){ static int said; if(said<4){ said++; LOG("video: VIC output at iova %llx not mapped\n",(unsigned long long)ly); } return; }
     static u8* row; static u32 rcap; if(rcap<pitch){ row=realloc(row,pitch); rcap=pitch; }
-    int rgb_order=(fmt==0x1F || fmt==0x23);
+    int rgb_order=(fmt==0x1F || fmt==0x23); u8* vsnap= vverify? malloc(lim) : NULL; if(vsnap) memcpy(vsnap,py,lim);
     for(u32 y=0;y<h;y++){
       const u8* Y=fy+(u64)y*fw; const u8* UV=fuv+(u64)(y/2)*fw;
       vic_rgba_row(Y,UV,row,w,rgb_order);
       if(!blk) vic_put(py,(u64)y*pitch,row,w*4,lim);
       else vic_block_row(py,row,w*4,y,pitch,sh,bh,lim); }
     { static int said; if(said<2){ said++; LOG("video: VIC wrote a %ux%u RGBA picture at iova %llx\n",w,h,(unsigned long long)ly); } }
-    video_written(py,lim);
+    if(vsnap){ static u32 vbad, vgood; if(memcmp(vsnap,py,lim)) vbad++; else vgood++; if((vbad+vgood)%600==0 || (vbad && vbad<4)) LOG("video: skip check %u same, %u DIFFERENT\n",vgood,vbad); free(vsnap); }
+    video_written(py,lim); VIC_NOTE_WRITTEN();
     return; }
   /* NV12. pitch linear rows are 256 aligned */
   u32 pitch= blk? sw : (sw+255)&~255u;
@@ -408,7 +431,7 @@ static void vic_execute(u32* r){
   if(pc) for(u32 y=0;y<h/2;y++){ const u8* s=fuv+(u64)y*fw;
     if(!blk) vic_put(pc,(u64)y*pitch,s,w,clim);
     else vic_block_row(pc,s,w,y,pitch,(sh+1)/2,bh,clim); }
-  video_written(py,ylim); if(pc) video_written(pc,clim);
+  video_written(py,ylim); if(pc) video_written(pc,clim); VIC_NOTE_WRITTEN();
   { static int said; if(said<2){ said++; LOG("video: VIC wrote a %ux%u NV12 picture (luma iova %llx, chroma %llx, pitch %u)\n",w,h,(unsigned long long)ly,(unsigned long long)lc,pitch); } } }
 
 /* ------------------------------------------------------------ host1x command stream */

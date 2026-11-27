@@ -375,6 +375,31 @@ static int tex_upload_(Surf* t) {
     SNX_ZONE_VALUE(z_up, t->size);
     g_tex_uploads++;
     g_tex_upload_bytes += t->size;
+    { /* SWR diagnostic: SWR_VK_TEX_TRACE=1 lists the textures loaded most often, every 2000 uploads */
+        static int tr = -1;
+        static struct { u64 gva; u32 w, h, fkey, n; u64 size; } tt[64];
+        if (tr < 0) tr = getenv("SWR_VK_TEX_TRACE") != NULL;
+        if (tr) {
+            int i, j = -1, lo = 0;
+            for (i = 0; i < 64; i++) {
+                if (tt[i].n && tt[i].gva == t->gva && tt[i].w == t->w) { j = i; break; }
+                if (tt[i].n < tt[lo].n) lo = i;
+            }
+            if (j < 0) { j = lo; tt[j].gva = t->gva; tt[j].w = t->w; tt[j].h = t->h; tt[j].fkey = t->fkey; tt[j].size = t->size; tt[j].n = 0; }
+            tt[j].n++;
+            if (g_tex_uploads % 2000 == 0) {
+                for (int k = 0; k < 6; k++) {
+                    int b = 0;
+                    for (i = 1; i < 64; i++) if (tt[i].n > tt[b].n) b = i;
+                    if (!tt[b].n) break;
+                    LOG("vulkan: texture %llx %ux%u fkey %x %llu KB: %u uploads\n", (unsigned long long)tt[b].gva,
+                        tt[b].w, tt[b].h, tt[b].fkey, (unsigned long long)(tt[b].size >> 10), tt[b].n);
+                    tt[b].n = 0;
+                }
+                memset(tt, 0, sizeof tt);
+            }
+        }
+    }
     t->upload_valid = 0;
     t->wgen = vk_surf_gen();      /* even a new texture at a reused address invalidates an old target's copy */
     t->took_drawn = 0;            /* memory's own texels again, until tex_take_drawn copies targets in */
@@ -440,12 +465,153 @@ static u64 mem_hash(u64 gva, u64 size) {
     }
     return h;
 }
+/* SWR: changed rows only. A game texture the CPU rewrites a few rows of every frame (Dread: a 1024x512 RGBA8 one,
+   2 MB) was loaded whole each time: at 240 FPS about 500 MB a second. For a single-level 2D block linear texture of
+   plain texels, each GOB row (8 rows of texels) is hashed; when part of the texture changed, only the GOB rows that
+   differ are staged and deswizzled into the image (the rest of it already holds memory's texels). SWR_VK_NO_ROW_UPLOAD=1
+   = whole uploads as before */
+#define ROWC_N 8
+#define ROWC_MAX 1024u /* GOB rows: up to 8192 rows of texels */
+typedef struct {
+    u32 lbh, gobs_x, ngy, rowb;
+    u64 block, block_row, lsz;
+} RowShape;
+static struct {
+    Surf* s;
+    u64 gva, whole, use;
+    u32 w, h, ngy;
+    u64 h_[ROWC_MAX];
+} g_rowc[ROWC_N];
+static u64 g_rowc_use;
+static int rows_shape(const Surf* t, RowShape* r) {
+    static int off = -1;
+    if (off < 0) off = getenv("SWR_VK_NO_ROW_UPLOAD") != NULL;
+    const VkFmt* f = &t->f;
+    if (off || !t->bl || t->levels != 1 || t->layers != 1 || t->type == VK_IMAGE_VIEW_TYPE_3D ||
+        t->type == VK_IMAGE_VIEW_TYPE_CUBE || t->type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || f->bw != 1 || f->bh != 1 ||
+        f->depth || vk_tc_converts(f) || t->size < (256u << 10))
+        return 0;
+    u32 lbh = 0, lbd = 0;
+    r->lsz = bl_level_size(t->w, t->h, 1, f, t->bh, t->bd, 0, &lbh, &lbd);
+    r->ngy = (t->h + 7) >> 3;
+    if (lbd || r->ngy > ROWC_MAX || r->lsz > t->size) return 0;
+    r->lbh = lbh;
+    r->rowb = t->w * f->bpp;
+    r->gobs_x = (r->rowb + 63) >> 6;
+    r->block = 512ull << lbh;
+    r->block_row = r->gobs_x * r->block;
+    return 1;
+}
+/* GOB row gy's piece in block column gx: 512 bytes at this offset of the level */
+static u64 rows_at(const RowShape* r, u32 gy, u32 gx) {
+    return (gy >> r->lbh) * r->block_row + ((u64)(gy & ((1u << r->lbh) - 1)) << 9) + gx * r->block;
+}
+static void rows_hash(const Surf* t, const RowShape* r, u64* out) {
+    u8 piece[512];
+    const u8* p = __atomic_load_n(&g_own_any, __ATOMIC_ACQUIRE) ? NULL : gmem_ptr(t->gva, t->size);
+    for (u32 gy = 0; gy < r->ngy; gy++) {
+        u64 h = 1469598103934665603ull;
+        for (u32 gx = 0; gx < r->gobs_x; gx++) {
+            u64 o = rows_at(r, gy, gx), n = o >= r->lsz ? 0 : o + 512 <= r->lsz ? 512 : r->lsz - o;
+            if (!n) continue;
+            if (!p) vk_guest_peek(t->gva + o, piece, n);
+            h = snx_fnv_step(h, vk_hash(p ? p + o : piece, n));
+        }
+        out[gy] = h;
+    }
+}
+static int rowc_find(const Surf* t) {
+    for (int i = 0; i < ROWC_N; i++)
+        if (g_rowc[i].s == t && g_rowc[i].gva == t->gva && g_rowc[i].w == t->w && g_rowc[i].h == t->h) return i;
+    return -1;
+}
+/* a whole upload of a texture that changed: its rows' hashes taken before it (memory the game rewrites meanwhile
+   then only costs another upload) and kept for the next change */
+static int tex_upload_noting(Surf* t, u64 whole) {
+    RowShape r;
+    static u64 hs[ROWC_MAX];
+    int rows = rows_shape(t, &r);
+    if (rows) rows_hash(t, &r, hs);
+    if (!tex_upload(t)) return 0;
+    if (!rows) return 1;
+    int i = rowc_find(t);
+    if (i < 0) {
+        i = 0;
+        for (int j = 1; j < ROWC_N; j++)
+            if (g_rowc[j].use < g_rowc[i].use) i = j;
+    }
+    g_rowc[i].s = t;
+    g_rowc[i].gva = t->gva;
+    g_rowc[i].w = t->w;
+    g_rowc[i].h = t->h;
+    g_rowc[i].ngy = r.ngy;
+    g_rowc[i].whole = whole;
+    g_rowc[i].use = ++g_rowc_use;
+    memcpy(g_rowc[i].h_, hs, r.ngy * sizeof hs[0]);
+    return 1;
+}
+/* the GOB rows that changed since the last upload loaded into the image: 1 when done, 0 to load it whole */
+static int rows_update(Surf* t, u64 whole) {
+    RowShape r;
+    int i;
+    if (!t->upload_valid || t->took_drawn || !rows_shape(t, &r) || (i = rowc_find(t)) < 0 || g_rowc[i].whole != t->hash ||
+        g_rowc[i].ngy != r.ngy)
+        return 0;
+    static u64 nh[ROWC_MAX];
+    rows_hash(t, &r, nh);
+    u32 changed = 0;
+    for (u32 gy = 0; gy < r.ngy; gy++) changed += nh[gy] != g_rowc[i].h_[gy];
+    if (!changed || changed * 2 > r.ngy) return 0; /* most of it: a whole upload is as cheap */
+    g_tex_uploads++;
+    g_tex_upload_bytes += (u64)changed * r.gobs_x * 512;
+    t->upload_valid = 0;
+    t->wgen = vk_surf_gen();
+    vk_surf_relist(t);
+    vk_render_end();
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    Upload u = {.cb = cb, .t = t};
+    UpLevel lv = {0, 0, t->w, t->h, 1, r.rowb, t->h, 0};
+    u32 align = bl_lin_align(t->f.bpp);
+    lv.pitch = (r.rowb + align - 1) / align * align;
+    int complete = 1;
+    for (u32 gy = 0; gy < r.ngy && complete; gy++) {
+        if (nh[gy] == g_rowc[i].h_[gy]) continue;
+        VkBuffer staged;
+        u64 staged_at;
+        u8* p = vk_stage(r.gobs_x * 512ull, vk_stage_align(), &staged, &staged_at);
+        if (!p) {
+            complete = 0;
+            break;
+        }
+        for (u32 gx = 0; gx < r.gobs_x; gx++) {
+            u64 o = rows_at(&r, gy, gx), n = o >= r.lsz ? 0 : o + 512 <= r.lsz ? 512 : r.lsz - o;
+            vk_guest_read(t->gva + o, n, p + gx * 512ull, staged, staged_at + gx * 512ull);
+            memset(p + gx * 512ull + n, 0, 512 - n);
+        }
+        u32 y = gy << 3;
+        VkBlMove m = {r.rowb, 8, 0, 0, 0, t->h - y < 8 ? t->h - y : 8, 0, 1, lv.pitch};
+        complete = up_move(&u, &lv, &m, staged, staged_at, 0, y);
+    }
+    complete = up_flush(&u) && complete;
+    t->upload_valid = complete;
+    if (!complete) return 0; /* the whole upload follows */
+    memcpy(g_rowc[i].h_, nh, r.ngy * sizeof nh[0]);
+    g_rowc[i].whole = whole;
+    g_rowc[i].use = ++g_rowc_use;
+    return 1;
+}
 /* the texture's memory hashed again, and loaded again when that changed: 1 if it did */
 static int tex_rehash(Surf* t) {
     t->gw = gpu_mem_generation();
     u64 hh = mem_hash(t->gva, t->size);
     if (hh == t->hash && t->upload_valid) return 0;
-    if (tex_upload(t)) t->hash = hh; /* an incomplete upload keeps the old hash, so the next check retries it */
+    if (rows_update(t, hh)) {
+        t->hash = hh;
+        return 1;
+    }
+    if (tex_upload_noting(t, hh)) t->hash = hh; /* an incomplete upload keeps the old hash, so the next check retries it */
     return 1;
 }
 
