@@ -49,7 +49,7 @@ translated from ARM64 to C once, compiled by a bundled compiler, and runs direct
 
 - The whole game, from your own 2.1.0 copy, on Windows and Linux (Steam Deck included)
 - Frame rates of 60, 90, 120, 144, 240 or unlimited, with cutscenes and loading screens at your frame rate
-- Resolution scaling, 16:10, 21:9 and 32:9 (experimental) with a wider view instead of a stretched one
+- Resolution scaling, 16:10, 21:9 and 32:9 with a wider view (Hor+) instead of a stretched one
 - Two renderers: OpenGL and Native Vulkan
 - TAA, FXAA, NVIDIA DLAA (RTX, downloaded from NVIDIA when you ask for it), sharpening, anisotropic filtering up to
   16x, XeGTAO ambient occlusion, higher shadow resolution, HDR (experimental)
@@ -111,7 +111,7 @@ and the experimental options finished. Left to do, by area:
 | Performance | locked 120 in the heaviest effect scenes, shorter hitches on video starts and first room entries |
 | Stability | AMD OpenGL driver crash, a few crashes in specific places |
 | High frame rates | slow-motion sequences, cutscene audio sync, quick-time events |
-| Graphics | Intel / Mesa glitches, ultrawide and HDR out of experimental |
+| Graphics | Intel / Mesa glitches, HDR out of experimental |
 | Controls | Switch 2 Pro Controller on Linux |
 | Steam Deck | Game Mode fully checked, TAA / AO cost |
 | 0.9 | Android and macOS ports |

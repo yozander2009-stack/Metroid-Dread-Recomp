@@ -544,10 +544,10 @@ static std::vector<Opt> build_options() {
     // Display
     B("docked", "Display", "Display", "Docked (TV) mode", LIVE_RESTART, "1", "Docked: the game renders 1600\xC3\x97" "900. Handheld: 1280\xC3\x97" "720.");
     B("fullscreen", "Display", "Display", "Fullscreen", LIVE_YES, "1", "F11 or Alt+Enter also switches it.");
-    C("aspect", "Display", "Display", "Picture shape", LIVE_RESTART, "16:9", {{"16:9", "16:9"}, {"21:9", "21:9 ultrawide (experimental)"}, {"32:9", "32:9 super-ultrawide (experimental)"}, {"16:10", "16:10"}},
+    C("aspect", "Display", "Display", "Picture shape", LIVE_RESTART, "16:9", {{"16:9", "16:9"}, {"21:9", "21:9 ultrawide"}, {"32:9", "32:9 super-ultrawide"}, {"16:10", "16:10"}},
       "21:9 is theboy181's patch (commissioned by Nikorasu081); 16:10 uses the same spot for 1440\xC3\x97" "900 (Steam Deck, 1920\xC3\x97" "1200). "
-      "They need Docked mode and may cut off a little in videos and some menus. 21:9 and 32:9 are experimental: the game "
-      "only draws the room you are in, so the extra width can show black past a room's edge.");
+      "They need Docked mode and may cut off a little in some menus. 21:9 and 32:9 show more to the sides (Hor+), never a "
+      "stretched or cropped picture; past a room's edge the game draws nothing, so the extra width can show black there.");
     B("videos_16x9", "Display", "Display", "Story videos at 16:9", LIVE_YES, "1",
       "With a 21:9, 32:9 or 16:10 picture the prologue, flashback and ending videos keep their 16:9 shape, with black bars. "
       "Off: they fill the screen and lose their top and bottom (the sides at 16:10).");

@@ -65,7 +65,7 @@ Legend: ✅ done · 🔧 fixed on `main`, in the next release · ⬜ left to do 
 | ⬜ | Flash Shift black block on Intel UHD / GT 1030 ([#46]) |
 | 🔧 | Background computer screens flickering between two videos ([#74]) |
 | ⬜ | Door and background glitches ([#47], [#33]) |
-| ⬜ | 21:9 and 32:9 out of experimental ([#19]) |
+| 🔧 | 21:9 and 32:9 out of experimental, Hor+ ([#19]) |
 | ⬜ | HDR out of experimental ([#8]) |
 | ⬜ | TAA and ambient occlusion cheap enough for the Steam Deck |
 

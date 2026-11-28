@@ -57,8 +57,8 @@ you play; the rest are saved and reused. On OpenGL keep **Build all shaders befo
 Raise **Resolution** and turn on **Sharpening** (Graphics). TAA also adds light sharpening.
 
 **Ultrawide?**
-16:10 is fully supported (Steam Deck). 21:9 and 32:9 are experimental: the game shows more to the sides, but
-some rooms end at the edge of the screen ([#19]).
+16:10, 21:9 and 32:9 are supported (Display > Picture shape). The wider shapes show more to the sides (Hor+), but
+some rooms end at the edge of the screen, where the extra width is black ([#19]).
 
 **HDR?**
 Experimental, Native Vulkan only (Graphics > HDR).
@@ -145,7 +145,7 @@ kept as `Metroid Dread.previous.log`.
 - AMD OpenGL driver crash: use Native Vulkan ([#12], [#39], [#49]).
 - Some scripted moments above 60 FPS ([#85], [#81], [#21]).
 - Flash Shift shows a black block on some Intel UHD and GT 1030 GPUs ([#46]).
-- 21:9 and 32:9 are experimental ([#19]).
+- At 21:9 and 32:9 some rooms end before the edge of the screen ([#19]).
 - TAA and ambient occlusion are expensive on the Steam Deck.
 
 [#12]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/12
