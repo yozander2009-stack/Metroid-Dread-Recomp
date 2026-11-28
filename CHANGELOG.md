@@ -2,7 +2,7 @@
 
 Full notes for each version are on the [releases page](https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases).
 
-## 0.6.0 (not released yet)
+## 0.6.0 (2026-11-27)
 
 ### New
 - **Randovania 2.1.0 single-player seeds** ([#77]): import through Mods & Texture Packs, pick a seed on the Play screen
