@@ -2,9 +2,14 @@
 
 Full notes for each version are on the [releases page](https://github.com/yozander2009-stack/Metroid-Dread-Recomp/releases).
 
-## Unreleased (on `main`)
+## 0.6.0 (not released yet)
 
 ### New
+- **Randovania 2.1.0 single-player seeds** ([#77]): import through Mods & Texture Packs, pick a seed on the Play screen
+  or in the in-game menu (restarts the game); each seed has its own saves. Patch definitions from Open Dread Rando.
+- **Resolution presets** 720p to 8K, plus SCREEN; internal resolution up to 9.6x, capped to the GPU's memory above 4x.
+- **30 and 40 FPS caps** for handhelds ([#39]).
+- **Story videos keep their 16:9 shape** at 21:9, 32:9 and 16:10 ([#88]).
 - **Cheats page** on the Play screen: built-in cheats (infinite energy and ammo, E.M.M.I. counter always succeeds,
   moon jump), Atmosphere cheat files with what each one can do, import from a file or folder ([#70]).
 - Infinite energy and ammo show the infinity sign on the HUD.
@@ -32,6 +37,18 @@ Full notes for each version are on the [releases page](https://github.com/yozand
   at 60, and the fight holds 120 / 240 FPS (it dropped to 75-100).
 - Native Vulkan on GPUs without dynamic vertex input (AMD's driver): the game's pipeline list now builds the pipelines
   draws use at the start, so far fewer stutters the first time a scene appears.
+- Native Vulkan on AMD's Windows driver: dynamic vertex input off by default (black picture on an RX 6700 and AMD
+  handhelds), and no crash when TAA starts ([#68]).
+- A renamed copy of the game EXE uses the game's own settings, saves and game code ([#68]).
+- Controller vibration no longer buzzes forever after the first Omega Blaster, and stops when the game closes or is in
+  the background; holding a button fast-forwards videos at 2x at any frame rate ([#93]).
+- Title screen: releasing A as the intro ends no longer leaves the game stuck.
+- Hologram screens show their own video ([#74]).
+- Esc reopens the in-game menu after it was closed with Esc ([#91]).
+- Setup works from a folder with accented letters ([#89]).
+- Fast loading waits for a loaded save on Windows too (it could stall the title).
+- Fewer texture re-uploads and video conversions at high frame rates.
+- Linux: crash logs name the runtime thread and list its calls ([#45]).
 
 ## 0.5.10 (2026-11-19)
 - AMD Radeon cards start on Native Vulkan; Native Vulkan fixes for AMD ([#68], [#69]).
@@ -81,6 +98,7 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 [#16]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/16
 [#17]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/17
 [#20]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/20
+[#21]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/21
 [#22]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/22
 [#25]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/25
 [#27]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/27
@@ -92,7 +110,9 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 [#35]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/35
 [#36]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/36
 [#38]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/38
+[#39]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/39
 [#40]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/40
+[#45]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/45
 [#48]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/48
 [#50]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/50
 [#52]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/52
@@ -109,10 +129,15 @@ Full notes for each version are on the [releases page](https://github.com/yozand
 [#70]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/70
 [#72]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/72
 [#73]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/73
+[#74]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/74
 [#75]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/75
+[#77]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/77
 [#78]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/78
 [#79]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/79
-[#83]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/83
-[#21]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/21
 [#80]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/80
+[#83]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/83
 [#85]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/85
+[#88]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/88
+[#89]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/89
+[#91]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/91
+[#93]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/93

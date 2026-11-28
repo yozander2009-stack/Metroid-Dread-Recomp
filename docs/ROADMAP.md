@@ -46,6 +46,7 @@ Legend: ✅ done · 🔧 fixed on `main`, in the next release · ⬜ left to do 
 | | |
 |---|---|
 | ✅ | Gameplay at 90 / 120 / 144 / 240 / unlimited |
+| 🔧 | 30 and 40 FPS caps for handhelds ([#39]) |
 | ✅ | Cutscenes and loading screens at the frame-rate limit |
 | ✅ | Map panning and hit pauses at any frame rate |
 | ⬜ | Slow-motion sequences above 60 ([#85]): currently paced at 60, should run at the full rate |
@@ -58,10 +59,12 @@ Legend: ✅ done · 🔧 fixed on `main`, in the next release · ⬜ left to do 
 |---|---|
 | ✅ | OpenGL and Native Vulkan renderers |
 | ✅ | Resolution scaling, 16:10, anisotropic filtering, sharpening, shadow resolution, bloom options |
+| 🔧 | Resolution presets up to 8K, story videos kept at 16:9 on wide screens ([#88]) |
 | ✅ | NVIDIA DLAA |
 | 🔧 | TAA and ambient occlusion without flicker or lines ([#5]) |
 | ⬜ | Flash Shift black block on Intel UHD / GT 1030 ([#46]) |
-| ⬜ | Door and background-screen glitches ([#47], [#74], [#33]) |
+| 🔧 | Background computer screens flickering between two videos ([#74]) |
+| ⬜ | Door and background glitches ([#47], [#33]) |
 | ⬜ | 21:9 and 32:9 out of experimental ([#19]) |
 | ⬜ | HDR out of experimental ([#8]) |
 | ⬜ | TAA and ambient occlusion cheap enough for the Steam Deck |
@@ -90,6 +93,7 @@ Legend: ✅ done · 🔧 fixed on `main`, in the next release · ⬜ left to do 
 | ✅ | Mods and texture packs, Atmosphere cheats, amiibo, 5.1 audio |
 | 🔧 | Built-in cheats that work on the recompiled code, incl. infinite Aeion and a free camera ([#70], [#37]) |
 | 🔧 | In-game menu reopening with Esc ([#78]) |
+| 🔧 | Randovania 2.1.0 single-player seeds ([#77]) |
 | ⬜ | Portuguese translation together with button-icon packs ([#41]) |
 
 ## Android and macOS (0.9)
@@ -112,7 +116,6 @@ Started once Windows and Linux are done, so both ports begin from finished code.
 | | |
 |---|---|
 | 💭 | Model and higher-resolution texture packs (work started) |
-| 💭 | Randovania / randomizer support ([#77]) |
 | 💭 | More languages ([#76]) |
 | 💭 | Game version 1.0.0 ([#51]) |
 | 💭 | More graphics upgrades ([#9]), stereoscopic 3D ([#82]) |
@@ -160,3 +163,4 @@ Something missing? [Open an issue](https://github.com/yozander2009-stack/Metroid
 [#83]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/83
 [#85]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/85
 [#86]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/86
+[#88]: https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/88
